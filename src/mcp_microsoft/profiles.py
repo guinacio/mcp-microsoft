@@ -1,0 +1,435 @@
+"""
+Multi-account profile manager for mcp-microsoft.
+
+Manages named profiles, each with its own Azure App Registration (client_id),
+tenant, MSAL token cache, and optional scope overrides.  Provides profile-aware
+token acquisition and GraphClient instances.
+
+Backward compatible: when no profiles.json exists, a virtual "default" profile
+is created from the MS365_CLIENT_ID / OUTLOOK_CLIENT_ID environment variable
+using the existing msal_token_cache.json cache file.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, ClassVar
+
+import msal
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Default scopes (importable by auth.py facade)
+# ---------------------------------------------------------------------------
+
+DEFAULT_SCOPES: list[str] = [
+    "Mail.ReadWrite",
+    "Mail.Send",
+    "Calendars.ReadWrite",
+    "Files.ReadWrite",
+    "offline_access",
+]
+
+# ---------------------------------------------------------------------------
+# Profile name validation
+# ---------------------------------------------------------------------------
+
+_VALID_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_name(name: str) -> None:
+    if not name or not _VALID_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid profile name {name!r}. "
+            "Use only letters, digits, hyphens, and underscores."
+        )
+
+
+# ---------------------------------------------------------------------------
+# ProfileConfig
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProfileConfig:
+    """Configuration for a single Microsoft 365 profile."""
+
+    name: str
+    client_id: str
+    tenant_id: str = "common"
+    scopes: list[str] | None = None  # None = use DEFAULT_SCOPES
+    cache_path: Path = field(default_factory=lambda: Path())
+
+    @property
+    def effective_scopes(self) -> list[str]:
+        return self.scopes if self.scopes else DEFAULT_SCOPES
+
+    @property
+    def authority(self) -> str:
+        return f"https://login.microsoftonline.com/{self.tenant_id}"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for profiles.json (excludes computed fields)."""
+        d: dict[str, Any] = {
+            "client_id": self.client_id,
+            "tenant_id": self.tenant_id,
+        }
+        if self.scopes is not None:
+            d["scopes"] = self.scopes
+        return d
+
+
+# ---------------------------------------------------------------------------
+# ProfileManager (singleton)
+# ---------------------------------------------------------------------------
+
+
+class ProfileManager:
+    """
+    Manages multi-account profiles, MSAL authentication, and GraphClient
+    instances keyed by profile name.
+    """
+
+    _instance: ClassVar[ProfileManager | None] = None
+
+    def __init__(self) -> None:
+        self._profiles: dict[str, ProfileConfig] = {}
+        self._default_profile: str = ""
+        self._base_dir: Path = self._resolve_base_dir()
+        self._msal_apps: dict[str, msal.PublicClientApplication] = {}
+        # GraphClient cache — lazy-populated
+        self._graph_clients: dict[str, Any] = {}
+        self._legacy_mode: bool = False
+        self._load()
+
+    # --- Singleton access ------------------------------------------------
+
+    @classmethod
+    def get(cls) -> ProfileManager:
+        """Return the singleton instance, creating it on first call."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the singleton (useful for testing)."""
+        cls._instance = None
+
+    # --- Base directory ---------------------------------------------------
+
+    @staticmethod
+    def _resolve_base_dir() -> Path:
+        creds_dir = (
+            os.environ.get("MS365_CREDENTIALS_DIR")
+            or os.environ.get("OUTLOOK_CREDENTIALS_DIR")
+            or ""
+        )
+        if creds_dir:
+            base = Path(creds_dir)
+        else:
+            base = Path.home() / ".sentinel" / "microsoft-mcp"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    # --- Loading / saving ------------------------------------------------
+
+    @property
+    def _config_path(self) -> Path:
+        return self._base_dir / "profiles.json"
+
+    def _load(self) -> None:
+        """Load from profiles.json or fall back to env vars."""
+        if self._config_path.exists():
+            self._load_from_file()
+        else:
+            self._build_legacy_profile()
+
+    def _load_from_file(self) -> None:
+        """Parse profiles.json."""
+        try:
+            data = json.loads(self._config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise RuntimeError(
+                f"Failed to read {self._config_path}: {exc}"
+            ) from exc
+
+        raw_profiles = data.get("profiles", {})
+        if not raw_profiles:
+            raise RuntimeError(
+                f"profiles.json at {self._config_path} has no profiles defined."
+            )
+
+        for name, cfg in raw_profiles.items():
+            _validate_name(name)
+            self._profiles[name] = ProfileConfig(
+                name=name,
+                client_id=cfg["client_id"],
+                tenant_id=cfg.get("tenant_id", "common"),
+                scopes=cfg.get("scopes"),
+                cache_path=self._base_dir / f"msal_cache_{name}.json",
+            )
+
+        self._default_profile = data.get("default_profile", "")
+        if self._default_profile not in self._profiles:
+            # Fall back to first profile
+            self._default_profile = next(iter(self._profiles))
+
+    def _build_legacy_profile(self) -> None:
+        """Create an implicit 'default' profile from env vars (backward compat).
+
+        If no env var is set either, leave _profiles empty so that
+        add_ms_profile() can bootstrap the first profile at runtime.
+        """
+        client_id = (
+            os.environ.get("MS365_CLIENT_ID")
+            or os.environ.get("OUTLOOK_CLIENT_ID")
+            or ""
+        )
+        if not client_id:
+            # No config at all — server starts with zero profiles.
+            # The user must call add_ms_profile() to create the first one.
+            return
+        self._profiles["default"] = ProfileConfig(
+            name="default",
+            client_id=client_id,
+            tenant_id="common",
+            # Use the exact legacy cache path for seamless migration
+            cache_path=self._base_dir / "msal_token_cache.json",
+        )
+        self._default_profile = "default"
+        self._legacy_mode = True
+
+    def _save(self) -> None:
+        """Persist current profiles to profiles.json.
+
+        On the first save in legacy mode, migrate the legacy cache file
+        (msal_token_cache.json) to the new naming convention
+        (msal_cache_default.json) so tokens survive the transition.
+        """
+        # Migrate legacy cache before writing profiles.json
+        if self._legacy_mode and "default" in self._profiles:
+            legacy = self._profiles["default"]
+            old_cache = self._base_dir / "msal_token_cache.json"
+            new_cache = self._base_dir / "msal_cache_default.json"
+            if old_cache.exists() and not new_cache.exists():
+                try:
+                    new_cache.write_bytes(old_cache.read_bytes())
+                except OSError:
+                    pass
+            legacy.cache_path = new_cache
+
+        data = {
+            "default_profile": self._default_profile,
+            "profiles": {
+                name: cfg.to_dict() for name, cfg in self._profiles.items()
+            },
+        }
+        self._config_path.write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
+        self._legacy_mode = False
+
+    # --- Profile resolution -----------------------------------------------
+
+    def resolve_profile(self, profile: str | None = None) -> ProfileConfig:
+        """
+        Resolve a profile name to its config.
+
+        None / "" -> default profile.  Raises ValueError if not found.
+        """
+        if not self._profiles:
+            raise ValueError(
+                "No profiles configured. Use add_ms_profile to create one, "
+                "or set the MS365_CLIENT_ID environment variable."
+            )
+        name = profile if profile else self._default_profile
+        if name not in self._profiles:
+            available = ", ".join(sorted(self._profiles.keys()))
+            raise ValueError(
+                f"Unknown profile {name!r}. Available profiles: {available}"
+            )
+        return self._profiles[name]
+
+    # --- MSAL auth --------------------------------------------------------
+
+    def _get_msal_app(self, cfg: ProfileConfig) -> msal.PublicClientApplication:
+        """Build or return a cached MSAL PublicClientApplication for a profile."""
+        if cfg.name in self._msal_apps:
+            return self._msal_apps[cfg.name]
+
+        cache = msal.SerializableTokenCache()
+        if cfg.cache_path.exists():
+            try:
+                cache.deserialize(cfg.cache_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass  # corrupt cache — fall through to interactive auth
+
+        app = msal.PublicClientApplication(
+            client_id=cfg.client_id,
+            authority=cfg.authority,
+            token_cache=cache,
+        )
+        self._msal_apps[cfg.name] = app
+        return app
+
+    def _save_cache(self, cfg: ProfileConfig, app: msal.PublicClientApplication) -> None:
+        """Persist the MSAL token cache for a profile if it has changed."""
+        cache = app.token_cache  # type: ignore[attr-defined]
+        if cache.has_state_changed:
+            try:
+                cfg.cache_path.write_text(cache.serialize(), encoding="utf-8")
+            except OSError:
+                pass  # non-fatal — token still works for this session
+
+    def get_token(self, profile: str | None = None) -> str:
+        """Acquire a valid access token for the given profile."""
+        cfg = self.resolve_profile(profile)
+        app = self._get_msal_app(cfg)
+        scopes = cfg.effective_scopes
+
+        # Try silent flow
+        accounts = app.get_accounts()
+        result = None
+        if accounts:
+            result = app.acquire_token_silent(scopes, account=accounts[0])
+
+        # Fall back to interactive
+        if not result:
+            result = app.acquire_token_interactive(scopes=scopes)
+
+        if "access_token" not in result:
+            error = result.get("error", "unknown_error")
+            description = result.get("error_description", "No description available.")
+
+            if "AADSTS65001" in description:
+                raise RuntimeError(
+                    f"Admin consent required for profile {cfg.name!r}: your tenant "
+                    f"administrator must pre-approve this application. Share this URL "
+                    f"with your IT admin:\n"
+                    f"https://login.microsoftonline.com/common/adminconsent"
+                    f"?client_id={cfg.client_id}\n"
+                    f"Original error: {description}"
+                )
+
+            raise RuntimeError(
+                f"Token acquisition failed for profile {cfg.name!r} "
+                f"[{error}]: {description}"
+            )
+
+        self._save_cache(cfg, app)
+        return result["access_token"]
+
+    def get_headers(self, profile: str | None = None) -> dict[str, str]:
+        """Return authenticated HTTP headers for the given profile."""
+        token = self.get_token(profile)
+        return {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+    # --- GraphClient access -----------------------------------------------
+
+    def get_graph(self, profile: str | None = None) -> Any:
+        """
+        Return a GraphClient bound to the resolved profile.
+
+        Instances are cached per profile name for reuse.
+        Lazy import to avoid circular dependency with graph.py.
+        """
+        cfg = self.resolve_profile(profile)
+        if cfg.name not in self._graph_clients:
+            from mcp_microsoft.graph import GraphClient
+
+            self._graph_clients[cfg.name] = GraphClient(profile=cfg.name)
+        return self._graph_clients[cfg.name]
+
+    # --- Profile CRUD (used by management tools) --------------------------
+
+    @property
+    def default_profile_name(self) -> str:
+        return self._default_profile
+
+    @property
+    def profiles(self) -> dict[str, ProfileConfig]:
+        return dict(self._profiles)
+
+    def add_profile(
+        self,
+        name: str,
+        client_id: str,
+        tenant_id: str = "common",
+        scopes: list[str] | None = None,
+        set_as_default: bool = False,
+    ) -> ProfileConfig:
+        """Add a new profile and persist to profiles.json."""
+        _validate_name(name)
+        if name in self._profiles:
+            raise ValueError(f"Profile {name!r} already exists.")
+        if not client_id or not client_id.strip():
+            raise ValueError("client_id is required and cannot be empty.")
+        if not tenant_id or not tenant_id.strip():
+            raise ValueError("tenant_id is required and cannot be empty.")
+
+        cfg = ProfileConfig(
+            name=name,
+            client_id=client_id.strip(),
+            tenant_id=tenant_id.strip(),
+            scopes=scopes,
+            cache_path=self._base_dir / f"msal_cache_{name}.json",
+        )
+        self._profiles[name] = cfg
+
+        # If this is the first profile, make it the default
+        if set_as_default or not self._default_profile:
+            self._default_profile = name
+
+        self._save()
+        return cfg
+
+    def remove_profile(self, name: str) -> None:
+        """Remove a profile and its cached tokens."""
+        if name not in self._profiles:
+            raise ValueError(f"Profile {name!r} not found.")
+        if len(self._profiles) <= 1:
+            raise ValueError("Cannot remove the last remaining profile.")
+
+        cfg = self._profiles.pop(name)
+        self._msal_apps.pop(name, None)
+        self._graph_clients.pop(name, None)
+
+        # Remove token cache file
+        if cfg.cache_path.exists():
+            try:
+                cfg.cache_path.unlink()
+            except OSError:
+                pass
+
+        # If we removed the default, pick the first remaining
+        if self._default_profile == name:
+            self._default_profile = next(iter(self._profiles))
+
+        self._save()
+
+    def set_default(self, name: str) -> None:
+        """Change the default profile."""
+        if name not in self._profiles:
+            raise ValueError(f"Profile {name!r} not found.")
+        self._default_profile = name
+        self._save()
+
+    def is_authenticated(self, profile: str | None = None) -> bool:
+        """Check if a profile has cached tokens (without triggering interactive auth)."""
+        cfg = self.resolve_profile(profile)
+        app = self._get_msal_app(cfg)
+        accounts = app.get_accounts()
+        if not accounts:
+            return False
+        result = app.acquire_token_silent(cfg.effective_scopes, account=accounts[0])
+        return result is not None and "access_token" in result
