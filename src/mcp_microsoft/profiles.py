@@ -5,9 +5,8 @@ Manages named profiles, each with its own Azure App Registration (client_id),
 tenant, MSAL token cache, and optional scope overrides.  Provides profile-aware
 token acquisition and GraphClient instances.
 
-Backward compatible: when no profiles.json exists, a virtual "default" profile
-is created from the MS365_CLIENT_ID / OUTLOOK_CLIENT_ID environment variable
-using the existing msal_token_cache.json cache file.
+Profiles are stored in profiles.json.  When no profiles exist, the server starts
+with zero profiles and the user must call add_ms_profile() to create the first one.
 """
 
 from __future__ import annotations
@@ -20,9 +19,6 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import msal
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Default scopes (importable by auth.py facade)
@@ -103,9 +99,7 @@ class ProfileManager:
         self._default_profile: str = ""
         self._base_dir: Path = self._resolve_base_dir()
         self._msal_apps: dict[str, msal.PublicClientApplication] = {}
-        # GraphClient cache — lazy-populated
         self._graph_clients: dict[str, Any] = {}
-        self._legacy_mode: bool = False
         self._load()
 
     # --- Singleton access ------------------------------------------------
@@ -126,11 +120,7 @@ class ProfileManager:
 
     @staticmethod
     def _resolve_base_dir() -> Path:
-        creds_dir = (
-            os.environ.get("MS365_CREDENTIALS_DIR")
-            or os.environ.get("OUTLOOK_CREDENTIALS_DIR")
-            or ""
-        )
+        creds_dir = os.environ.get("MS365_CREDENTIALS_DIR", "")
         if creds_dir:
             base = Path(creds_dir)
         else:
@@ -145,11 +135,9 @@ class ProfileManager:
         return self._base_dir / "profiles.json"
 
     def _load(self) -> None:
-        """Load from profiles.json or fall back to env vars."""
+        """Load profiles from profiles.json if it exists."""
         if self._config_path.exists():
             self._load_from_file()
-        else:
-            self._build_legacy_profile()
 
     def _load_from_file(self) -> None:
         """Parse profiles.json."""
@@ -181,50 +169,8 @@ class ProfileManager:
             # Fall back to first profile
             self._default_profile = next(iter(self._profiles))
 
-    def _build_legacy_profile(self) -> None:
-        """Create an implicit 'default' profile from env vars (backward compat).
-
-        If no env var is set either, leave _profiles empty so that
-        add_ms_profile() can bootstrap the first profile at runtime.
-        """
-        client_id = (
-            os.environ.get("MS365_CLIENT_ID")
-            or os.environ.get("OUTLOOK_CLIENT_ID")
-            or ""
-        )
-        if not client_id:
-            # No config at all — server starts with zero profiles.
-            # The user must call add_ms_profile() to create the first one.
-            return
-        self._profiles["default"] = ProfileConfig(
-            name="default",
-            client_id=client_id,
-            tenant_id="common",
-            # Use the exact legacy cache path for seamless migration
-            cache_path=self._base_dir / "msal_token_cache.json",
-        )
-        self._default_profile = "default"
-        self._legacy_mode = True
-
     def _save(self) -> None:
-        """Persist current profiles to profiles.json.
-
-        On the first save in legacy mode, migrate the legacy cache file
-        (msal_token_cache.json) to the new naming convention
-        (msal_cache_default.json) so tokens survive the transition.
-        """
-        # Migrate legacy cache before writing profiles.json
-        if self._legacy_mode and "default" in self._profiles:
-            legacy = self._profiles["default"]
-            old_cache = self._base_dir / "msal_token_cache.json"
-            new_cache = self._base_dir / "msal_cache_default.json"
-            if old_cache.exists() and not new_cache.exists():
-                try:
-                    new_cache.write_bytes(old_cache.read_bytes())
-                except OSError:
-                    pass
-            legacy.cache_path = new_cache
-
+        """Persist current profiles to profiles.json."""
         data = {
             "default_profile": self._default_profile,
             "profiles": {
@@ -234,7 +180,6 @@ class ProfileManager:
         self._config_path.write_text(
             json.dumps(data, indent=2) + "\n", encoding="utf-8"
         )
-        self._legacy_mode = False
 
     # --- Profile resolution -----------------------------------------------
 
@@ -246,8 +191,7 @@ class ProfileManager:
         """
         if not self._profiles:
             raise ValueError(
-                "No profiles configured. Use add_ms_profile to create one, "
-                "or set the MS365_CLIENT_ID environment variable."
+                "No profiles configured. Use add_ms_profile to create one."
             )
         name = profile if profile else self._default_profile
         if name not in self._profiles:

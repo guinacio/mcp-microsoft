@@ -212,7 +212,3 @@ def get_graph(profile: str | None = None) -> GraphClient:
     from mcp_microsoft.profiles import ProfileManager
 
     return ProfileManager.get().get_graph(profile)
-
-
-# Module-level singleton for backward compatibility (default profile)
-graph = GraphClient()
