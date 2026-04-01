@@ -42,6 +42,19 @@ from mcp_microsoft.tools import calendar  # noqa: E402, F401
 # OneDrive tools
 from mcp_microsoft.tools import onedrive  # noqa: E402, F401
 
+# SharePoint tools — enabled by default (first run / work accounts);
+# disabled only when ALL configured profiles use the "consumers" tenant.
+try:
+    from mcp_microsoft.profiles import ProfileManager as _PM
+    _sp_profiles = _PM.get()._profiles
+    if not _sp_profiles or any(
+        cfg.tenant_id != "consumers"
+        for cfg in _sp_profiles.values()
+    ):
+        from mcp_microsoft.tools import sharepoint  # noqa: E402, F401
+except Exception:
+    pass  # Startup issue — SharePoint tools skipped
+
 # Profile management tools
 from mcp_microsoft.tools import profiles  # noqa: E402, F401
 

@@ -29,7 +29,10 @@ DEFAULT_SCOPES: list[str] = [
     "Mail.Send",
     "Calendars.ReadWrite",
     "Files.ReadWrite",
-    "offline_access",
+]
+
+SHAREPOINT_SCOPES: list[str] = [
+    "Sites.ReadWrite.All",
 ]
 
 # ---------------------------------------------------------------------------
@@ -64,7 +67,12 @@ class ProfileConfig:
 
     @property
     def effective_scopes(self) -> list[str]:
-        return self.scopes if self.scopes else DEFAULT_SCOPES
+        if self.scopes:
+            return self.scopes
+        base = list(DEFAULT_SCOPES)
+        if self.tenant_id != "consumers":
+            base.extend(SHAREPOINT_SCOPES)
+        return base
 
     @property
     def authority(self) -> str:
@@ -124,7 +132,7 @@ class ProfileManager:
         if creds_dir:
             base = Path(creds_dir)
         else:
-            base = Path.home() / ".sentinel" / "microsoft-mcp"
+            base = Path.home() / ".microsoft-mcp"
         base.mkdir(parents=True, exist_ok=True)
         return base
 
@@ -135,9 +143,11 @@ class ProfileManager:
         return self._base_dir / "profiles.json"
 
     def _load(self) -> None:
-        """Load profiles from profiles.json if it exists."""
+        """Load profiles from profiles.json, or bootstrap from env vars."""
         if self._config_path.exists():
             self._load_from_file()
+        else:
+            self._bootstrap_from_env()
 
     def _load_from_file(self) -> None:
         """Parse profiles.json."""
@@ -168,6 +178,26 @@ class ProfileManager:
         if self._default_profile not in self._profiles:
             # Fall back to first profile
             self._default_profile = next(iter(self._profiles))
+
+    def _bootstrap_from_env(self) -> None:
+        """Auto-create a 'default' profile from env vars (set by MCPB user_config).
+
+        If MS365_CLIENT_ID is set, creates and persists a default profile so the
+        user is ready to authenticate immediately. If not set, the server starts
+        with zero profiles — the user must call add_ms_profile().
+        """
+        client_id = os.environ.get("MS365_CLIENT_ID", "").strip()
+        if not client_id:
+            return
+        tenant_id = os.environ.get("MS365_TENANT_ID", "common").strip() or "common"
+        self._profiles["default"] = ProfileConfig(
+            name="default",
+            client_id=client_id,
+            tenant_id=tenant_id,
+            cache_path=self._base_dir / "msal_cache_default.json",
+        )
+        self._default_profile = "default"
+        self._save()
 
     def _save(self) -> None:
         """Persist current profiles to profiles.json."""

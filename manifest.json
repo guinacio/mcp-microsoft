@@ -1,0 +1,129 @@
+{
+  "manifest_version": "0.4",
+  "name": "mcp-microsoft",
+  "display_name": "Microsoft 365",
+  "version": "0.4.0",
+  "description": "Mail, Calendar, OneDrive, and SharePoint via Microsoft Graph API for personal and enterprise accounts with multi-profile support",
+  "long_description": "Full Microsoft 365 integration for Claude Desktop. Manage emails, drafts, calendar events, OneDrive files, and SharePoint sites across multiple accounts (personal Outlook.com/Live and enterprise Azure AD/Entra). Supports multi-profile authentication so you can switch between work and personal accounts seamlessly.\n\n**56 tools** covering:\n- **Mail**: Read, send, reply, forward, search, move, and manage emails\n- **Drafts**: Create, update, and send draft messages\n- **Calendar**: Events, scheduling, free/busy lookups, and meeting time suggestions\n- **OneDrive**: Browse, upload, download, search, and manage files\n- **SharePoint**: Browse sites, document libraries, upload/download files, and manage SharePoint lists (work accounts only)\n- **Profiles**: Add and switch between multiple Microsoft 365 accounts",
+  "author": {
+    "name": "Guilherme Inacio",
+    "email": "gsilvainacio@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/guilhermeinacio/mcp-microsoft.git"
+  },
+  "server": {
+    "type": "uv",
+    "entry_point": "src/mcp_microsoft/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": ["run", "--directory", "${__dirname}", "mcp-microsoft"],
+      "env": {
+        "MS365_CLIENT_ID": "${user_config.client_id}",
+        "MS365_TENANT_ID": "${user_config.tenant_id}",
+        "MS365_CREDENTIALS_DIR": "${user_config.credentials_dir}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "list_emails", "description": "List emails from a mail folder" },
+    { "name": "read_email", "description": "Fetch a full email message by ID" },
+    { "name": "search_emails", "description": "Search messages using Graph KQL $search syntax" },
+    { "name": "send_email", "description": "Send a new email message" },
+    { "name": "reply_email", "description": "Reply to an existing email message" },
+    { "name": "forward_email", "description": "Forward an email to one or more recipients" },
+    { "name": "mark_as_read", "description": "Mark a message as read" },
+    { "name": "mark_as_unread", "description": "Mark a message as unread" },
+    { "name": "move_email", "description": "Move a message to a different mail folder" },
+    { "name": "trash_email", "description": "Move a message to Deleted Items (soft delete)" },
+    { "name": "delete_email", "description": "Permanently delete a message (irreversible)" },
+    { "name": "create_draft", "description": "Create a new draft message without sending" },
+    { "name": "list_drafts", "description": "List draft messages from the Drafts folder" },
+    { "name": "get_draft", "description": "Fetch a draft message by ID" },
+    { "name": "update_draft", "description": "Update an existing draft message" },
+    { "name": "send_draft", "description": "Send an existing draft message" },
+    { "name": "list_folders", "description": "List mail folders in the mailbox" },
+    { "name": "create_folder", "description": "Create a new mail folder" },
+    { "name": "delete_folder", "description": "Delete a mail folder and all its contents" },
+    { "name": "list_attachments", "description": "List all attachments on an email message" },
+    { "name": "download_attachment", "description": "Download an email attachment to disk or as base64" },
+    { "name": "list_calendars", "description": "List all calendars in the user's mailbox" },
+    { "name": "list_events", "description": "List events from a calendar" },
+    { "name": "list_upcoming_events", "description": "List upcoming events with recurring instance expansion" },
+    { "name": "get_event", "description": "Fetch a calendar event by ID with full details" },
+    { "name": "create_event", "description": "Create a new calendar event" },
+    { "name": "update_event", "description": "Update an existing calendar event" },
+    { "name": "delete_event", "description": "Delete a calendar event" },
+    { "name": "rsvp_event", "description": "Respond to a calendar event invitation" },
+    { "name": "get_free_busy", "description": "Check free/busy availability for one or more people" },
+    { "name": "find_meeting_times", "description": "Find available meeting time suggestions for attendees" },
+    { "name": "list_drive_items", "description": "List files and folders in OneDrive" },
+    { "name": "get_drive_item", "description": "Get metadata for a specific OneDrive item" },
+    { "name": "search_drive", "description": "Search for files and folders in OneDrive" },
+    { "name": "create_drive_folder", "description": "Create a new folder in OneDrive" },
+    { "name": "upload_file", "description": "Upload a local file to OneDrive" },
+    { "name": "download_file", "description": "Download a file from OneDrive to a local path" },
+    { "name": "delete_drive_item", "description": "Delete a file or folder from OneDrive" },
+    { "name": "move_or_copy_item", "description": "Move or copy a OneDrive item to a different folder" },
+    { "name": "search_sharepoint_sites", "description": "Search or list SharePoint sites the user has access to" },
+    { "name": "get_sharepoint_site", "description": "Get details of a specific SharePoint site" },
+    { "name": "list_site_libraries", "description": "List document libraries in a SharePoint site" },
+    { "name": "list_site_files", "description": "List files and folders in a SharePoint document library" },
+    { "name": "get_site_file", "description": "Get metadata for a file in a SharePoint document library" },
+    { "name": "upload_to_site", "description": "Upload a local file to a SharePoint document library" },
+    { "name": "download_from_site", "description": "Download a file from a SharePoint document library" },
+    { "name": "list_site_lists", "description": "List all lists in a SharePoint site" },
+    { "name": "get_list_items", "description": "Get items from a SharePoint list" },
+    { "name": "create_list_item", "description": "Add an item to a SharePoint list" },
+    { "name": "update_list_item", "description": "Update a SharePoint list item" },
+    { "name": "delete_list_item", "description": "Delete a SharePoint list item" },
+    { "name": "list_ms_profiles", "description": "List all configured Microsoft 365 profiles" },
+    { "name": "add_ms_profile", "description": "Add a new Microsoft 365 profile" },
+    { "name": "remove_ms_profile", "description": "Remove a profile and its cached tokens" },
+    { "name": "authenticate_ms_profile", "description": "Trigger interactive authentication for a profile" },
+    { "name": "set_default_ms_profile", "description": "Change the default profile" }
+  ],
+  "keywords": [
+    "microsoft",
+    "outlook",
+    "office365",
+    "email",
+    "calendar",
+    "onedrive",
+    "sharepoint",
+    "graph-api",
+    "multi-account"
+  ],
+  "license": "MIT",
+  "privacy_policies": [
+    "https://privacy.microsoft.com/en-us/privacystatement"
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  },
+  "user_config": {
+    "client_id": {
+      "type": "string",
+      "title": "Azure Client ID",
+      "description": "Application (client) ID from your Azure App Registration",
+      "required": true
+    },
+    "tenant_id": {
+      "type": "string",
+      "title": "Tenant ID",
+      "description": "Azure AD tenant: 'common' for personal + work, 'consumers' for personal only, or your org's tenant ID/domain",
+      "default": "common",
+      "required": false
+    },
+    "credentials_dir": {
+      "type": "directory",
+      "title": "Credentials Directory",
+      "description": "Directory for storing profiles and token caches. Defaults to ~/.microsoft-mcp/",
+      "required": false
+    }
+  }
+}
