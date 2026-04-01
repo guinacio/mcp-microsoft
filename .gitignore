@@ -40,6 +40,9 @@ htmlcov/
 msal_token_cache.json
 token_cache.json
 
+# MCPB bundles
+*.mcpb
+
 # OS
 .DS_Store
 Thumbs.db
