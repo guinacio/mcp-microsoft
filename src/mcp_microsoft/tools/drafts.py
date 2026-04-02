@@ -13,26 +13,39 @@ Implemented:
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
+from mcp.types import ToolAnnotations
+
+from mcp_microsoft.models import (
+    CreateDraftResponse,
+    DraftDetailResponse,
+    DraftSummary,
+    ListDraftsResponse,
+    SendDraftResponse,
+    UpdateDraftResponse,
+)
 from mcp_microsoft.graph import get_graph
 from mcp_microsoft.server import mcp
-from mcp_microsoft.tools.mail import _fmt_date, _fmt_recipients, _fmt_sender, _parse_recipients
+from mcp_microsoft.tools.mail import _fmt_date, _parse_recipients, _recipient_values
 
 # ---------------------------------------------------------------------------
 # create_draft
 # ---------------------------------------------------------------------------
 
+BodyType = Literal["text", "html"]
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def create_draft(
     to: Union[str, list[str]],
     subject: str,
     body: str,
     cc: Optional[Union[str, list[str]]] = None,
-    body_type: str = "text",
+    body_type: BodyType = "text",
     profile: str | None = None,
-) -> str:
+) -> CreateDraftResponse:
     """
     Create a new draft message (without sending).
 
@@ -45,7 +58,7 @@ async def create_draft(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string with the new draft ID.
+        Structured draft creation confirmation.
     """
     g = get_graph(profile)
     message: dict = {
@@ -62,12 +75,14 @@ async def create_draft(
     result = await g.post("/me/messages", json=message)
 
     draft_id = (result or {}).get("id", "unknown")
-    to_str = to if isinstance(to, str) else ", ".join(to)
-    return (
-        f"Draft created successfully.\n"
-        f"**Draft ID:** `{draft_id}`\n"
-        f"**To:** {to_str}\n"
-        f"**Subject:** {subject}"
+    return CreateDraftResponse(
+        success=True,
+        action="create_draft",
+        draft_id=draft_id,
+        to=[addr.get("emailAddress", {}).get("address", "") for addr in message["toRecipients"]],
+        cc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("ccRecipients", [])],
+        subject=subject,
+        body_type=body_type,
     )
 
 
@@ -76,8 +91,8 @@ async def create_draft(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def list_drafts(max_results: int = 10, profile: str | None = None) -> str:
+@mcp.tool(annotations=_READ_ONLY)
+async def list_drafts(max_results: int = 10, profile: str | None = None) -> ListDraftsResponse:
     """
     List draft messages from the Drafts folder.
 
@@ -86,7 +101,7 @@ async def list_drafts(max_results: int = 10, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted list of draft summaries.
+        Structured draft summaries.
     """
     g = get_graph(profile)
     params: dict = {
@@ -98,23 +113,20 @@ async def list_drafts(max_results: int = 10, profile: str | None = None) -> str:
     result = await g.get("/me/mailFolders/drafts/messages", params=params)
     drafts = result.get("value", [])
 
-    if not drafts:
-        return "No drafts found."
-
-    lines = [f"## Drafts ({len(drafts)} messages)\n"]
+    items: list[DraftSummary] = []
     for draft in drafts:
-        subject = draft.get("subject") or "(no subject)"
-        to_str = _fmt_recipients(draft.get("toRecipients", []))
-        modified = _fmt_date(draft.get("lastModifiedDateTime"))
-        preview = (draft.get("bodyPreview") or "").replace("\n", " ")[:100]
-        lines.append(
-            f"- **{subject}**\n"
-            f"  To: {to_str or '(no recipients)'} | Modified: {modified}\n"
-            f"  ID: `{draft.get('id')}`\n"
-            f"  > {preview}\n"
+        items.append(
+            DraftSummary(
+                id=draft.get("id", ""),
+                subject=draft.get("subject") or "(no subject)",
+                to=_recipient_values(draft.get("toRecipients", [])),
+                last_modified_at=draft.get("lastModifiedDateTime"),
+                last_modified_at_display=_fmt_date(draft.get("lastModifiedDateTime")),
+                preview=(draft.get("bodyPreview") or "").replace("\n", " ")[:100],
+            )
         )
 
-    return "\n".join(lines)
+    return ListDraftsResponse(count=len(items), drafts=items)
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +134,8 @@ async def list_drafts(max_results: int = 10, profile: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def get_draft(draft_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_READ_ONLY)
+async def get_draft(draft_id: str, profile: str | None = None) -> DraftDetailResponse:
     """
     Fetch a draft message by ID.
 
@@ -132,7 +144,7 @@ async def get_draft(draft_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted draft details including body and recipients.
+        Structured draft details.
     """
     g = get_graph(profile)
     params = {
@@ -145,9 +157,6 @@ async def get_draft(draft_id: str, profile: str | None = None) -> str:
     draft = await g.get(f"/me/messages/{draft_id}", params=params)
 
     subject = draft.get("subject") or "(no subject)"
-    to_str = _fmt_recipients(draft.get("toRecipients", []))
-    cc_str = _fmt_recipients(draft.get("ccRecipients", []))
-    bcc_str = _fmt_recipients(draft.get("bccRecipients", []))
     modified = _fmt_date(draft.get("lastModifiedDateTime"))
 
     body_obj = draft.get("body", {})
@@ -162,24 +171,18 @@ async def get_draft(draft_id: str, profile: str | None = None) -> str:
     else:
         body_text = raw_body
 
-    lines = [
-        f"## Draft: {subject}",
-        f"**To:** {to_str or '(none)'}",
-    ]
-    if cc_str:
-        lines.append(f"**CC:** {cc_str}")
-    if bcc_str:
-        lines.append(f"**BCC:** {bcc_str}")
-    lines += [
-        f"**Last Modified:** {modified}",
-        f"**Draft ID:** `{draft_id}`",
-        "",
-        "---",
-        "",
-        body_text,
-    ]
-
-    return "\n".join(lines)
+    return DraftDetailResponse(
+        id=draft_id,
+        subject=subject,
+        to=_recipient_values(draft.get("toRecipients", [])),
+        cc=_recipient_values(draft.get("ccRecipients", [])),
+        bcc=_recipient_values(draft.get("bccRecipients", [])),
+        last_modified_at=draft.get("lastModifiedDateTime"),
+        last_modified_at_display=modified,
+        body=body_text,
+        body_content_type=content_type,
+        is_draft=draft.get("isDraft", True),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -187,16 +190,16 @@ async def get_draft(draft_id: str, profile: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def update_draft(
     draft_id: str,
     subject: Optional[str] = None,
     body: Optional[str] = None,
     to: Optional[Union[str, list[str]]] = None,
     cc: Optional[Union[str, list[str]]] = None,
-    body_type: str = "text",
+    body_type: BodyType = "text",
     profile: str | None = None,
-) -> str:
+) -> UpdateDraftResponse:
     """
     Update an existing draft message. Only provided fields are changed.
 
@@ -210,7 +213,7 @@ async def update_draft(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string with updated draft ID.
+        Structured update confirmation.
     """
     g = get_graph(profile)
     patch: dict = {}
@@ -228,16 +231,24 @@ async def update_draft(
         patch["ccRecipients"] = _parse_recipients(cc)
 
     if not patch:
-        return "No fields to update — provide at least one of: subject, body, to, cc."
+        return UpdateDraftResponse(
+            success=False,
+            action="update_draft",
+            draft_id=draft_id,
+            updated_fields=[],
+            error="No fields to update.",
+        )
 
     result = await g.patch(f"/me/messages/{draft_id}", json=patch)
 
     updated_id = (result or {}).get("id", draft_id)
     updated_fields = ", ".join(patch.keys())
-    return (
-        f"Draft updated successfully.\n"
-        f"**Draft ID:** `{updated_id}`\n"
-        f"**Updated fields:** {updated_fields}"
+    return UpdateDraftResponse(
+        success=True,
+        action="update_draft",
+        draft_id=updated_id,
+        updated_fields=list(patch.keys()),
+        updated_fields_display=updated_fields,
     )
 
 
@@ -246,8 +257,8 @@ async def update_draft(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def send_draft(draft_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_WRITE)
+async def send_draft(draft_id: str, profile: str | None = None) -> SendDraftResponse:
     """
     Send an existing draft message.
 
@@ -256,11 +267,8 @@ async def send_draft(draft_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured send confirmation.
     """
     g = get_graph(profile)
     await g.post(f"/me/messages/{draft_id}/send", json={})
-    return (
-        f"Draft `{draft_id}` sent successfully.\n"
-        "The message has been delivered and saved to Sent Items."
-    )
+    return SendDraftResponse(success=True, action="send_draft", draft_id=draft_id)

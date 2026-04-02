@@ -12,13 +12,27 @@ Run:
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastmcp import FastMCP
+
+from mcp_microsoft.graph import close_http_clients, initialize_http_clients
 
 # ---------------------------------------------------------------------------
 # FastMCP app
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("mcp-microsoft")
+@asynccontextmanager
+async def app_lifespan(_server: FastMCP):
+    """Initialize shared runtime resources once for the server process."""
+    await initialize_http_clients()
+    try:
+        yield {}
+    finally:
+        await close_http_clients()
+
+
+mcp = FastMCP("mcp-microsoft", lifespan=app_lifespan)
 
 # ---------------------------------------------------------------------------
 # Tool registration — import submodules so their @mcp.tool() decorators run
@@ -42,21 +56,14 @@ from mcp_microsoft.tools import calendar  # noqa: E402, F401
 # OneDrive tools
 from mcp_microsoft.tools import onedrive  # noqa: E402, F401
 
-# SharePoint tools — enabled by default (first run / work accounts);
-# disabled only when ALL configured profiles use the "consumers" tenant.
-try:
-    from mcp_microsoft.profiles import ProfileManager as _PM
-    _sp_profiles = _PM.get()._profiles
-    if not _sp_profiles or any(
-        cfg.tenant_id != "consumers"
-        for cfg in _sp_profiles.values()
-    ):
-        from mcp_microsoft.tools import sharepoint  # noqa: E402, F401
-except Exception:
-    pass  # Startup issue — SharePoint tools skipped
+# SharePoint tools
+from mcp_microsoft.tools import sharepoint  # noqa: E402, F401
 
 # Profile management tools
 from mcp_microsoft.tools import profiles  # noqa: E402, F401
+
+# Contacts tools
+from mcp_microsoft.tools import contacts  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
 # Entry point

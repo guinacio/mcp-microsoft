@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import msal
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Default scopes (importable by auth.py facade)
@@ -28,6 +31,7 @@ DEFAULT_SCOPES: list[str] = [
     "Mail.ReadWrite",
     "Mail.Send",
     "Calendars.ReadWrite",
+    "Contacts.ReadWrite",
     "Files.ReadWrite",
 ]
 

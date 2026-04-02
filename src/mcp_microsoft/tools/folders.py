@@ -13,6 +13,15 @@ from __future__ import annotations
 
 from typing import Optional
 
+
+from mcp.types import ToolAnnotations
+
+from mcp_microsoft.models import (
+    CreateFolderResponse,
+    DeleteFolderResponse,
+    ListFoldersResponse,
+    MailFolderInfo,
+)
 from mcp_microsoft.graph import get_graph
 from mcp_microsoft.server import mcp
 
@@ -20,9 +29,12 @@ from mcp_microsoft.server import mcp
 # list_folders
 # ---------------------------------------------------------------------------
 
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
+_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
 
-@mcp.tool()
-async def list_folders(include_child_folders: bool = False, profile: str | None = None) -> str:
+@mcp.tool(annotations=_READ_ONLY)
+async def list_folders(include_child_folders: bool = False, profile: str | None = None) -> ListFoldersResponse:
     """
     List mail folders in the mailbox.
 
@@ -38,8 +50,7 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted table of folders with id, displayName,
-        totalItemCount, unreadItemCount, and childFolderCount.
+        Structured mail folder data.
     """
     g = get_graph(profile)
     params: dict = {
@@ -49,13 +60,6 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
 
     result = await g.get("/me/mailFolders", params=params)
     folders = result.get("value", [])
-
-    if not folders:
-        return "No folders found."
-
-    lines = [f"## Mail Folders ({len(folders)} folders)\n"]
-    lines.append("| Folder | Unread | Total | Children | ID |")
-    lines.append("|---|---|---|---|---|")
 
     all_folders = list(folders)
 
@@ -77,7 +81,7 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
             all_folders.extend(child_folders)
 
     seen_ids: set = set()
-    rows = []
+    items: list[MailFolderInfo] = []
     for folder in all_folders:
         fid = folder.get("id", "")
         if fid in seen_ids:
@@ -87,10 +91,19 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
         unread = folder.get("unreadItemCount", 0)
         total = folder.get("totalItemCount", 0)
         children = folder.get("childFolderCount", 0)
-        rows.append(f"| {name} | {unread} | {total} | {children} | `{fid}` |")
+        items.append(
+            MailFolderInfo(
+                id=fid,
+                display_name=folder.get("displayName", ""),
+                display_label=name,
+                unread_count=unread,
+                total_count=total,
+                child_folder_count=children,
+                is_child="_display_name" in folder,
+            )
+        )
 
-    lines.extend(rows)
-    return "\n".join(lines)
+    return ListFoldersResponse(count=len(items), include_child_folders=include_child_folders, folders=items)
 
 
 # ---------------------------------------------------------------------------
@@ -98,12 +111,12 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def create_folder(
     display_name: str,
     parent_folder_id: Optional[str] = None,
     profile: str | None = None,
-) -> str:
+) -> CreateFolderResponse:
     """
     Create a new mail folder.
 
@@ -115,7 +128,7 @@ async def create_folder(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string with the new folder's ID and display name.
+        Structured folder creation confirmation.
     """
     g = get_graph(profile)
     payload = {"displayName": display_name}
@@ -131,11 +144,12 @@ async def create_folder(
     folder_id = (result or {}).get("id", "unknown")
     folder_name = (result or {}).get("displayName", display_name)
 
-    parent_info = f" under `{parent_folder_id}`" if parent_folder_id else " at top level"
-    return (
-        f"Folder created successfully{parent_info}.\n"
-        f"**Name:** {folder_name}\n"
-        f"**Folder ID:** `{folder_id}`"
+    return CreateFolderResponse(
+        success=True,
+        action="create_folder",
+        folder_id=folder_id,
+        display_name=folder_name,
+        parent_folder_id=parent_folder_id,
     )
 
 
@@ -144,8 +158,8 @@ async def create_folder(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def delete_folder(folder_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def delete_folder(folder_id: str, profile: str | None = None) -> DeleteFolderResponse:
     """
     Delete a mail folder and all its contents.
 
@@ -160,11 +174,8 @@ async def delete_folder(folder_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string on success.
+        Structured delete confirmation.
     """
     g = get_graph(profile)
     await g.delete(f"/me/mailFolders/{folder_id}")
-    return (
-        f"Folder `{folder_id}` deleted permanently.\n"
-        "All messages and sub-folders within it have been removed."
-    )
+    return DeleteFolderResponse(success=True, action="delete_folder", folder_id=folder_id, irreversible=True)

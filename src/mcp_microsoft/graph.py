@@ -18,6 +18,49 @@ from typing import Any
 import httpx
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+_REQUEST_TIMEOUT = 30.0
+_TRANSFER_TIMEOUT = 120.0
+
+_request_client: httpx.AsyncClient | None = None
+_transfer_client: httpx.AsyncClient | None = None
+
+
+async def initialize_http_clients() -> None:
+    """Initialize shared HTTP clients for Graph API traffic."""
+    global _request_client, _transfer_client
+
+    if _request_client is None:
+        _request_client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
+    if _transfer_client is None:
+        _transfer_client = httpx.AsyncClient(
+            timeout=_TRANSFER_TIMEOUT,
+            follow_redirects=True,
+        )
+
+
+async def close_http_clients() -> None:
+    """Close any shared HTTP clients created for Graph API traffic."""
+    global _request_client, _transfer_client
+
+    request_client = _request_client
+    transfer_client = _transfer_client
+    _request_client = None
+    _transfer_client = None
+
+    if request_client is not None:
+        await request_client.aclose()
+    if transfer_client is not None:
+        await transfer_client.aclose()
+
+
+def get_request_http_client() -> httpx.AsyncClient | None:
+    """Return the shared request client when the server lifespan is active."""
+    return _request_client
+
+
+def get_transfer_http_client() -> httpx.AsyncClient | None:
+    """Return the shared transfer client when the server lifespan is active."""
+    return _transfer_client
 
 
 class GraphClient:
@@ -76,7 +119,16 @@ class GraphClient:
         else:
             merged = headers
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        client = get_request_http_client()
+        if client is None:
+            async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as ephemeral_client:
+                response = await ephemeral_client.request(
+                    method=method,
+                    url=url,
+                    headers=merged,
+                    **kwargs,
+                )
+        else:
             response = await client.request(
                 method=method,
                 url=url,
@@ -187,7 +239,14 @@ class GraphClient:
         url = f"{GRAPH_BASE}{path}"
         headers = self._get_headers()
 
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        client = get_transfer_http_client()
+        if client is None:
+            async with httpx.AsyncClient(
+                timeout=_TRANSFER_TIMEOUT,
+                follow_redirects=True,
+            ) as ephemeral_client:
+                response = await ephemeral_client.get(url, headers=headers)
+        else:
             response = await client.get(url, headers=headers)
 
         if response.status_code == 429:

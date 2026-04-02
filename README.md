@@ -1,191 +1,223 @@
 # mcp-microsoft
 
-Microsoft 365 MCP server — **Mail, Calendar, and OneDrive** — for personal (Outlook.com / Live) and enterprise (Azure AD / Entra ID) accounts via the Microsoft Graph API.
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![License MIT](https://img.shields.io/badge/license-MIT-green)
+![MCP](https://img.shields.io/badge/MCP-compatible-purple)
 
-Built with [FastMCP](https://github.com/jlowin/fastmcp), MSAL, and async httpx. Mirrors the architecture and tool surface of [mcp-google-workspace](https://github.com/guinacio/mcp-google-workspace).
+Microsoft 365 MCP server — Mail, Calendar, OneDrive, and SharePoint via the Microsoft Graph API, with multi-account support.
 
-> **Renamed from `mcp-outlook`.** See [Migration](#migration-from-mcp-outlook) below.
+## Overview
+
+`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers the four most-used surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, and SharePoint — 56 tools in total.
+
+The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. SharePoint tools are included automatically for work accounts and excluded for personal-only tenants, since the `Sites.ReadWrite.All` scope is unavailable to consumer accounts.
+
+Multi-account support is a first-class feature. Named profiles let you configure separate client IDs for each account and switch between them on any tool call by passing `profile="work"`. Profiles and MSAL token caches are stored in `~/.microsoft-mcp/` and survive server restarts without re-authentication.
+
+The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction installation through the Claude Desktop Extension installer. It can also be run from source or wired directly into `claude_desktop_config.json`. Built with [FastMCP](https://github.com/jlowin/fastmcp), MSAL, and async httpx.
 
 ## Features
 
-- **Mail** — Read, send, search, move, trash, and delete mail; draft creation, editing, and sending; folder management; attachment listing and download
-- **Calendar** — List calendars and events; create, update, and delete events; RSVP to invitations; check free/busy availability; find meeting times
-- **OneDrive** — List, search, upload, download, move, copy, and delete files and folders
-- Works with both personal Microsoft accounts (Outlook.com / Live) and work / school accounts (Azure AD / Entra ID) — single App Registration, no admin consent needed for personal use
-- Token cache with automatic silent refresh via MSAL
+### Tools (56 total)
 
-## Requirements
+#### Mail (21 tools)
 
-- Python 3.11+
-- `uv` package manager
-- An Azure App Registration (see Setup below)
+- `list_emails` — list messages from any folder with pagination and unread filter
+- `read_email` — fetch the full body of a message by ID (supports summary mode)
+- `search_emails` — search using Microsoft Graph KQL `$search` syntax
+- `send_email` — compose and send a new message (to/cc/bcc, HTML or plain text)
+- `reply_email` — reply or reply-all to an existing message
+- `forward_email` — forward a message to one or more recipients
+- `mark_as_read` / `mark_as_unread` — toggle read state
+- `move_email` — move to any folder by well-known name or folder ID
+- `trash_email` — soft-delete to Deleted Items (recoverable)
+- `delete_email` — permanently delete a message (irreversible)
+- `create_draft` / `get_draft` / `list_drafts` / `update_draft` / `send_draft` — full draft lifecycle
+- `list_folders` / `create_folder` / `delete_folder` — manage mailbox folders
+- `list_attachments` / `download_attachment` — inspect and save attachments
 
-## Setup
+#### Calendar (10 tools)
 
-### 1. Create an Azure App Registration
+- `list_calendars` — enumerate all calendars in the mailbox
+- `list_events` — list events from a calendar with optional date filtering
+- `list_upcoming_events` — list events using calendarView with recurring-instance expansion
+- `get_event` — fetch full event details including attendees, body, and recurrence
+- `create_event` — create an event (subject, datetime, timezone, attendees, location, online meeting flag)
+- `update_event` / `delete_event` — modify or remove an event
+- `rsvp_event` — accept, tentatively accept, or decline an invitation
+- `get_free_busy` — check availability for one or more people in a time window
+- `find_meeting_times` — get meeting time suggestions for a set of attendees
 
-1. Go to [portal.azure.com](https://portal.azure.com) > Azure Active Directory > App registrations > **New registration**.
-2. **Supported account types**: select *"Accounts in any organizational directory and personal Microsoft accounts"*.
-3. **Redirect URI**: Platform = *Mobile and desktop applications*, URI = `http://localhost`.
-4. Under **Authentication**, enable **"Allow public client flows"** (required for the interactive loopback OAuth flow — no client secret needed).
-5. Under **API permissions**, add the following **delegated** permissions:
+#### OneDrive (8 tools)
+
+- `list_drive_items` — browse files and folders by path or item ID
+- `get_drive_item` — get metadata for a specific file or folder
+- `search_drive` — full-text search across OneDrive
+- `upload_file` — upload a local file (auto-switches to resumable upload for files over 4 MB)
+- `download_file` — download a file to a local path
+- `create_drive_folder` — create a new folder at any path
+- `move_or_copy_item` — move or copy items within OneDrive
+- `delete_drive_item` — delete a file or folder (moves to recycle bin)
+
+#### SharePoint (12 tools)
+
+> SharePoint tools require a work or school account (Azure AD / Entra ID). They are not available for personal Outlook.com / Live accounts, which do not support the `Sites.ReadWrite.All` Graph permission. `Sites.ReadWrite.All` requires one-time admin consent in enterprise tenants.
+
+- `search_sharepoint_sites` — search or list SharePoint sites the user can access
+- `get_sharepoint_site` — get details of a specific site
+- `list_site_libraries` — list document libraries in a site
+- `list_site_files` / `get_site_file` — browse files in a document library
+- `upload_to_site` / `download_from_site` — transfer files to/from SharePoint
+- `list_site_lists` — list all SharePoint lists in a site
+- `get_list_items` / `create_list_item` / `update_list_item` / `delete_list_item` — manage list records
+
+#### Profile Management (5 tools)
+
+- `list_ms_profiles` — list all configured profiles and which is the default
+- `add_ms_profile` — add a new account (name, client_id, tenant_id)
+- `remove_ms_profile` — remove a profile and delete its cached tokens
+- `authenticate_ms_profile` — trigger interactive OAuth for a profile
+- `set_default_ms_profile` — change which profile is used when none is specified
+
+## Installation
+
+### Option A: Claude Desktop Extension (MCPB) — Recommended
+
+```bash
+npx @anthropic-ai/mcpb install mcp-microsoft-0.4.0.mcpb
+```
+
+The installer prompts for your Azure App Registration details (see [Azure Setup](#azure-setup)):
+
+| Prompt | Description |
+|---|---|
+| **Azure Client ID** | Application (client) ID from your App Registration |
+| **Tenant ID** | `common` for personal + work, `consumers` for personal only, or your org's tenant ID/domain |
+| **Credentials Directory** | Optional. Defaults to `~/.microsoft-mcp/` |
+
+A `default` profile is created automatically from these values.
+
+### Option B: From Source
+
+```bash
+git clone https://github.com/guilhermeinacio/mcp-microsoft.git
+cd mcp-microsoft
+uv sync
+export MS365_CLIENT_ID=your-client-id
+export MS365_TENANT_ID=common
+uv run mcp-microsoft
+```
+
+### Option C: Add to claude_desktop_config.json
+
+```json
+{
+  "mcpServers": {
+    "mcp-microsoft": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/mcp-microsoft", "mcp-microsoft"],
+      "env": {
+        "MS365_CLIENT_ID": "your-client-id",
+        "MS365_TENANT_ID": "common"
+      }
+    }
+  }
+}
+```
+
+## Azure Setup
+
+You need an Azure App Registration to get a `client_id`. This is a one-time step.
+
+1. Go to [portal.azure.com](https://portal.azure.com) → **Azure Active Directory** → **App registrations** → **New registration**.
+2. Name it anything (e.g., `mcp-microsoft`).
+3. Under **Supported account types**, choose based on your use case:
+   - *Personal Microsoft accounts only* — Outlook.com / Live users
+   - *Accounts in any organizational directory and personal Microsoft accounts* — personal and work
+4. Under **Redirect URI**, select **Mobile and desktop applications** and enter `http://localhost`.
+5. Under **Authentication**, enable **Allow public client flows** (required for the interactive loopback OAuth flow — no client secret needed).
+6. Go to **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions** and add:
    - `Mail.ReadWrite`
    - `Mail.Send`
    - `Calendars.ReadWrite`
    - `Files.ReadWrite`
-   - `offline_access` (usually pre-added)
-6. Click **Grant admin consent** if prompted (only required for enterprise tenants with admin-consent policies).
-7. Copy the **Application (client) ID** from the Overview page.
+   - `Sites.ReadWrite.All` *(work accounts only — required for SharePoint)*
+   - `offline_access` *(usually pre-added)*
+7. For `Sites.ReadWrite.All`: click **Grant admin consent**. Your IT administrator must approve this once per tenant.
+8. From the **Overview** page, copy the **Application (client) ID** and, if targeting a specific tenant, the **Directory (tenant) ID**.
 
-### 2. Configure environment variables
+For a detailed walkthrough with screenshots, see [`docs/azure-setup.md`](docs/azure-setup.md).
 
-Copy `.env.template` to `.env` and fill in your values:
+## Profile Management
+
+The server supports multiple Microsoft 365 accounts as named profiles. Each profile has its own `client_id`, `tenant_id`, and MSAL token cache.
+
+**Bootstrap:** On first start, if `MS365_CLIENT_ID` is set (via the MCPB installer or environment variable), a `default` profile is created and persisted to `profiles.json` automatically. If the variable is not set, the server starts with zero profiles and you must call `add_ms_profile`.
+
+**Add accounts:**
 
 ```
-MS365_CLIENT_ID=<your-application-client-id>
-MS365_CREDENTIALS_DIR=   # optional — defaults to ~/.sentinel/microsoft-mcp/
+add_ms_profile(name="personal", client_id="...", tenant_id="consumers")
+add_ms_profile(name="work", client_id="...", tenant_id="mycompany.onmicrosoft.com")
 ```
 
-Legacy env vars `OUTLOOK_CLIENT_ID` and `OUTLOOK_CREDENTIALS_DIR` still work as fallbacks.
+**Use a specific profile** on any tool call:
 
-### 3. Install
-
-```powershell
-uv pip install -e C:\Repositories\mcp-outlook
+```
+list_emails(folder="Inbox", profile="work")
+search_drive(query="Q1 report", profile="personal")
 ```
 
-### 4. First run — browser consent
+**Authenticate** (opens a browser window for OAuth the first time):
 
-The first time the server starts (or whenever the token cache is missing), it opens a browser window for Microsoft's OAuth consent flow. After granting consent, the token is cached at `MS365_CREDENTIALS_DIR/msal_token_cache.json` and silent refresh handles subsequent runs automatically.
-
-To reset auth (e.g. to change accounts or re-consent expanded scopes), delete the token cache file.
-
-## Run (stdio)
-
-```powershell
-mcp-microsoft
-# or
-python -m mcp_microsoft.server
+```
+authenticate_ms_profile(profile="work")
 ```
 
-## Sentinel integration (`mcp_config.py`)
+**List profiles:**
 
-```python
-"microsoft": {
-    "command": sys.executable,
-    "args": ["-m", "mcp_microsoft.server"],
-    "env": {
-        "MS365_CLIENT_ID": "<your-client-id>",
-        "MS365_CREDENTIALS_DIR": str(_MS365_MCP_CREDS_DIR),
-    },
-}
+```
+list_ms_profiles()
 ```
 
-## Tools
+**Change the default:**
 
-### Mail (11 tools)
+```
+set_default_ms_profile(profile="work")
+```
 
-| Tool | Description |
-|---|---|
-| `list_emails` | List messages from a folder. Params: `folder`, `max_results`, `unread_only`, `page_token`. |
-| `read_email` | Fetch a full message by ID including body, headers, and attachment list. Supports `summary_mode`. |
-| `search_emails` | Search messages via Graph KQL `$search`. |
-| `send_email` | Send a new email. Params: `to`, `cc`, `bcc`, `subject`, `body`, `body_type`. |
-| `reply_email` | Reply to a message. Params: `message_id`, `body`, `reply_all`, `body_type`. |
-| `forward_email` | Forward a message. Params: `message_id`, `to`, `comment`. |
-| `mark_as_read` | Mark a message as read. |
-| `mark_as_unread` | Mark a message as unread. |
-| `move_email` | Move a message to a folder by well-known name or folder ID. |
-| `trash_email` | Move a message to Deleted Items (soft delete, recoverable). |
-| `delete_email` | Permanently delete a message (irreversible). |
+Profiles are stored in `~/.microsoft-mcp/profiles.json`. Token caches are stored as `~/.microsoft-mcp/msal_cache_{name}.json`. After the first interactive login, MSAL handles token refresh silently.
 
-### Drafts (5 tools)
+> **Security note:** `profiles.json` and `msal_cache_*.json` contain refresh tokens. Do not commit them to version control. `MS365_CLIENT_ID` is not a secret and can be committed.
 
-| Tool | Description |
-|---|---|
-| `create_draft` | Create a draft message. |
-| `get_draft` | Fetch a draft by ID. |
-| `list_drafts` | List draft messages. Supports pagination. |
-| `update_draft` | Update draft fields. Only provided fields are changed. |
-| `send_draft` | Send an existing draft by ID. |
+## Configuration
 
-### Folders (3 tools)
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MS365_CLIENT_ID` | Yes (for bootstrap) | — | Azure App Registration client ID for the default profile |
+| `MS365_TENANT_ID` | No | `common` | Tenant ID for the default profile |
+| `MS365_CREDENTIALS_DIR` | No | `~/.microsoft-mcp/` | Directory for `profiles.json` and token caches |
 
-| Tool | Description |
-|---|---|
-| `list_folders` | List all mail folders including well-known and custom. Supports `include_child_folders`. |
-| `create_folder` | Create a custom folder. Optionally nested under a parent folder. |
-| `delete_folder` | Delete a folder and all its contents (irreversible). |
+These variables are only used to bootstrap the `default` profile on first run. Once `profiles.json` exists they have no effect. Use the profile management tools to modify accounts.
 
-### Attachments (2 tools)
+## Development
 
-| Tool | Description |
-|---|---|
-| `list_attachments` | List attachments on a message: name, size, content type, attachment ID. |
-| `download_attachment` | Download an attachment to a local file path or return base64. |
+```bash
+# Install dependencies
+uv sync
 
-### Calendar (10 tools)
+# Start the MCP server (stdio mode)
+uv run mcp-microsoft
 
-| Tool | Description |
-|---|---|
-| `list_calendars` | List all calendars in the mailbox. |
-| `list_events` | List events from a calendar with optional date filtering. |
-| `list_upcoming_events` | List events using calendarView (expands recurring events). Params: `start_datetime`, `end_datetime`. |
-| `get_event` | Fetch full event details by ID including attendees, body, and recurrence. |
-| `create_event` | Create a new event. Params: `subject`, `start_datetime`, `end_datetime`, `timezone`, `attendees`, `location`, `is_online_meeting`. |
-| `update_event` | Update an existing event. Only provided fields are changed. |
-| `delete_event` | Delete a calendar event. |
-| `rsvp_event` | Accept, decline, or tentatively accept an event invitation. |
-| `get_free_busy` | Check free/busy availability for one or more people in a time window. |
-| `find_meeting_times` | Find available meeting time suggestions for a set of attendees. |
-
-### OneDrive (8 tools)
-
-| Tool | Description |
-|---|---|
-| `list_drive_items` | List files and folders. Defaults to OneDrive root. Accepts `folder_id`. |
-| `get_drive_item` | Get metadata for a specific file or folder. |
-| `search_drive` | Search files and folders by name or content. |
-| `create_drive_folder` | Create a new folder. Optionally nested under a parent folder. |
-| `upload_file` | Upload a local file. Auto-detects size and uses simple PUT (<4 MB) or resumable upload session. |
-| `download_file` | Download a file to a local path. |
-| `delete_drive_item` | Delete a file or folder (moved to recycle bin). |
-| `move_or_copy_item` | Move or copy an item to a different folder. |
-
-**Total: 39 tools**
-
-## Migration from mcp-outlook
-
-If you were using the previous `mcp-outlook` package:
-
-1. Update your install:
-   ```powershell
-   uv remove mcp-outlook
-   uv pip install -e C:\Repositories\mcp-outlook
-   ```
-
-2. In `mcp_config.py` or equivalent, change the server module:
-   ```
-   mcp_outlook.server → mcp_microsoft.server
-   ```
-
-3. Rename env vars in `.env` (optional — old names still work):
-   - `OUTLOOK_CLIENT_ID` → `MS365_CLIENT_ID`
-   - `OUTLOOK_CREDENTIALS_DIR` → `MS365_CREDENTIALS_DIR`
-
-4. Optionally copy token cache to avoid re-authentication:
-   ```
-   cp ~/.sentinel/outlook-mcp/msal_token_cache.json ~/.sentinel/microsoft-mcp/msal_token_cache.json
-   ```
-
-5. Restart the MCP server. New scopes (Calendar, OneDrive) trigger a one-time browser consent popup.
-
-## Token cache security
-
-`msal_token_cache.json` contains refresh tokens and must not be committed to version control. It is listed in `.gitignore`. The `MS365_CLIENT_ID` is not a secret and can be committed.
-
-## Tests
-
-```powershell
+# Run the test suite
 uv run pytest -q
+
+# Rebuild the MCPB bundle
+npx @anthropic-ai/mcpb pack
 ```
+
+Tool implementations are organized by surface area under `src/mcp_microsoft/tools/`. Authentication is handled by [MSAL](https://github.com/AzureAD/microsoft-authentication-library-for-python) with a per-profile serializable token cache. HTTP calls go through a shared async `httpx` client initialized at server startup.
+
+## License
+
+MIT

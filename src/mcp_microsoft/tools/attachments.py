@@ -11,9 +11,13 @@ Implemented:
 from __future__ import annotations
 
 import base64
-import os
+from pathlib import Path
 from typing import Optional
 
+from fastmcp.utilities.types import File
+from mcp.types import ToolAnnotations
+
+from mcp_microsoft.models import AttachmentInfo, DownloadAttachmentResponse, ListAttachmentsResponse
 from mcp_microsoft.graph import get_graph
 from mcp_microsoft.server import mcp
 
@@ -21,9 +25,11 @@ from mcp_microsoft.server import mcp
 # list_attachments
 # ---------------------------------------------------------------------------
 
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
 
-@mcp.tool()
-async def list_attachments(message_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_READ_ONLY)
+async def list_attachments(message_id: str, profile: str | None = None) -> ListAttachmentsResponse:
     """
     List all attachments on an email message.
 
@@ -32,8 +38,7 @@ async def list_attachments(message_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted table of attachments with name, size,
-        content type, and attachment ID.
+        Structured attachment metadata.
     """
     g = get_graph(profile)
     params = {
@@ -43,23 +48,21 @@ async def list_attachments(message_id: str, profile: str | None = None) -> str:
     result = await g.get(f"/me/messages/{message_id}/attachments", params=params)
     attachments = result.get("value", [])
 
-    if not attachments:
-        return "No attachments found on this message."
-
-    lines = [f"## Attachments ({len(attachments)} found)\n"]
-    lines.append("| Name | Size | Type | Inline | ID |")
-    lines.append("|---|---|---|---|---|")
-
+    items: list[AttachmentInfo] = []
     for att in attachments:
-        name = att.get("name", "(unnamed)")
         size_bytes = att.get("size", 0)
-        size_str = _fmt_size(size_bytes)
-        content_type = att.get("contentType", "unknown")
-        is_inline = "Yes" if att.get("isInline") else "No"
-        att_id = att.get("id", "")
-        lines.append(f"| {name} | {size_str} | {content_type} | {is_inline} | `{att_id}` |")
+        items.append(
+            AttachmentInfo(
+                id=att.get("id", ""),
+                name=att.get("name", "(unnamed)"),
+                size_bytes=size_bytes,
+                size_display=_fmt_size(size_bytes),
+                content_type=att.get("contentType", "unknown"),
+                is_inline=att.get("isInline", False),
+            )
+        )
 
-    return "\n".join(lines)
+    return ListAttachmentsResponse(message_id=message_id, count=len(items), attachments=items)
 
 
 # ---------------------------------------------------------------------------
@@ -67,27 +70,26 @@ async def list_attachments(message_id: str, profile: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def download_attachment(
     message_id: str,
     attachment_id: str,
-    save_path: Optional[str] = None,
+    save_path: Optional[Path] = None,
     profile: str | None = None,
-) -> str:
+) -> DownloadAttachmentResponse | File:
     """
-    Download an email attachment, saving it to disk or returning raw base64.
+    Download an email attachment, saving it to disk or returning a file payload.
 
     Args:
         message_id: The Graph message ID that contains the attachment.
         attachment_id: The attachment ID from list_attachments.
         save_path: Optional path to save the file. If this is a directory,
             the attachment's original filename is used inside that directory.
-            If omitted, the base64-encoded content is returned directly.
+            If omitted, the attachment is returned as a FastMCP file object.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        If save_path is provided: confirmation with the saved file path and size.
-        If save_path is omitted: the base64-encoded content string with filename.
+        A FastMCP file when no save path is given, or structured file-save metadata.
     """
     g = get_graph(profile)
     result = await g.get(f"/me/messages/{message_id}/attachments/{attachment_id}")
@@ -97,41 +99,46 @@ async def download_attachment(
     content_bytes_b64: Optional[str] = result.get("contentBytes")
 
     if content_bytes_b64 is None:
-        return (
-            f"Attachment `{att_name}` has no downloadable content "
-            "(it may be a reference/link attachment rather than a file attachment)."
+        return DownloadAttachmentResponse(
+            success=False,
+            action="download_attachment",
+            message_id=message_id,
+            attachment_id=attachment_id,
+            filename=att_name,
+            error="Attachment has no downloadable content.",
         )
-
-    if save_path is None:
-        # Return base64 directly
-        return (
-            f"**Filename:** {att_name}\n"
-            f"**Content-Type:** {content_type}\n"
-            f"**Encoding:** base64\n\n"
-            f"{content_bytes_b64}"
-        )
-
-    # Resolve final output path — sanitize remote filename to prevent traversal
-    resolved_path = save_path
-    if os.path.isdir(save_path):
-        from pathlib import Path
-        safe_name = Path(att_name).name  # strip directory components
-        if not safe_name or safe_name.startswith("."):
-            safe_name = "attachment"
-        resolved_path = os.path.join(save_path, safe_name)
 
     raw_bytes = base64.b64decode(content_bytes_b64)
 
-    with open(resolved_path, "wb") as fh:
+    if save_path is None:
+        file_format = Path(att_name).suffix.lstrip(".")
+        if not file_format and "/" in content_type:
+            file_format = content_type.split("/", 1)[1]
+        return File(data=raw_bytes, format=file_format or None, name=att_name)
+
+    # Resolve final output path — sanitize remote filename to prevent traversal
+    resolved_path = save_path
+    if save_path.is_dir():
+        safe_name = Path(att_name).name  # strip directory components
+        if not safe_name or safe_name.startswith("."):
+            safe_name = "attachment"
+        resolved_path = save_path / safe_name
+
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    with resolved_path.open("wb") as fh:
         fh.write(raw_bytes)
 
     size_str = _fmt_size(len(raw_bytes))
-    return (
-        f"Attachment saved successfully.\n"
-        f"**File:** `{resolved_path}`\n"
-        f"**Filename:** {att_name}\n"
-        f"**Size:** {size_str}\n"
-        f"**Content-Type:** {content_type}"
+    return DownloadAttachmentResponse(
+        success=True,
+        action="download_attachment",
+        message_id=message_id,
+        attachment_id=attachment_id,
+        path=str(resolved_path),
+        filename=att_name,
+        size_bytes=len(raw_bytes),
+        size_display=size_str,
+        content_type=content_type,
     )
 
 

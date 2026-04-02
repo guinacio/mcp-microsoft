@@ -22,14 +22,43 @@ from __future__ import annotations
 import html as html_module
 import re
 from datetime import datetime
-from typing import Optional, Union
+from typing import Any, Literal, Optional, Union
 
+from mcp.types import ToolAnnotations
+
+from mcp_microsoft.models import (
+    Address,
+    AttachmentInfo,
+    DeleteEmailResponse,
+    DisplayAddress,
+    ForwardEmailResponse,
+    ListEmailsResponse,
+    MarkEmailReadResponse,
+    MessageSummary,
+    MoveEmailResponse,
+    ReadEmailResponse,
+    ReadEmailSummaryResponse,
+    ReplyEmailResponse,
+    SearchEmailsResponse,
+    SendEmailResponse,
+    TrashEmailResponse,
+)
 from mcp_microsoft.graph import get_graph
 from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+BodyType = Literal["text", "html"]
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
+_IDEMPOTENT_WRITE = ToolAnnotations(
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
+_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
 
 
 def _parse_recipients(
@@ -102,19 +131,53 @@ def _fmt_recipients(recipients: list[dict]) -> str:
     return ", ".join(parts)
 
 
+def _recipient_values(recipients: list[dict]) -> list[Address]:
+    """Normalize Graph recipient objects into simple dictionaries."""
+    values: list[Address] = []
+    for recipient in recipients or []:
+        email_address = recipient.get("emailAddress", {})
+        values.append(Address(name=email_address.get("name", ""), address=email_address.get("address", "")))
+    return values
+
+
+def _display_address_from_sender(sender_obj: dict[str, Any] | None) -> DisplayAddress:
+    """Normalize a Graph sender into a typed address model."""
+    email_address = (sender_obj or {}).get("emailAddress", {})
+    return DisplayAddress(
+        display=_fmt_sender(sender_obj),
+        name=email_address.get("name", ""),
+        address=email_address.get("address", ""),
+    )
+
+
+def _message_summary(msg: dict[str, Any]) -> MessageSummary:
+    """Normalize a Graph message into a summary payload."""
+    return MessageSummary(
+        id=msg.get("id", ""),
+        subject=msg.get("subject") or "(no subject)",
+        from_=_display_address_from_sender(msg.get("from")),
+        received_at=msg.get("receivedDateTime"),
+        received_at_display=_fmt_date(msg.get("receivedDateTime")),
+        is_read=msg.get("isRead", False),
+        has_attachments=msg.get("hasAttachments", False),
+        importance=msg.get("importance", ""),
+        preview=(msg.get("bodyPreview") or "").replace("\n", " ")[:120],
+    )
+
+
 # ---------------------------------------------------------------------------
 # list_emails
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def list_emails(
     folder: str = "inbox",
     max_results: int = 10,
     unread_only: bool = False,
     page_token: Optional[int] = None,
     profile: str | None = None,
-) -> str:
+) -> ListEmailsResponse:
     """
     List emails from a mail folder.
 
@@ -128,7 +191,7 @@ async def list_emails(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted list of message summaries.
+        Structured message summaries with pagination metadata.
     """
     g = get_graph(profile)
     params: dict = {
@@ -146,35 +209,19 @@ async def list_emails(
     messages = result.get("value", [])
     next_link = result.get("@odata.nextLink")
 
-    if not messages:
-        return f"No messages found in **{folder}**."
-
-    lines = [f"## Inbox: {folder} ({len(messages)} messages)\n"]
-    for msg in messages:
-        read_flag = "" if msg.get("isRead") else " **[UNREAD]**"
-        attach_flag = " 📎" if msg.get("hasAttachments") else ""
-        subject = msg.get("subject") or "(no subject)"
-        sender = _fmt_sender(msg.get("from"))
-        date = _fmt_date(msg.get("receivedDateTime"))
-        preview = (msg.get("bodyPreview") or "").replace("\n", " ")[:120]
-        lines.append(
-            f"- **{subject}**{read_flag}{attach_flag}\n"
-            f"  From: {sender} | {date}\n"
-            f"  ID: `{msg.get('id')}`\n"
-            f"  > {preview}\n"
-        )
-
+    next_page_token: int | None = None
     if next_link:
-        # Extract skip value for caller convenience
         skip_match = re.search(r"\$skip=(\d+)", next_link)
         if skip_match:
-            profile_hint = f', profile="{profile}"' if profile else ""
-            lines.append(
-                f"\n*Next page: use `page_token={skip_match.group(1)}`"
-                f" with `folder=\"{folder}\"`{profile_hint}*"
-            )
+            next_page_token = int(skip_match.group(1))
 
-    return "\n".join(lines)
+    return ListEmailsResponse(
+        folder=folder,
+        count=len(messages),
+        messages=[_message_summary(msg) for msg in messages],
+        next_page_token=next_page_token,
+        has_more=next_link is not None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,8 +229,12 @@ async def list_emails(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def read_email(message_id: str, summary_mode: bool = False, profile: str | None = None) -> str:
+@mcp.tool(annotations=_READ_ONLY)
+async def read_email(
+    message_id: str,
+    summary_mode: bool = False,
+    profile: str | None = None,
+) -> ReadEmailResponse | ReadEmailSummaryResponse:
     """
     Fetch a full email message by ID.
 
@@ -194,7 +245,7 @@ async def read_email(message_id: str, summary_mode: bool = False, profile: str |
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted message with headers, body, and attachment list.
+        Structured message details.
     """
     g = get_graph(profile)
     params = {
@@ -216,15 +267,15 @@ async def read_email(message_id: str, summary_mode: bool = False, profile: str |
     conv_id = msg.get("conversationId", "")
 
     if summary_mode:
-        preview = (msg.get("bodyPreview") or "").replace("\n", " ")
-        lines = [
-            f"## {subject}",
-            f"**From:** {sender}",
-            f"**Date:** {date}",
-            f"**Read:** {'Yes' if is_read else 'No'}",
-            f"\n{preview}",
-        ]
-        return "\n".join(lines)
+        return ReadEmailSummaryResponse(
+            id=message_id,
+            subject=subject,
+            from_=_display_address_from_sender(msg.get("from")),
+            received_at=msg.get("receivedDateTime"),
+            received_at_display=date,
+            is_read=is_read,
+            preview=(msg.get("bodyPreview") or "").replace("\n", " "),
+        )
 
     # Full mode — extract body text
     body_obj = msg.get("body", {})
@@ -237,37 +288,36 @@ async def read_email(message_id: str, summary_mode: bool = False, profile: str |
 
     # Attachments
     attachments = msg.get("attachments", []) or []
-    attach_lines = []
+    attachment_items: list[AttachmentInfo] = []
     for att in attachments:
         size_kb = (att.get("size") or 0) // 1024
-        attach_lines.append(
-            f"  - {att.get('name', 'unnamed')} ({att.get('contentType', '?')}, {size_kb} KB)"
-            f"  ID: `{att.get('id')}`"
+        attachment_items.append(
+            AttachmentInfo(
+                id=att.get("id", ""),
+                name=att.get("name", "unnamed"),
+                content_type=att.get("contentType", ""),
+                size_bytes=att.get("size", 0),
+                size_kb=size_kb,
+            )
         )
 
-    lines = [
-        f"## {subject}",
-        f"**From:** {sender}",
-        f"**To:** {to_str}",
-    ]
-    if cc_str:
-        lines.append(f"**CC:** {cc_str}")
-    lines += [
-        f"**Date:** {date}",
-        f"**Read:** {'Yes' if is_read else 'No'}",
-        f"**Conversation ID:** `{conv_id}`",
-    ]
-    if attach_lines:
-        lines.append(f"\n**Attachments ({len(attach_lines)}):**")
-        lines.extend(attach_lines)
-    lines += [
-        "",
-        "---",
-        "",
-        body_text,
-    ]
-
-    return "\n".join(lines)
+    return ReadEmailResponse(
+        id=message_id,
+        subject=subject,
+        from_=_display_address_from_sender(msg.get("from")),
+        to=_recipient_values(msg.get("toRecipients", [])),
+        to_display=to_str,
+        cc=_recipient_values(msg.get("ccRecipients", [])),
+        cc_display=cc_str,
+        received_at=msg.get("receivedDateTime"),
+        received_at_display=date,
+        is_read=is_read,
+        conversation_id=conv_id,
+        importance=msg.get("importance", ""),
+        body=body_text,
+        body_content_type=content_type,
+        attachments=attachment_items,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -275,13 +325,13 @@ async def read_email(message_id: str, summary_mode: bool = False, profile: str |
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def search_emails(
     query: str,
     max_results: int = 10,
     folder: Optional[str] = None,
     profile: str | None = None,
-) -> str:
+) -> SearchEmailsResponse:
     """
     Search messages using Graph KQL $search syntax.
 
@@ -294,7 +344,7 @@ async def search_emails(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted list of matching message summaries.
+        Structured search results.
     """
     g = get_graph(profile)
     params: dict = {
@@ -311,25 +361,12 @@ async def search_emails(
     result = await g.get(path, params=params)
     messages = result.get("value", [])
 
-    if not messages:
-        return f"No messages found matching **{query}**."
-
-    lines = [f"## Search results for '{query}' ({len(messages)} messages)\n"]
-    for msg in messages:
-        read_flag = "" if msg.get("isRead") else " **[UNREAD]**"
-        attach_flag = " 📎" if msg.get("hasAttachments") else ""
-        subject = msg.get("subject") or "(no subject)"
-        sender = _fmt_sender(msg.get("from"))
-        date = _fmt_date(msg.get("receivedDateTime"))
-        preview = (msg.get("bodyPreview") or "").replace("\n", " ")[:120]
-        lines.append(
-            f"- **{subject}**{read_flag}{attach_flag}\n"
-            f"  From: {sender} | {date}\n"
-            f"  ID: `{msg.get('id')}`\n"
-            f"  > {preview}\n"
-        )
-
-    return "\n".join(lines)
+    return SearchEmailsResponse(
+        query=query,
+        folder=folder,
+        count=len(messages),
+        messages=[_message_summary(msg) for msg in messages],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -337,18 +374,18 @@ async def search_emails(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def send_email(
     to: Union[str, list[str]],
     subject: str,
     body: str,
     cc: Optional[Union[str, list[str]]] = None,
     bcc: Optional[Union[str, list[str]]] = None,
-    body_type: str = "text",
+    body_type: BodyType = "text",
     save_to_sent: bool = True,
     reply_to: Optional[Union[str, list[str]]] = None,
     profile: str | None = None,
-) -> str:
+) -> SendEmailResponse:
     """
     Send a new email message.
 
@@ -364,7 +401,7 @@ async def send_email(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string with recipients and subject.
+        Structured send confirmation.
     """
     g = get_graph(profile)
     message: dict = {
@@ -390,11 +427,16 @@ async def send_email(
 
     await g.post("/me/sendMail", json=payload)
 
-    to_str = to if isinstance(to, str) else ", ".join(to)
-    return (
-        f"Email sent successfully.\n"
-        f"**To:** {to_str}\n"
-        f"**Subject:** {subject}"
+    return SendEmailResponse(
+        success=True,
+        action="send_email",
+        to=[addr.get("emailAddress", {}).get("address", "") for addr in message["toRecipients"]],
+        cc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("ccRecipients", [])],
+        bcc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("bccRecipients", [])],
+        reply_to=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("replyTo", [])],
+        subject=subject,
+        body_type=body_type,
+        saved_to_sent_items=save_to_sent,
     )
 
 
@@ -403,14 +445,14 @@ async def send_email(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def reply_email(
     message_id: str,
     body: str,
     reply_all: bool = False,
-    body_type: str = "text",
+    body_type: BodyType = "text",
     profile: str | None = None,
-) -> str:
+) -> ReplyEmailResponse:
     """
     Reply to an existing email message.
 
@@ -422,7 +464,7 @@ async def reply_email(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured reply confirmation.
     """
     g = get_graph(profile)
     endpoint = "replyAll" if reply_all else "reply"
@@ -443,8 +485,12 @@ async def reply_email(
 
     await g.post(f"/me/messages/{message_id}/{endpoint}", json=payload)
 
-    kind = "Reply All" if reply_all else "Reply"
-    return f"{kind} sent successfully for message `{message_id}`."
+    return ReplyEmailResponse(
+        success=True,
+        action="reply_all" if reply_all else "reply",
+        message_id=message_id,
+        body_type=body_type,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -452,13 +498,13 @@ async def reply_email(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def forward_email(
     message_id: str,
     to: Union[str, list[str]],
     comment: Optional[str] = None,
     profile: str | None = None,
-) -> str:
+) -> ForwardEmailResponse:
     """
     Forward an email message to one or more recipients.
 
@@ -469,7 +515,7 @@ async def forward_email(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured forward confirmation.
     """
     g = get_graph(profile)
     payload: dict = {
@@ -479,8 +525,13 @@ async def forward_email(
 
     await g.post(f"/me/messages/{message_id}/forward", json=payload)
 
-    to_str = to if isinstance(to, str) else ", ".join(to)
-    return f"Message `{message_id}` forwarded to {to_str}."
+    return ForwardEmailResponse(
+        success=True,
+        action="forward",
+        message_id=message_id,
+        to=[addr.get("emailAddress", {}).get("address", "") for addr in payload["toRecipients"]],
+        comment=comment or "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -488,8 +539,8 @@ async def forward_email(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def mark_as_read(message_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def mark_as_read(message_id: str, profile: str | None = None) -> MarkEmailReadResponse:
     """
     Mark a message as read.
 
@@ -498,15 +549,15 @@ async def mark_as_read(message_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured update confirmation.
     """
     g = get_graph(profile)
     await g.patch(f"/me/messages/{message_id}", json={"isRead": True})
-    return f"Message `{message_id}` marked as read."
+    return MarkEmailReadResponse(success=True, action="mark_as_read", message_id=message_id, is_read=True)
 
 
-@mcp.tool()
-async def mark_as_unread(message_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_IDEMPOTENT_WRITE)
+async def mark_as_unread(message_id: str, profile: str | None = None) -> MarkEmailReadResponse:
     """
     Mark a message as unread.
 
@@ -515,11 +566,11 @@ async def mark_as_unread(message_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured update confirmation.
     """
     g = get_graph(profile)
     await g.patch(f"/me/messages/{message_id}", json={"isRead": False})
-    return f"Message `{message_id}` marked as unread."
+    return MarkEmailReadResponse(success=True, action="mark_as_unread", message_id=message_id, is_read=False)
 
 
 # ---------------------------------------------------------------------------
@@ -527,8 +578,8 @@ async def mark_as_unread(message_id: str, profile: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def move_email(message_id: str, destination_folder: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_WRITE)
+async def move_email(message_id: str, destination_folder: str, profile: str | None = None) -> MoveEmailResponse:
     """
     Move a message to a different mail folder.
 
@@ -539,7 +590,7 @@ async def move_email(message_id: str, destination_folder: str, profile: str | No
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string with the new message ID.
+        Structured move confirmation.
     """
     g = get_graph(profile)
     result = await g.post(
@@ -547,9 +598,12 @@ async def move_email(message_id: str, destination_folder: str, profile: str | No
         json={"destinationId": destination_folder},
     )
     new_id = (result or {}).get("id", message_id)
-    return (
-        f"Message moved to **{destination_folder}**.\n"
-        f"New message ID: `{new_id}`"
+    return MoveEmailResponse(
+        success=True,
+        action="move",
+        message_id=message_id,
+        new_message_id=new_id,
+        destination_folder=destination_folder,
     )
 
 
@@ -558,8 +612,8 @@ async def move_email(message_id: str, destination_folder: str, profile: str | No
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def trash_email(message_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_WRITE)
+async def trash_email(message_id: str, profile: str | None = None) -> TrashEmailResponse:
     """
     Move a message to the Deleted Items folder (soft delete / recoverable).
 
@@ -570,7 +624,7 @@ async def trash_email(message_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured trash confirmation.
     """
     g = get_graph(profile)
     result = await g.post(
@@ -578,11 +632,14 @@ async def trash_email(message_id: str, profile: str | None = None) -> str:
         json={"destinationId": "deleteditems"},
     )
     new_id = (result or {}).get("id", message_id)
-    profile_hint = f' and `profile="{profile}"`' if profile else ""
-    return (
-        f"Message moved to Deleted Items (soft delete).\n"
-        f"New message ID: `{new_id}`\n"
-        f"To permanently delete, call `delete_email` with the new ID{profile_hint}."
+    return TrashEmailResponse(
+        success=True,
+        action="trash",
+        message_id=message_id,
+        new_message_id=new_id,
+        destination_folder="deleteditems",
+        soft_delete=True,
+        profile=profile,
     )
 
 
@@ -591,8 +648,8 @@ async def trash_email(message_id: str, profile: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def delete_email(message_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def delete_email(message_id: str, profile: str | None = None) -> DeleteEmailResponse:
     """
     Permanently delete a message from the mailbox. This action is IRREVERSIBLE.
 
@@ -604,11 +661,13 @@ async def delete_email(message_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured delete confirmation.
     """
     g = get_graph(profile)
     await g.post(f"/me/messages/{message_id}/permanentDelete")
-    return (
-        f"Message `{message_id}` permanently deleted.\n"
-        "**Warning:** This action is irreversible. The message cannot be recovered."
+    return DeleteEmailResponse(
+        success=True,
+        action="permanent_delete",
+        message_id=message_id,
+        irreversible=True,
     )

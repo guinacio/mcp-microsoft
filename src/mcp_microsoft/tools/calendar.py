@@ -20,14 +20,42 @@ Implemented:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, Union
+from typing import Any, Literal, Optional, Union
 
+from mcp.types import ToolAnnotations
+
+from mcp_microsoft.models import (
+    AttendeeAvailabilityInfo,
+    AttendeeInfo,
+    CreateEventResponse,
+    DeleteEventResponse,
+    DisplayAddress,
+    EventDetailResponse,
+    EventSummary,
+    FreeBusyResponse,
+    ListCalendarsResponse,
+    ListEventsResponse,
+    ListUpcomingEventsResponse,
+    MeetingSuggestion,
+    MeetingSuggestionsResponse,
+    PersonSchedule,
+    RsvpEventResponse,
+    ScheduleItemInfo,
+    CalendarInfo,
+    UpdateEventResponse,
+)
 from mcp_microsoft.graph import get_graph
 from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+BodyType = Literal["text", "html"]
+RsvpResponse = Literal["accept", "decline", "tentativelyAccept"]
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
+_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
 
 
 def _fmt_dt(iso: Optional[str]) -> str:
@@ -81,13 +109,46 @@ def _parse_attendees(
     ]
 
 
+def _attendee_values(attendees: list[dict]) -> list[AttendeeInfo]:
+    """Normalize Graph attendee objects into simple dictionaries."""
+    values: list[AttendeeInfo] = []
+    for attendee in attendees or []:
+        email_address = attendee.get("emailAddress", {})
+        values.append(
+            AttendeeInfo(
+                name=email_address.get("name", ""),
+                address=email_address.get("address", ""),
+                type=attendee.get("type", ""),
+                response=attendee.get("status", {}).get("response", ""),
+            )
+        )
+    return values
+
+
+def _event_summary(event: dict[str, Any]) -> EventSummary:
+    """Normalize a Graph event into a summary payload."""
+    return EventSummary(
+        id=event.get("id", ""),
+        subject=event.get("subject") or "(no subject)",
+        start=event.get("start", {}).get("dateTime"),
+        start_display=_fmt_dt(event.get("start", {}).get("dateTime")),
+        end=event.get("end", {}).get("dateTime"),
+        end_display=_fmt_dt(event.get("end", {}).get("dateTime")),
+        timezone=event.get("start", {}).get("timeZone", ""),
+        location=event.get("location", {}).get("displayName", ""),
+        is_all_day=event.get("isAllDay", False),
+        is_cancelled=event.get("isCancelled", False),
+        response_status=event.get("responseStatus", {}).get("response", ""),
+    )
+
+
 # ---------------------------------------------------------------------------
 # list_calendars
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def list_calendars(profile: str | None = None) -> str:
+@mcp.tool(annotations=_READ_ONLY)
+async def list_calendars(profile: str | None = None) -> ListCalendarsResponse:
     """
     List all calendars in the user's mailbox.
 
@@ -95,7 +156,7 @@ async def list_calendars(profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted table of calendars with name, color, and ID.
+        Structured calendar metadata.
     """
     g = get_graph(profile)
     params = {
@@ -106,22 +167,19 @@ async def list_calendars(profile: str | None = None) -> str:
     result = await g.get("/me/calendars", params=params)
     calendars = result.get("value", [])
 
-    if not calendars:
-        return "No calendars found."
-
-    lines = ["## Calendars\n"]
-    lines.append("| Calendar | Color | Default | Editable | ID |")
-    lines.append("|---|---|---|---|---|")
-
-    for cal in calendars:
-        name = cal.get("name", "(unnamed)")
-        color = cal.get("color", "auto")
-        is_default = "Yes" if cal.get("isDefaultCalendar") else "No"
-        can_edit = "Yes" if cal.get("canEdit") else "No"
-        cal_id = cal.get("id", "")
-        lines.append(f"| {name} | {color} | {is_default} | {can_edit} | `{cal_id}` |")
-
-    return "\n".join(lines)
+    return ListCalendarsResponse(
+        count=len(calendars),
+        calendars=[
+            CalendarInfo(
+                id=cal.get("id", ""),
+                name=cal.get("name", "(unnamed)"),
+                color=cal.get("color", "auto"),
+                is_default=cal.get("isDefaultCalendar", False),
+                can_edit=cal.get("canEdit", False),
+            )
+            for cal in calendars
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -129,13 +187,13 @@ async def list_calendars(profile: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def list_events(
     max_results: int = 10,
     filter_start: Optional[str] = None,
     calendar_id: Optional[str] = None,
     profile: str | None = None,
-) -> str:
+) -> ListEventsResponse:
     """
     List events from a calendar.
 
@@ -150,7 +208,7 @@ async def list_events(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted list of event summaries.
+        Structured event summaries.
     """
     g = get_graph(profile)
     params: dict = {
@@ -171,25 +229,12 @@ async def list_events(
     result = await g.get(path, params=params)
     events = result.get("value", [])
 
-    if not events:
-        return "No events found."
-
-    lines = [f"## Events ({len(events)} found)\n"]
-    for ev in events:
-        subject = ev.get("subject") or "(no subject)"
-        start = _fmt_dt(ev.get("start", {}).get("dateTime"))
-        end = _fmt_dt(ev.get("end", {}).get("dateTime"))
-        location = ev.get("location", {}).get("displayName", "")
-        all_day = " [All Day]" if ev.get("isAllDay") else ""
-        cancelled = " [CANCELLED]" if ev.get("isCancelled") else ""
-        loc_str = f" | Location: {location}" if location else ""
-        lines.append(
-            f"- **{subject}**{all_day}{cancelled}\n"
-            f"  {start} — {end}{loc_str}\n"
-            f"  ID: `{ev.get('id')}`\n"
-        )
-
-    return "\n".join(lines)
+    return ListEventsResponse(
+        calendar_id=calendar_id,
+        filter_start=filter_start,
+        count=len(events),
+        events=[_event_summary(ev) for ev in events],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -197,14 +242,14 @@ async def list_events(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def list_upcoming_events(
     start_datetime: str,
     end_datetime: str,
     max_results: int = 25,
     calendar_id: Optional[str] = None,
     profile: str | None = None,
-) -> str:
+) -> ListUpcomingEventsResponse:
     """
     List upcoming events using the calendarView endpoint, which correctly
     expands recurring event instances within the specified time window.
@@ -217,7 +262,7 @@ async def list_upcoming_events(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted list of event summaries within the time window.
+        Structured event summaries within the time window.
     """
     g = get_graph(profile)
     params: dict = {
@@ -236,25 +281,13 @@ async def list_upcoming_events(
     result = await g.get(path, params=params)
     events = result.get("value", [])
 
-    if not events:
-        return f"No events found between {start_datetime} and {end_datetime}."
-
-    lines = [f"## Upcoming Events ({len(events)} found)\n"]
-    for ev in events:
-        subject = ev.get("subject") or "(no subject)"
-        start = _fmt_dt(ev.get("start", {}).get("dateTime"))
-        end = _fmt_dt(ev.get("end", {}).get("dateTime"))
-        location = ev.get("location", {}).get("displayName", "")
-        all_day = " [All Day]" if ev.get("isAllDay") else ""
-        cancelled = " [CANCELLED]" if ev.get("isCancelled") else ""
-        loc_str = f" | Location: {location}" if location else ""
-        lines.append(
-            f"- **{subject}**{all_day}{cancelled}\n"
-            f"  {start} — {end}{loc_str}\n"
-            f"  ID: `{ev.get('id')}`\n"
-        )
-
-    return "\n".join(lines)
+    return ListUpcomingEventsResponse(
+        calendar_id=calendar_id,
+        start_datetime=start_datetime,
+        end_datetime=end_datetime,
+        count=len(events),
+        events=[_event_summary(ev) for ev in events],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -262,8 +295,8 @@ async def list_upcoming_events(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def get_event(event_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_READ_ONLY)
+async def get_event(event_id: str, profile: str | None = None) -> EventDetailResponse:
     """
     Fetch a calendar event by ID with full details.
 
@@ -272,7 +305,7 @@ async def get_event(event_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted event details including attendees, body, and location.
+        Structured event details.
     """
     g = get_graph(profile)
     params = {
@@ -293,8 +326,6 @@ async def get_event(event_id: str, profile: str | None = None) -> str:
     organizer_ea = ev.get("organizer", {}).get("emailAddress", {})
     organizer = f"{organizer_ea.get('name', '')} <{organizer_ea.get('address', '')}>".strip()
     attendees_str = _fmt_attendees(ev.get("attendees", []))
-    all_day = "Yes" if ev.get("isAllDay") else "No"
-    cancelled = "Yes" if ev.get("isCancelled") else "No"
     show_as = ev.get("showAs", "")
     web_link = ev.get("webLink", "")
 
@@ -323,30 +354,34 @@ async def get_event(event_id: str, profile: str | None = None) -> str:
         pattern = recurrence.get("pattern", {})
         recurrence_str = f"{pattern.get('type', '')} (interval: {pattern.get('interval', 1)})"
 
-    lines = [
-        f"## {subject}",
-        f"**When:** {start} — {end} ({start_tz})",
-        f"**All Day:** {all_day}",
-    ]
-    if location:
-        lines.append(f"**Location:** {location}")
-    lines.append(f"**Organizer:** {organizer}")
-    lines.append(f"**Attendees:** {attendees_str}")
-    lines.append(f"**Show As:** {show_as}")
-    if cancelled == "Yes":
-        lines.append("**Status:** CANCELLED")
-    if recurrence_str:
-        lines.append(f"**Recurrence:** {recurrence_str}")
-    if join_url:
-        lines.append(f"**Join URL:** {join_url}")
-    if web_link:
-        lines.append(f"**Web Link:** {web_link}")
-    lines.append(f"**Event ID:** `{event_id}`")
-
-    if body_text:
-        lines += ["", "---", "", body_text]
-
-    return "\n".join(lines)
+    return EventDetailResponse(
+        id=event_id,
+        subject=subject,
+        start=ev.get("start", {}).get("dateTime"),
+        start_display=start,
+        end=ev.get("end", {}).get("dateTime"),
+        end_display=end,
+        timezone=start_tz,
+        location=location,
+        organizer=DisplayAddress(
+            display=organizer,
+            name=organizer_ea.get("name", ""),
+            address=organizer_ea.get("address", ""),
+        ),
+        attendees=_attendee_values(ev.get("attendees", [])),
+        attendees_display=attendees_str,
+        is_all_day=ev.get("isAllDay", False),
+        is_cancelled=ev.get("isCancelled", False),
+        show_as=show_as,
+        web_link=web_link,
+        join_url=join_url,
+        body=body_text,
+        body_content_type=content_type,
+        recurrence=recurrence,
+        recurrence_display=recurrence_str,
+        importance=ev.get("importance", ""),
+        sensitivity=ev.get("sensitivity", ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -354,14 +389,14 @@ async def get_event(event_id: str, profile: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def create_event(
     subject: str,
     start_datetime: str,
     end_datetime: str,
     timezone: str = "UTC",
     body: Optional[str] = None,
-    body_type: str = "text",
+    body_type: BodyType = "text",
     location: Optional[str] = None,
     attendees: Optional[Union[str, list[str]]] = None,
     optional_attendees: Optional[Union[str, list[str]]] = None,
@@ -369,7 +404,7 @@ async def create_event(
     is_online_meeting: bool = False,
     calendar_id: Optional[str] = None,
     profile: str | None = None,
-) -> str:
+) -> CreateEventResponse:
     """
     Create a new calendar event.
 
@@ -389,7 +424,7 @@ async def create_event(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string with the new event ID.
+        Structured event creation confirmation.
     """
     g = get_graph(profile)
     event: dict = {
@@ -432,18 +467,18 @@ async def create_event(
     if online_meeting:
         join_url = online_meeting.get("joinUrl", "")
 
-    lines = [
-        f"Event created successfully.",
-        f"**Subject:** {subject}",
-        f"**When:** {start_datetime} — {end_datetime} ({timezone})",
-        f"**Event ID:** `{event_id}`",
-    ]
-    if web_link:
-        lines.append(f"**Web Link:** {web_link}")
-    if join_url:
-        lines.append(f"**Join URL:** {join_url}")
-
-    return "\n".join(lines)
+    return CreateEventResponse(
+        success=True,
+        action="create_event",
+        event_id=event_id,
+        subject=subject,
+        start_datetime=start_datetime,
+        end_datetime=end_datetime,
+        timezone=timezone,
+        calendar_id=calendar_id,
+        web_link=web_link,
+        join_url=join_url,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +486,7 @@ async def create_event(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def update_event(
     event_id: str,
     subject: Optional[str] = None,
@@ -459,12 +494,12 @@ async def update_event(
     end_datetime: Optional[str] = None,
     timezone: str = "UTC",
     body: Optional[str] = None,
-    body_type: str = "text",
+    body_type: BodyType = "text",
     location: Optional[str] = None,
     attendees: Optional[Union[str, list[str]]] = None,
     is_all_day: Optional[bool] = None,
     profile: str | None = None,
-) -> str:
+) -> UpdateEventResponse:
     """
     Update an existing calendar event. Only provided fields are changed.
 
@@ -482,7 +517,7 @@ async def update_event(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string with updated event ID.
+        Structured event update confirmation.
     """
     g = get_graph(profile)
     patch: dict = {}
@@ -506,16 +541,24 @@ async def update_event(
         patch["isAllDay"] = is_all_day
 
     if not patch:
-        return "No fields to update — provide at least one field to change."
+        return UpdateEventResponse(
+            success=False,
+            action="update_event",
+            event_id=event_id,
+            updated_fields=[],
+            error="No fields to update.",
+        )
 
     result = await g.patch(f"/me/events/{event_id}", json=patch)
 
     updated_id = (result or {}).get("id", event_id)
     updated_fields = ", ".join(patch.keys())
-    return (
-        f"Event updated successfully.\n"
-        f"**Event ID:** `{updated_id}`\n"
-        f"**Updated fields:** {updated_fields}"
+    return UpdateEventResponse(
+        success=True,
+        action="update_event",
+        event_id=updated_id,
+        updated_fields=list(patch.keys()),
+        updated_fields_display=updated_fields,
     )
 
 
@@ -524,8 +567,8 @@ async def update_event(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def delete_event(event_id: str, profile: str | None = None) -> str:
+@mcp.tool(annotations=_DESTRUCTIVE)
+async def delete_event(event_id: str, profile: str | None = None) -> DeleteEventResponse:
     """
     Delete a calendar event.
 
@@ -534,11 +577,11 @@ async def delete_event(event_id: str, profile: str | None = None) -> str:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured event deletion confirmation.
     """
     g = get_graph(profile)
     await g.delete(f"/me/events/{event_id}")
-    return f"Event `{event_id}` deleted successfully."
+    return DeleteEventResponse(success=True, action="delete_event", event_id=event_id)
 
 
 # ---------------------------------------------------------------------------
@@ -546,14 +589,14 @@ async def delete_event(event_id: str, profile: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 async def rsvp_event(
     event_id: str,
-    response: str,
+    response: RsvpResponse,
     comment: Optional[str] = None,
     send_response: bool = True,
     profile: str | None = None,
-) -> str:
+) -> RsvpEventResponse:
     """
     Respond to a calendar event invitation (accept, decline, or tentatively accept).
 
@@ -565,19 +608,22 @@ async def rsvp_event(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Confirmation string.
+        Structured RSVP confirmation.
     """
     g = get_graph(profile)
-    valid_responses = {"accept", "decline", "tentativelyAccept"}
-    if response not in valid_responses:
-        return f"Invalid response '{response}'. Must be one of: {', '.join(sorted(valid_responses))}"
-
     payload: dict = {"sendResponse": send_response}
     if comment:
         payload["comment"] = comment
 
     await g.post(f"/me/events/{event_id}/{response}", json=payload)
-    return f"Event `{event_id}` — response: **{response}** sent successfully."
+    return RsvpEventResponse(
+        success=True,
+        action="rsvp_event",
+        event_id=event_id,
+        response=response,
+        comment=comment,
+        send_response=send_response,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -585,14 +631,14 @@ async def rsvp_event(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def get_free_busy(
     email_addresses: Union[str, list[str]],
     start_datetime: str,
     end_datetime: str,
     timezone: str = "UTC",
     profile: str | None = None,
-) -> str:
+) -> FreeBusyResponse:
     """
     Check free/busy availability for one or more people.
 
@@ -604,7 +650,7 @@ async def get_free_busy(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted schedule availability for each person.
+        Structured free/busy data for each requested person.
     """
     g = get_graph(profile)
     if isinstance(email_addresses, str):
@@ -622,33 +668,42 @@ async def get_free_busy(
     result = await g.post("/me/calendar/getSchedule", json=payload)
     schedule_items = (result or {}).get("value", [])
 
-    if not schedule_items:
-        return "No schedule data returned."
-
-    lines = ["## Free/Busy Schedule\n"]
+    people: list[PersonSchedule] = []
     for sched in schedule_items:
         email = sched.get("scheduleId", "unknown")
         availability = sched.get("availabilityView", "")
         items = sched.get("scheduleItems", [])
+        people.append(
+            PersonSchedule(
+                email=email,
+                availability_view=availability,
+                legend={
+                    "0": "Free",
+                    "1": "Tentative",
+                    "2": "Busy",
+                    "3": "OOF",
+                    "4": "Working Elsewhere",
+                },
+                schedule_items=[
+                    ScheduleItemInfo(
+                        status=item.get("status", ""),
+                        start=item.get("start", {}).get("dateTime"),
+                        start_display=_fmt_dt(item.get("start", {}).get("dateTime")),
+                        end=item.get("end", {}).get("dateTime"),
+                        end_display=_fmt_dt(item.get("end", {}).get("dateTime")),
+                        subject=item.get("subject", ""),
+                    )
+                    for item in items
+                ],
+            )
+        )
 
-        lines.append(f"### {email}")
-        if availability:
-            # Availability view: 0=free, 1=tentative, 2=busy, 3=oof, 4=working elsewhere
-            legend = {"0": "Free", "1": "Tentative", "2": "Busy", "3": "OOF", "4": "Working Elsewhere"}
-            lines.append(f"Availability slots (30 min each): `{availability}`")
-            lines.append(f"Legend: {' | '.join(f'{k}={v}' for k, v in legend.items())}")
-
-        if items:
-            for item in items:
-                status = item.get("status", "")
-                start = _fmt_dt(item.get("start", {}).get("dateTime"))
-                end = _fmt_dt(item.get("end", {}).get("dateTime"))
-                subj = item.get("subject", "")
-                subj_str = f" — {subj}" if subj else ""
-                lines.append(f"  - [{status}] {start} — {end}{subj_str}")
-        lines.append("")
-
-    return "\n".join(lines)
+    return FreeBusyResponse(
+        start_datetime=start_datetime,
+        end_datetime=end_datetime,
+        timezone=timezone,
+        people=people,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +711,7 @@ async def get_free_busy(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 async def find_meeting_times(
     attendees: Union[str, list[str]],
     duration_minutes: int = 60,
@@ -666,7 +721,7 @@ async def find_meeting_times(
     max_candidates: int = 5,
     is_organizer_optional: bool = False,
     profile: str | None = None,
-) -> str:
+) -> MeetingSuggestionsResponse:
     """
     Find available meeting time suggestions for a set of attendees.
 
@@ -684,7 +739,7 @@ async def find_meeting_times(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Markdown-formatted list of suggested meeting times with attendee availability.
+        Structured meeting-time suggestions.
     """
     g = get_graph(profile)
     attendee_list = _parse_attendees(attendees, "required")
@@ -712,33 +767,30 @@ async def find_meeting_times(
     suggestions = (result or {}).get("meetingTimeSuggestions", [])
     emptiness = (result or {}).get("emptySuggestionsReason", "")
 
-    if not suggestions:
-        reason = f" Reason: {emptiness}" if emptiness else ""
-        return f"No meeting time suggestions found.{reason}"
-
-    lines = [f"## Meeting Time Suggestions ({len(suggestions)} found)\n"]
-    for i, sug in enumerate(suggestions, 1):
+    normalized: list[MeetingSuggestion] = []
+    for sug in suggestions:
         confidence = sug.get("confidence", 0)
-        confidence_pct = f"{confidence * 100:.0f}%" if isinstance(confidence, float) else str(confidence)
         meeting_ts = sug.get("meetingTimeSlot", {})
-        start = _fmt_dt(meeting_ts.get("start", {}).get("dateTime"))
-        end = _fmt_dt(meeting_ts.get("end", {}).get("dateTime"))
-
-        att_avail = sug.get("attendeeAvailability", [])
-        avail_parts = []
-        for aa in att_avail:
-            aa_email = aa.get("attendee", {}).get("emailAddress", {}).get("address", "")
-            aa_status = aa.get("availability", "")
-            avail_parts.append(f"{aa_email}: {aa_status}")
-
-        lines.append(
-            f"### Option {i} (confidence: {confidence_pct})\n"
-            f"  **Time:** {start} — {end}\n"
+        normalized.append(
+            MeetingSuggestion(
+                confidence=confidence,
+                start=meeting_ts.get("start", {}).get("dateTime"),
+                start_display=_fmt_dt(meeting_ts.get("start", {}).get("dateTime")),
+                end=meeting_ts.get("end", {}).get("dateTime"),
+                end_display=_fmt_dt(meeting_ts.get("end", {}).get("dateTime")),
+                attendee_availability=[
+                    AttendeeAvailabilityInfo(
+                        email=aa.get("attendee", {}).get("emailAddress", {}).get("address", ""),
+                        availability=aa.get("availability", ""),
+                    )
+                    for aa in sug.get("attendeeAvailability", [])
+                ],
+            )
         )
-        if avail_parts:
-            lines.append("  **Attendee availability:**")
-            for part in avail_parts:
-                lines.append(f"  - {part}")
-        lines.append("")
 
-    return "\n".join(lines)
+    return MeetingSuggestionsResponse(
+        count=len(normalized),
+        suggestions=normalized,
+        empty_suggestions_reason=emptiness or None,
+        timezone=timezone,
+    )

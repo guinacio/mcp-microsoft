@@ -16,6 +16,17 @@ from __future__ import annotations
 
 from typing import Optional
 
+from mcp.types import ToolAnnotations
+
+from mcp_microsoft.models import (
+    AddProfileResponse,
+    AddedProfileInfo,
+    AuthenticateProfileResponse,
+    ListProfilesResponse,
+    ProfileInfo,
+    RemoveProfileResponse,
+    SetDefaultProfileResponse,
+)
 from mcp_microsoft.server import mcp
 
 
@@ -23,9 +34,18 @@ from mcp_microsoft.server import mcp
 # list_ms_profiles
 # ---------------------------------------------------------------------------
 
+_LOCAL_READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+_LOCAL_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=False)
+_LOCAL_IDEMPOTENT = ToolAnnotations(
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+_LOCAL_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=False)
+_AUTH_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
 
-@mcp.tool()
-async def list_ms_profiles() -> str:
+@mcp.tool(annotations=_LOCAL_READ)
+async def list_ms_profiles() -> ListProfilesResponse:
     """
     List all configured Microsoft 365 profiles.
 
@@ -33,7 +53,7 @@ async def list_ms_profiles() -> str:
     authentication status, and whether it is the default.
 
     Returns:
-        Markdown-formatted table of profiles.
+        Structured profile configuration data.
     """
     from mcp_microsoft.profiles import ProfileManager
 
@@ -41,25 +61,26 @@ async def list_ms_profiles() -> str:
     profiles = pm.profiles
     default_name = pm.default_profile_name
 
-    if not profiles:
-        return "No profiles configured."
-
-    lines = ["## Microsoft 365 Profiles\n"]
-    lines.append("| Profile | Client ID | Tenant | Default | Authenticated |")
-    lines.append("|---|---|---|---|---|")
-
+    items: list[ProfileInfo] = []
     for name, cfg in sorted(profiles.items()):
-        # Mask client ID: show first 8 chars + ...
         cid = cfg.client_id
         masked = f"{cid[:8]}..." if len(cid) > 8 else cid
-        is_default = "Yes" if name == default_name else ""
         try:
-            authed = "Yes" if pm.is_authenticated(name) else "No"
+            authed = pm.is_authenticated(name)
         except Exception:
-            authed = "Error"
-        lines.append(f"| **{name}** | `{masked}` | {cfg.tenant_id} | {is_default} | {authed} |")
+            authed = None
+        items.append(
+            ProfileInfo(
+                name=name,
+                client_id_masked=masked,
+                tenant_id=cfg.tenant_id,
+                is_default=name == default_name,
+                is_authenticated=authed,
+                cache_path=str(cfg.cache_path),
+            )
+        )
 
-    return "\n".join(lines)
+    return ListProfilesResponse(default_profile=default_name or None, count=len(items), profiles=items)
 
 
 # ---------------------------------------------------------------------------
@@ -67,13 +88,13 @@ async def list_ms_profiles() -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=_LOCAL_WRITE)
 async def add_ms_profile(
     name: str,
     client_id: str,
     tenant_id: str = "common",
     set_as_default: bool = False,
-) -> str:
+) -> AddProfileResponse:
     """
     Add a new Microsoft 365 profile.
 
@@ -89,7 +110,7 @@ async def add_ms_profile(
         set_as_default: When True, make this the default profile. Defaults to False.
 
     Returns:
-        Confirmation string.
+        Structured profile creation confirmation.
     """
     from mcp_microsoft.profiles import ProfileManager
 
@@ -102,20 +123,19 @@ async def add_ms_profile(
             set_as_default=set_as_default,
         )
     except ValueError as exc:
-        return f"Error: {exc}"
+        return AddProfileResponse(success=False, action="add_profile", error=str(exc))
 
-    lines = [
-        f"Profile **{cfg.name}** added successfully.",
-        f"**Client ID:** `{cfg.client_id}`",
-        f"**Tenant:** {cfg.tenant_id}",
-        f"**Cache:** `{cfg.cache_path}`",
-    ]
-    if set_as_default:
-        lines.append("**Set as default profile.**")
-    lines.append(
-        "\nCall `authenticate_ms_profile` with this profile name to sign in."
+    return AddProfileResponse(
+        success=True,
+        action="add_profile",
+        profile=AddedProfileInfo(
+            name=cfg.name,
+            client_id=cfg.client_id,
+            tenant_id=cfg.tenant_id,
+            cache_path=str(cfg.cache_path),
+            is_default=set_as_default or pm.default_profile_name == cfg.name,
+        ),
     )
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -123,8 +143,8 @@ async def add_ms_profile(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def remove_ms_profile(name: str) -> str:
+@mcp.tool(annotations=_LOCAL_DESTRUCTIVE)
+async def remove_ms_profile(name: str) -> RemoveProfileResponse:
     """
     Remove a Microsoft 365 profile and its cached tokens.
 
@@ -134,7 +154,7 @@ async def remove_ms_profile(name: str) -> str:
         name: Profile name to remove.
 
     Returns:
-        Confirmation string.
+        Structured profile removal confirmation.
     """
     from mcp_microsoft.profiles import ProfileManager
 
@@ -142,9 +162,9 @@ async def remove_ms_profile(name: str) -> str:
     try:
         pm.remove_profile(name)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return RemoveProfileResponse(success=False, action="remove_profile", profile=name, error=str(exc))
 
-    return f"Profile **{name}** removed. Token cache deleted."
+    return RemoveProfileResponse(success=True, action="remove_profile", profile=name)
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +172,8 @@ async def remove_ms_profile(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def authenticate_ms_profile(profile: Optional[str] = None) -> str:
+@mcp.tool(annotations=_AUTH_WRITE)
+async def authenticate_ms_profile(profile: Optional[str] = None) -> AuthenticateProfileResponse:
     """
     Trigger interactive authentication for a profile.
 
@@ -164,7 +184,7 @@ async def authenticate_ms_profile(profile: Optional[str] = None) -> str:
         profile: Profile name to authenticate. Omit to use the default profile.
 
     Returns:
-        Confirmation string with the authenticated account.
+        Structured authentication result.
     """
     from mcp_microsoft.profiles import ProfileManager
 
@@ -174,12 +194,19 @@ async def authenticate_ms_profile(profile: Optional[str] = None) -> str:
         # Force token acquisition (will trigger interactive if needed)
         pm.get_token(cfg.name)
     except (ValueError, RuntimeError) as exc:
-        return f"Authentication failed: {exc}"
+        return AuthenticateProfileResponse(
+            success=False,
+            action="authenticate_profile",
+            profile=profile,
+            error=str(exc),
+        )
 
-    return (
-        f"Profile **{cfg.name}** authenticated successfully.\n"
-        f"**Tenant:** {cfg.tenant_id}\n"
-        f"Tokens cached at `{cfg.cache_path}`."
+    return AuthenticateProfileResponse(
+        success=True,
+        action="authenticate_profile",
+        profile=cfg.name,
+        tenant_id=cfg.tenant_id,
+        cache_path=str(cfg.cache_path),
     )
 
 
@@ -188,8 +215,8 @@ async def authenticate_ms_profile(profile: Optional[str] = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def set_default_ms_profile(name: str) -> str:
+@mcp.tool(annotations=_LOCAL_IDEMPOTENT)
+async def set_default_ms_profile(name: str) -> SetDefaultProfileResponse:
     """
     Change which profile is used by default when no profile is specified.
 
@@ -197,7 +224,7 @@ async def set_default_ms_profile(name: str) -> str:
         name: Profile name to set as the new default.
 
     Returns:
-        Confirmation string.
+        Structured default-profile update confirmation.
     """
     from mcp_microsoft.profiles import ProfileManager
 
@@ -205,6 +232,6 @@ async def set_default_ms_profile(name: str) -> str:
     try:
         pm.set_default(name)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return SetDefaultProfileResponse(success=False, action="set_default_profile", profile=name, error=str(exc))
 
-    return f"Default profile changed to **{name}**."
+    return SetDefaultProfileResponse(success=True, action="set_default_profile", profile=name)
