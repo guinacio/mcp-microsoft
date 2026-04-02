@@ -65,6 +65,9 @@ from mcp_microsoft.tools import profiles  # noqa: E402, F401
 # Contacts tools
 from mcp_microsoft.tools import contacts  # noqa: E402, F401
 
+# Teams tools
+from mcp_microsoft.tools import teams  # noqa: E402, F401
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------

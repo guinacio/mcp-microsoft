@@ -13,9 +13,18 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+_RETRY_STATUSES = frozenset({429, 503})
+_MAX_RETRIES = 3
+_DEFAULT_RETRY_AFTER = 5  # seconds, used when Retry-After header is absent
+_MAX_RETRY_AFTER = 60     # cap so a misbehaving server cannot stall forever
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 _REQUEST_TIMEOUT = 30.0
@@ -111,70 +120,91 @@ class GraphClient:
             RuntimeError: if auth token acquisition fails.
         """
         url = f"{GRAPH_BASE}{path}"
-        headers = self._get_headers()
 
-        # Merge caller-supplied headers (e.g. Content-Type for PUT)
-        if "headers" in kwargs:
-            merged = {**headers, **kwargs.pop("headers")}
-        else:
-            merged = headers
+        # Merge caller-supplied headers (e.g. Content-Type for PUT).
+        # Re-fetched on every attempt so a token refresh mid-retry is picked up.
+        extra_headers: dict[str, str] = kwargs.pop("headers", {})
 
         client = get_request_http_client()
-        if client is None:
-            async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as ephemeral_client:
-                response = await ephemeral_client.request(
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            headers = {**self._get_headers(), **extra_headers}
+
+            if client is None:
+                async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as ephemeral_client:
+                    response = await ephemeral_client.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        **kwargs,
+                    )
+            else:
+                response = await client.request(
                     method=method,
                     url=url,
-                    headers=merged,
+                    headers=headers,
                     **kwargs,
                 )
-        else:
-            response = await client.request(
-                method=method,
-                url=url,
-                headers=merged,
-                **kwargs,
-            )
 
-        # Surface rate-limit hints clearly
-        if response.status_code == 429:
-            retry_after = response.headers.get("Retry-After", "unknown")
-            raise httpx.HTTPStatusError(
-                f"Graph API rate limit exceeded. Retry after {retry_after} seconds.",
-                request=response.request,
-                response=response,
-            )
+            if response.status_code in _RETRY_STATUSES:
+                raw_retry_after = response.headers.get("Retry-After")
+                try:
+                    wait = min(int(raw_retry_after), _MAX_RETRY_AFTER) if raw_retry_after else _DEFAULT_RETRY_AFTER
+                except ValueError:
+                    wait = _DEFAULT_RETRY_AFTER
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            # Append Graph error body for better diagnostics
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "Graph API returned %s (attempt %d/%d); retrying in %ds.",
+                        response.status_code,
+                        attempt,
+                        _MAX_RETRIES,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+
+                # All retries exhausted — raise with helpful message.
+                raise httpx.HTTPStatusError(
+                    f"Graph API returned {response.status_code} after {_MAX_RETRIES} attempts."
+                    f" Last Retry-After: {raw_retry_after or 'not provided'}.",
+                    request=response.request,
+                    response=response,
+                )
+
             try:
-                body = response.json()
-                error_info = body.get("error", {})
-                msg = f"{exc} | Graph error: {error_info.get('code')} — {error_info.get('message')}"
-            except Exception:
-                msg = str(exc)
-            raise httpx.HTTPStatusError(msg, request=exc.request, response=exc.response) from None
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                # Append Graph error body for better diagnostics
+                try:
+                    body = response.json()
+                    error_info = body.get("error", {})
+                    msg = f"{exc} | Graph error: {error_info.get('code')} — {error_info.get('message')}"
+                except Exception:
+                    msg = str(exc)
+                raise httpx.HTTPStatusError(msg, request=exc.request, response=exc.response) from None
 
-        # 204 No Content — nothing to parse
-        if response.status_code == 204:
-            return None
+            # 204 No Content — nothing to parse
+            if response.status_code == 204:
+                return None
 
-        # 202 Accepted — used by copy operations. Return body + Location header.
-        if response.status_code == 202:
-            result: dict = {}
-            try:
-                result = response.json()
-            except Exception:
-                pass
-            # Preserve the Location header (monitor URL for async operations)
-            location = response.headers.get("Location", "")
-            if location:
-                result["_monitor_url"] = location
-            return result or None
+            # 202 Accepted — used by copy operations. Return body + Location header.
+            if response.status_code == 202:
+                result: dict = {}
+                try:
+                    result = response.json()
+                except Exception:
+                    pass
+                # Preserve the Location header (monitor URL for async operations)
+                location = response.headers.get("Location", "")
+                if location:
+                    result["_monitor_url"] = location
+                return result or None
 
-        return response.json()
+            return response.json()
+
+        # Unreachable, but satisfies type checkers.
+        raise RuntimeError("Retry loop exited without returning or raising.")
 
     # ------------------------------------------------------------------
     # Convenience methods
@@ -237,28 +267,50 @@ class GraphClient:
     async def get_raw(self, path: str) -> bytes:
         """GET request that returns raw bytes (used for file downloads)."""
         url = f"{GRAPH_BASE}{path}"
-        headers = self._get_headers()
-
         client = get_transfer_http_client()
-        if client is None:
-            async with httpx.AsyncClient(
-                timeout=_TRANSFER_TIMEOUT,
-                follow_redirects=True,
-            ) as ephemeral_client:
-                response = await ephemeral_client.get(url, headers=headers)
-        else:
-            response = await client.get(url, headers=headers)
 
-        if response.status_code == 429:
-            retry_after = response.headers.get("Retry-After", "unknown")
-            raise httpx.HTTPStatusError(
-                f"Graph API rate limit exceeded. Retry after {retry_after} seconds.",
-                request=response.request,
-                response=response,
-            )
+        for attempt in range(1, _MAX_RETRIES + 1):
+            headers = self._get_headers()
 
-        response.raise_for_status()
-        return response.content
+            if client is None:
+                async with httpx.AsyncClient(
+                    timeout=_TRANSFER_TIMEOUT,
+                    follow_redirects=True,
+                ) as ephemeral_client:
+                    response = await ephemeral_client.get(url, headers=headers)
+            else:
+                response = await client.get(url, headers=headers)
+
+            if response.status_code in _RETRY_STATUSES:
+                raw_retry_after = response.headers.get("Retry-After")
+                try:
+                    wait = min(int(raw_retry_after), _MAX_RETRY_AFTER) if raw_retry_after else _DEFAULT_RETRY_AFTER
+                except ValueError:
+                    wait = _DEFAULT_RETRY_AFTER
+
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "Graph API returned %s on get_raw (attempt %d/%d); retrying in %ds.",
+                        response.status_code,
+                        attempt,
+                        _MAX_RETRIES,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+
+                raise httpx.HTTPStatusError(
+                    f"Graph API returned {response.status_code} after {_MAX_RETRIES} attempts."
+                    f" Last Retry-After: {raw_retry_after or 'not provided'}.",
+                    request=response.request,
+                    response=response,
+                )
+
+            response.raise_for_status()
+            return response.content
+
+        # Unreachable, but satisfies type checkers.
+        raise RuntimeError("Retry loop exited without returning or raising.")
 
 
 def get_graph(profile: str | None = None) -> GraphClient:

@@ -628,6 +628,7 @@ class AuthenticateProfileResponse(ActionResult):
     profile: str | None = None
     tenant_id: str = ""
     cache_path: str = ""
+    device_code_message: str | None = None
 
 
 class SetDefaultProfileResponse(ActionResult):

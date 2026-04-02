@@ -7,6 +7,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.6.0] — 2026-04-02
+
+### Added
+- **Teams module** (`tools/teams.py`) — 18 new Microsoft Graph tools across 4 areas:
+  - Teams & Channels: `teams_list_joined`, `teams_get`, `teams_list_channels`, `teams_get_channel`, `teams_create_channel`
+  - Channel Messages: `teams_list_channel_messages`, `teams_get_channel_message`, `teams_send_channel_message`, `teams_reply_to_channel_message`, `teams_list_message_replies`
+  - Chats: `teams_list_chats`, `teams_get_chat`, `teams_list_chat_messages`, `teams_send_chat_message`, `teams_create_chat`
+  - Online Meetings: `teams_create_meeting`, `teams_get_meeting`, `teams_list_meetings`
+- 6 new OAuth scopes in `profiles.py`: `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.ReadWrite`, `OnlineMeetings.ReadWrite`
+
+### Notable details
+- `teams_create_channel` has `confirm: bool = False` dry-run guard — no API call unless `confirm=True`
+- `teams_create_chat` fetches caller's ID from `/me` to satisfy Graph API owner membership requirement
+- List tools truncate message bodies at 500 chars to protect LLM context
+- `teams_list_meetings` always applies a `startDateTime` date-range filter (Graph requires it); defaults to today ± 7 days. May 400 on tenants without OData `$filter` support on `/me/onlineMeetings` — documented in tool docstring
+- No `retry_on_429` yet — Teams endpoints throttle at ~4 req/s; `GraphClient` raises immediately on 429
+
+### Changed
+- `server.py` — Teams module registered; tool count now **82** (was 64)
+- `manifest.json` — bumped to 0.6.0, Teams tools added, `teams` keyword added
+- `pyproject.toml` — bumped to 0.6.0
+
+---
+
 ## [0.5.0] — 2026-04-01
 
 ### Added

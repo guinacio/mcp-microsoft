@@ -28,11 +28,24 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 DEFAULT_SCOPES: list[str] = [
+    # Mail
     "Mail.ReadWrite",
     "Mail.Send",
+    # Calendar
     "Calendars.ReadWrite",
+    # Contacts
     "Contacts.ReadWrite",
+    # OneDrive
     "Files.ReadWrite",
+    # Teams — channels and channel messages
+    "Team.ReadBasic.All",
+    "Channel.ReadBasic.All",
+    "ChannelMessage.Read.All",
+    "ChannelMessage.Send",
+    # Teams — chats (1:1 and group)
+    "Chat.ReadWrite",
+    # Teams — online meetings
+    "OnlineMeetings.ReadWrite",
 ]
 
 SHAREPOINT_SCOPES: list[str] = [
@@ -278,9 +291,28 @@ class ProfileManager:
         if accounts:
             result = app.acquire_token_silent(scopes, account=accounts[0])
 
-        # Fall back to interactive
+        # Fall back to interactive, then device code if interactive fails
+        self._last_device_code_message = None
         if not result:
-            result = app.acquire_token_interactive(scopes=scopes)
+            try:
+                result = app.acquire_token_interactive(scopes=scopes)
+            except Exception:
+                result = None
+
+            if not result or "access_token" not in result:
+                # Device code flow — works headless (MCPB, SSH, containers)
+                flow = app.initiate_device_flow(scopes=scopes)
+                if "user_code" not in flow:
+                    raise RuntimeError(
+                        f"Could not initiate device code flow for profile {cfg.name!r}: "
+                        f"{flow.get('error_description', 'unknown error')}"
+                    )
+                self._last_device_code_message = flow["message"]
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Interactive auth unavailable. %s", flow["message"]
+                )
+                result = app.acquire_token_by_device_flow(flow)
 
         if "access_token" not in result:
             error = result.get("error", "unknown_error")

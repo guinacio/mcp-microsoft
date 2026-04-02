@@ -175,23 +175,25 @@ async def remove_ms_profile(name: str) -> RemoveProfileResponse:
 @mcp.tool(annotations=_AUTH_WRITE)
 async def authenticate_ms_profile(profile: Optional[str] = None) -> AuthenticateProfileResponse:
     """
-    Trigger interactive authentication for a profile.
+    Trigger authentication for a profile.
 
-    Opens a browser window for the Microsoft OAuth consent flow.
-    Useful after adding a new profile or when tokens have expired.
+    Tries interactive browser auth first. If no browser is available
+    (e.g. MCPB, SSH, containers), falls back to device code flow and
+    returns instructions to sign in at https://microsoft.com/devicelogin.
 
     Args:
         profile: Profile name to authenticate. Omit to use the default profile.
 
     Returns:
-        Structured authentication result.
+        Structured authentication result. Check device_code_message for
+        sign-in instructions when running headless.
     """
     from mcp_microsoft.profiles import ProfileManager
 
     pm = ProfileManager.get()
     try:
         cfg = pm.resolve_profile(profile)
-        # Force token acquisition (will trigger interactive if needed)
+        # Force token acquisition (will trigger interactive or device code)
         pm.get_token(cfg.name)
     except (ValueError, RuntimeError) as exc:
         return AuthenticateProfileResponse(
@@ -199,6 +201,7 @@ async def authenticate_ms_profile(profile: Optional[str] = None) -> Authenticate
             action="authenticate_profile",
             profile=profile,
             error=str(exc),
+            device_code_message=getattr(pm, "_last_device_code_message", None),
         )
 
     return AuthenticateProfileResponse(
@@ -207,6 +210,7 @@ async def authenticate_ms_profile(profile: Optional[str] = None) -> Authenticate
         profile=cfg.name,
         tenant_id=cfg.tenant_id,
         cache_path=str(cfg.cache_path),
+        device_code_message=getattr(pm, "_last_device_code_message", None),
     )
 
 
