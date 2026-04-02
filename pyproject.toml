@@ -1,7 +1,7 @@
 [project]
 name = "mcp-microsoft"
-version = "0.4.0"
-description = "Microsoft 365 MCP server — Mail, Calendar, OneDrive, and SharePoint via Microsoft Graph API for personal (Outlook.com/Live) and enterprise (Azure AD/Entra) accounts"
+version = "0.5.0"
+description = "Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, and Contacts via Microsoft Graph API for personal (Outlook.com/Live) and enterprise (Azure AD/Entra) accounts"
 readme = "README.md"
 authors = [
     { name = "Guilherme Inácio", email = "gsilvainacio@gmail.com" }
