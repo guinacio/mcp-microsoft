@@ -503,6 +503,7 @@ async def upload_to_site(
     local_path: Path,
     folder_id: Optional[str] = None,
     filename: Optional[str] = None,
+    content_base64: Optional[str] = None,
     profile: str | None = None,
     ctx: Context = None,
 ) -> UploadSiteFileResponse:
@@ -520,6 +521,10 @@ async def upload_to_site(
     filesystem (e.g. their home directory or a temp folder), then pass
     that path here.
 
+    Alternatively, pass file content as base64 via content_base64 when
+    local filesystem access is not available (e.g. container environments).
+    When using content_base64, filename is required.
+
     Args:
         site_id: The SharePoint site ID.
         drive_id: The document library (drive) ID.
@@ -527,12 +532,30 @@ async def upload_to_site(
         folder_id: Optional destination folder ID within the library.
                    Defaults to the library root.
         filename: Optional filename in SharePoint. Defaults to the local file's name.
+        content_base64: Optional base64-encoded file content. Use as a fallback
+                        when local_path is not accessible. Requires filename.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured upload confirmation.
     """
+    import base64
+    import tempfile
+
     g = _get_sharepoint_graph(profile)
+
+    # Base64 fallback: decode to a temp file when local_path is unavailable
+    if not local_path.is_file() and content_base64:
+        if not filename:
+            return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="filename is required when using content_base64.")
+        try:
+            raw = base64.b64decode(content_base64)
+        except Exception as e:
+            return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error=f"Invalid base64: {e}")
+        tmp = Path(tempfile.gettempdir()) / filename
+        tmp.write_bytes(raw)
+        local_path = tmp
+
     if not local_path.is_file():
         return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="File not found.")
 
