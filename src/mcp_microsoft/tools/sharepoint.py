@@ -130,7 +130,7 @@ def _site_payload(site: dict[str, Any]) -> SharePointSiteInfo:
     return SharePointSiteInfo(
         id=site.get("id", ""),
         display_name=site.get("displayName", "(unnamed)"),
-        description=site.get("description", ""),
+        description=site.get("description") or "",
         web_url=site.get("webUrl", ""),
         created_at=site.get("createdDateTime"),
         created_at_display=_fmt_dt(site.get("createdDateTime")),
@@ -152,7 +152,7 @@ def _drive_item_payload(item: dict[str, Any]) -> DriveItemInfo:
         is_folder="folder" in item,
         child_count=item.get("folder", {}).get("childCount", 0),
         mime_type=item.get("file", {}).get("mimeType", ""),
-        parent_path=item.get("parentReference", {}).get("path", ""),
+        parent_path=(item.get("parentReference") or {}).get("path", ""),
     )
 
 
@@ -301,7 +301,7 @@ async def get_sharepoint_site(
     site = await g.get(f"/sites/{site_id}", params=params)
 
     name = site.get("displayName", "(unnamed)")
-    desc = site.get("description", "")
+    desc = site.get("description") or ""
     web_url = site.get("webUrl", "")
     created = _fmt_dt(site.get("createdDateTime"))
     modified = _fmt_dt(site.get("lastModifiedDateTime"))
@@ -355,7 +355,7 @@ async def list_site_libraries(
             SharePointLibraryInfo(
                 id=drive.get("id", ""),
                 name=drive.get("name", "(unnamed)"),
-                description=drive.get("description", ""),
+                description=drive.get("description") or "",
                 drive_type=drive.get("driveType", ""),
                 web_url=drive.get("webUrl", ""),
             )
@@ -464,11 +464,11 @@ async def get_site_file(
     modified = _fmt_dt(item.get("lastModifiedDateTime"))
     web_url = item.get("webUrl", "")
 
-    parent_ref = item.get("parentReference", {})
+    parent_ref = item.get("parentReference") or {}
     parent_path = parent_ref.get("path", "")
 
-    created_by = item.get("createdBy", {}).get("user", {}).get("displayName", "")
-    modified_by = item.get("lastModifiedBy", {}).get("user", {}).get("displayName", "")
+    created_by = ((item.get("createdBy") or {}).get("user") or {}).get("displayName", "")
+    modified_by = ((item.get("lastModifiedBy") or {}).get("user") or {}).get("displayName", "")
 
     return SiteFileDetailResponse(
         site_id=site_id,
@@ -719,7 +719,7 @@ async def list_site_lists(
             SharePointListInfo(
                 id=lst.get("id", ""),
                 display_name=lst.get("displayName", "(unnamed)"),
-                description=lst.get("description", ""),
+                description=lst.get("description") or "",
                 web_url=lst.get("webUrl", ""),
                 template=lst.get("list", {}).get("template", ""),
             )

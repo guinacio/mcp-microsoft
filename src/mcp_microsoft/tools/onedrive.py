@@ -107,7 +107,7 @@ def _drive_item_payload(item: dict[str, Any]) -> DriveItemInfo:
         is_folder="folder" in item,
         child_count=item.get("folder", {}).get("childCount", 0),
         mime_type=item.get("file", {}).get("mimeType", ""),
-        parent_path=item.get("parentReference", {}).get("path", ""),
+        parent_path=(item.get("parentReference") or {}).get("path", ""),
     )
 
 
@@ -192,12 +192,12 @@ async def get_drive_item(item_id: str, profile: str | None = None) -> DriveItemD
     web_url = item.get("webUrl", "")
 
     # Parent path
-    parent_ref = item.get("parentReference", {})
+    parent_ref = item.get("parentReference") or {}
     parent_path = parent_ref.get("path", "")
 
     # Creator / modifier
-    created_by = item.get("createdBy", {}).get("user", {}).get("displayName", "")
-    modified_by = item.get("lastModifiedBy", {}).get("user", {}).get("displayName", "")
+    created_by = ((item.get("createdBy") or {}).get("user") or {}).get("displayName", "")
+    modified_by = ((item.get("lastModifiedBy") or {}).get("user") or {}).get("displayName", "")
 
     return DriveItemDetailResponse(
         id=item_id,
@@ -593,7 +593,7 @@ async def move_or_copy_item(
         f"/me/drive/items/{destination_folder_id}",
         params={"$select": "id,parentReference"},
     )
-    drive_id = (dest_meta or {}).get("parentReference", {}).get("driveId", "")
+    drive_id = ((dest_meta or {}).get("parentReference") or {}).get("driveId", "")
 
     parent_ref: dict = {"id": destination_folder_id}
     if drive_id:

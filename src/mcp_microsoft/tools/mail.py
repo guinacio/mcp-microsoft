@@ -278,7 +278,7 @@ async def read_email(
         )
 
     # Full mode — extract body text
-    body_obj = msg.get("body", {})
+    body_obj = msg.get("body") or {}
     content_type = (body_obj.get("contentType") or "text").lower()
     raw_body = body_obj.get("content", "")
     if content_type == "html":

@@ -159,7 +159,7 @@ async def get_draft(draft_id: str, profile: str | None = None) -> DraftDetailRes
     subject = draft.get("subject") or "(no subject)"
     modified = _fmt_date(draft.get("lastModifiedDateTime"))
 
-    body_obj = draft.get("body", {})
+    body_obj = draft.get("body") or {}
     content_type = (body_obj.get("contentType") or "text").lower()
     raw_body = body_obj.get("content", "")
 

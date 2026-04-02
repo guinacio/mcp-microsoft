@@ -76,7 +76,7 @@ def _fmt_attendees(attendees: list[dict]) -> str:
         ea = att.get("emailAddress", {})
         name = ea.get("name", "")
         addr = ea.get("address", "")
-        status = att.get("status", {}).get("response", "")
+        status = (att.get("status") or {}).get("response", "")
         label = f"{name} <{addr}>" if name else addr
         if status and status != "none":
             label += f" [{status}]"
@@ -119,7 +119,7 @@ def _attendee_values(attendees: list[dict]) -> list[AttendeeInfo]:
                 name=email_address.get("name", ""),
                 address=email_address.get("address", ""),
                 type=attendee.get("type", ""),
-                response=attendee.get("status", {}).get("response", ""),
+                response=(attendee.get("status") or {}).get("response", ""),
             )
         )
     return values
@@ -135,10 +135,10 @@ def _event_summary(event: dict[str, Any]) -> EventSummary:
         end=event.get("end", {}).get("dateTime"),
         end_display=_fmt_dt(event.get("end", {}).get("dateTime")),
         timezone=event.get("start", {}).get("timeZone", ""),
-        location=event.get("location", {}).get("displayName", ""),
+        location=(event.get("location") or {}).get("displayName", ""),
         is_all_day=event.get("isAllDay", False),
         is_cancelled=event.get("isCancelled", False),
-        response_status=event.get("responseStatus", {}).get("response", ""),
+        response_status=(event.get("responseStatus") or {}).get("response", ""),
     )
 
 
@@ -322,8 +322,8 @@ async def get_event(event_id: str, profile: str | None = None) -> EventDetailRes
     start = _fmt_dt(ev.get("start", {}).get("dateTime"))
     start_tz = ev.get("start", {}).get("timeZone", "")
     end = _fmt_dt(ev.get("end", {}).get("dateTime"))
-    location = ev.get("location", {}).get("displayName", "")
-    organizer_ea = ev.get("organizer", {}).get("emailAddress", {})
+    location = (ev.get("location") or {}).get("displayName", "")
+    organizer_ea = (ev.get("organizer") or {}).get("emailAddress") or {}
     organizer = f"{organizer_ea.get('name', '')} <{organizer_ea.get('address', '')}>".strip()
     attendees_str = _fmt_attendees(ev.get("attendees", []))
     show_as = ev.get("showAs", "")
@@ -334,7 +334,7 @@ async def get_event(event_id: str, profile: str | None = None) -> EventDetailRes
     join_url = online.get("joinUrl", "")
 
     # Body
-    body_obj = ev.get("body", {})
+    body_obj = ev.get("body") or {}
     content_type = (body_obj.get("contentType") or "text").lower()
     raw_body = body_obj.get("content", "")
     if content_type == "html" and raw_body:
@@ -691,7 +691,7 @@ async def get_free_busy(
                         start_display=_fmt_dt(item.get("start", {}).get("dateTime")),
                         end=item.get("end", {}).get("dateTime"),
                         end_display=_fmt_dt(item.get("end", {}).get("dateTime")),
-                        subject=item.get("subject", ""),
+                        subject=item.get("subject") or "",
                     )
                     for item in items
                 ],
