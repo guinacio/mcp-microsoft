@@ -514,10 +514,16 @@ async def upload_to_site(
 
     Requires a work/organizational Microsoft 365 account.
 
+    IMPORTANT: local_path must be a file on the machine running this MCP
+    server (the user's computer), NOT a container or sandbox path. If your
+    content only exists in memory, first write it to a file on the user's
+    filesystem (e.g. their home directory or a temp folder), then pass
+    that path here.
+
     Args:
         site_id: The SharePoint site ID.
         drive_id: The document library (drive) ID.
-        local_path: Path to the local file to upload.
+        local_path: Absolute path to the file on the user's local machine.
         folder_id: Optional destination folder ID within the library.
                    Defaults to the library root.
         filename: Optional filename in SharePoint. Defaults to the local file's name.
@@ -600,12 +606,16 @@ async def download_from_site(
 
     Requires a work/organizational Microsoft 365 account.
 
+    IMPORTANT: destination_path must be on the machine running this MCP
+    server (the user's computer). Use an absolute path on the user's
+    filesystem (e.g. their home directory or Downloads folder).
+
     Args:
         site_id: The SharePoint site ID.
         drive_id: The document library (drive) ID.
         item_id: The DriveItem ID of the file to download.
-        destination_path: Local path to save the file. If a directory is
-                          given, the original filename from SharePoint is used.
+        destination_path: Absolute path on the user's local machine. If a
+                          directory is given, the original filename is used.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:

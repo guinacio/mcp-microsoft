@@ -320,8 +320,14 @@ async def upload_file(
     Files under 4 MB use the simple PUT upload. Larger files use a
     resumable upload session automatically.
 
+    IMPORTANT: local_path must be a file on the machine running this MCP
+    server (the user's computer), NOT a container or sandbox path. If your
+    content only exists in memory, first write it to a file on the user's
+    filesystem (e.g. their home directory or a temp folder), then pass
+    that path here.
+
     Args:
-        local_path: Path to the local file to upload.
+        local_path: Absolute path to the file on the user's local machine.
         parent_folder_id: Optional destination folder ID. Defaults to OneDrive root.
         filename: Optional filename in OneDrive. Defaults to the local file's name.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
@@ -456,6 +462,10 @@ async def download_file(
 ) -> DownloadFileResponse:
     """
     Download a file from OneDrive to a local path.
+
+    IMPORTANT: destination_path must be on the machine running this MCP
+    server (the user's computer). Use an absolute path on the user's
+    filesystem (e.g. their home directory or Downloads folder).
 
     Args:
         item_id: The DriveItem ID of the file to download.
