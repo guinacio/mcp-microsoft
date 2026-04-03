@@ -52,6 +52,7 @@ from mcp_microsoft.models import (
     SendEmailResponse,
     TrashEmailResponse,
 )
+from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.graph import get_graph
 
 # ---------------------------------------------------------------------------
@@ -494,6 +495,20 @@ async def filter_emails(
 # ---------------------------------------------------------------------------
 
 
+class SendEmailInput(ToolRequestModel):
+    """Validated input for the send_email tool."""
+
+    to: Union[str, list[str]]
+    subject: str
+    body: str
+    cc: Optional[Union[str, list[str]]] = None
+    bcc: Optional[Union[str, list[str]]] = None
+    body_type: BodyType = "text"
+    save_to_sent: bool = True
+    reply_to: Optional[Union[str, list[str]]] = None
+    profile: str | None = None
+
+
 async def send_email(
     to: Union[str, list[str]],
     subject: str,
@@ -522,26 +537,31 @@ async def send_email(
     Returns:
         Structured send confirmation.
     """
-    g = get_graph(profile)
+    p = SendEmailInput.model_validate({
+        "to": to, "subject": subject, "body": body,
+        "cc": cc, "bcc": bcc, "body_type": body_type,
+        "save_to_sent": save_to_sent, "reply_to": reply_to, "profile": profile,
+    })
+    g = get_graph(p.profile)
     message: dict = {
-        "subject": subject,
+        "subject": p.subject,
         "body": {
-            "contentType": "HTML" if body_type.lower() == "html" else "Text",
-            "content": body,
+            "contentType": "HTML" if p.body_type.lower() == "html" else "Text",
+            "content": p.body,
         },
-        "toRecipients": _parse_recipients(to),
+        "toRecipients": _parse_recipients(p.to),
     }
 
-    if cc:
-        message["ccRecipients"] = _parse_recipients(cc)
-    if bcc:
-        message["bccRecipients"] = _parse_recipients(bcc)
-    if reply_to:
-        message["replyTo"] = _parse_recipients(reply_to)
+    if p.cc:
+        message["ccRecipients"] = _parse_recipients(p.cc)
+    if p.bcc:
+        message["bccRecipients"] = _parse_recipients(p.bcc)
+    if p.reply_to:
+        message["replyTo"] = _parse_recipients(p.reply_to)
 
     payload = {
         "message": message,
-        "saveToSentItems": save_to_sent,
+        "saveToSentItems": p.save_to_sent,
     }
 
     await g.post("/me/sendMail", json=payload)
@@ -553,9 +573,9 @@ async def send_email(
         cc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("ccRecipients", [])],
         bcc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("bccRecipients", [])],
         reply_to=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("replyTo", [])],
-        subject=subject,
-        body_type=body_type,
-        saved_to_sent_items=save_to_sent,
+        subject=p.subject,
+        body_type=p.body_type,
+        saved_to_sent_items=p.save_to_sent,
     )
 
 

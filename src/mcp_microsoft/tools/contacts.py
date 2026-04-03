@@ -37,6 +37,7 @@ from mcp_microsoft.models import (
     SearchContactsResponse,
     UpdateContactResponse,
 )
+from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.graph import get_graph
 
 # ---------------------------------------------------------------------------
@@ -208,6 +209,23 @@ async def get_contact(
 # ---------------------------------------------------------------------------
 
 
+class CreateContactInput(ToolRequestModel):
+    """Validated input for the create_contact tool."""
+
+    display_name: str
+    given_name: Optional[str] = None
+    surname: Optional[str] = None
+    email_addresses: Optional[list[dict]] = None
+    mobile_phone: Optional[str] = None
+    business_phones: Optional[list[str]] = None
+    job_title: Optional[str] = None
+    company_name: Optional[str] = None
+    department: Optional[str] = None
+    notes: Optional[str] = None
+    folder_id: Optional[str] = None
+    profile: str | None = None
+
+
 async def create_contact(
     display_name: str,
     given_name: Optional[str] = None,
@@ -244,48 +262,55 @@ async def create_contact(
     Returns:
         Created contact ID and display name.
     """
-    g = get_graph(profile)
+    p = CreateContactInput.model_validate({
+        "display_name": display_name, "given_name": given_name, "surname": surname,
+        "email_addresses": email_addresses, "mobile_phone": mobile_phone,
+        "business_phones": business_phones, "job_title": job_title,
+        "company_name": company_name, "department": department,
+        "notes": notes, "folder_id": folder_id, "profile": profile,
+    })
+    g = get_graph(p.profile)
 
-    body: dict[str, Any] = {"displayName": display_name}
+    body: dict[str, Any] = {"displayName": p.display_name}
 
-    if given_name is not None:
-        body["givenName"] = given_name
-    if surname is not None:
-        body["surname"] = surname
-    if email_addresses is not None:
+    if p.given_name is not None:
+        body["givenName"] = p.given_name
+    if p.surname is not None:
+        body["surname"] = p.surname
+    if p.email_addresses is not None:
         body["emailAddresses"] = [
             {"address": ea.get("address", ""), "name": ea.get("name", "")}
-            for ea in email_addresses
+            for ea in p.email_addresses
         ]
-    if mobile_phone is not None:
-        body["mobilePhone"] = mobile_phone
-    if business_phones is not None:
-        body["businessPhones"] = business_phones
-    if job_title is not None:
-        body["jobTitle"] = job_title
-    if company_name is not None:
-        body["companyName"] = company_name
-    if department is not None:
-        body["department"] = department
-    if notes is not None:
-        body["personalNotes"] = notes
+    if p.mobile_phone is not None:
+        body["mobilePhone"] = p.mobile_phone
+    if p.business_phones is not None:
+        body["businessPhones"] = p.business_phones
+    if p.job_title is not None:
+        body["jobTitle"] = p.job_title
+    if p.company_name is not None:
+        body["companyName"] = p.company_name
+    if p.department is not None:
+        body["department"] = p.department
+    if p.notes is not None:
+        body["personalNotes"] = p.notes
 
-    if folder_id:
-        path = f"/me/contactFolders/{folder_id}/contacts"
+    if p.folder_id:
+        path = f"/me/contactFolders/{p.folder_id}/contacts"
     else:
         path = "/me/contacts"
 
     result = await g.post(path, json=body)
 
     contact_id = (result or {}).get("id", "unknown")
-    created_name = (result or {}).get("displayName", display_name)
+    created_name = (result or {}).get("displayName", p.display_name)
 
     return CreateContactResponse(
         success=True,
         action="create_contact",
         contact_id=contact_id,
         display_name=created_name,
-        folder_id=folder_id,
+        folder_id=p.folder_id,
     )
 
 
