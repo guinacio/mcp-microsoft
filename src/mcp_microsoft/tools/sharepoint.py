@@ -161,7 +161,8 @@ def _drive_item_payload(item: dict[str, Any]) -> DriveItemInfo:
 def _get_sharepoint_graph(profile: str | None):
     """Resolve a profile and return a Graph client with a clearer consumer-tenant error."""
     cfg = ProfileManager.get().resolve_profile(profile)
-    if cfg.tenant_id == "consumers":
+    tenant_id = (cfg.tenant_id or "").strip().lower()
+    if tenant_id in {"consumers", "9188040d-6c67-4c5b-b112-36a304b66dad"}:
         raise ValueError(
             "SharePoint tools require a work or school Microsoft 365 account. "
             "Use a profile configured for an organization tenant."
@@ -496,7 +497,7 @@ async def get_site_file(
 async def upload_to_site(
     site_id: str,
     drive_id: str,
-    local_path: Path,
+    local_path: Path | None = None,
     folder_id: Optional[str] = None,
     filename: Optional[str] = None,
     content_base64: Optional[str] = None,
@@ -539,72 +540,85 @@ async def upload_to_site(
     import tempfile
 
     g = _get_sharepoint_graph(profile)
+    temp_local_path: Path | None = None
 
-    # Base64 fallback: decode to a temp file when local_path is unavailable
-    if not local_path.is_file() and content_base64:
-        if not filename:
-            return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="filename is required when using content_base64.")
-        try:
-            raw = base64.b64decode(content_base64)
-        except Exception as e:
-            return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error=f"Invalid base64: {e}")
-        tmp = Path(tempfile.gettempdir()) / filename
-        tmp.write_bytes(raw)
-        local_path = tmp
+    try:
+        # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
+        if (local_path is None or not local_path.is_file()) and content_base64:
+            if not filename:
+                return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="filename is required when using content_base64.")
+            try:
+                raw = base64.b64decode(content_base64, validate=True)
+            except Exception as e:
+                return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error=f"Invalid base64: {e}")
+            suffix = Path(filename).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(raw)
+                temp_local_path = Path(tmp.name)
+            local_path = temp_local_path
 
-    if not local_path.is_file():
-        return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="File not found.")
+        if local_path is None:
+            return UploadSiteFileResponse(success=False, action="upload_to_site", error="Provide local_path or content_base64 with filename.")
 
-    upload_name = filename or local_path.name
-    encoded_name = quote(upload_name, safe="")
-    file_size = local_path.stat().st_size
+        if not local_path.is_file():
+            return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="File not found.")
 
-    base = f"/drives/{drive_id}"
+        upload_name = filename or local_path.name
+        encoded_name = quote(upload_name, safe="")
+        file_size = local_path.stat().st_size
 
-    if file_size <= _4MB:
-        file_bytes = local_path.read_bytes()
-        if folder_id:
-            path = f"{base}/items/{folder_id}:/{encoded_name}:/content"
+        base = f"/drives/{drive_id}"
+
+        if file_size <= _4MB:
+            file_bytes = local_path.read_bytes()
+            if folder_id:
+                path = f"{base}/items/{folder_id}:/{encoded_name}:/content"
+            else:
+                path = f"{base}/root:/{encoded_name}:/content"
+
+            result = await g.put(path, content=file_bytes)
         else:
-            path = f"{base}/root:/{encoded_name}:/content"
+            if folder_id:
+                session_path = f"{base}/items/{folder_id}:/{encoded_name}:/createUploadSession"
+            else:
+                session_path = f"{base}/root:/{encoded_name}:/createUploadSession"
 
-        result = await g.put(path, content=file_bytes)
-    else:
-        if folder_id:
-            session_path = f"{base}/items/{folder_id}:/{encoded_name}:/createUploadSession"
-        else:
-            session_path = f"{base}/root:/{encoded_name}:/createUploadSession"
-
-        session_payload = {
-            "item": {
-                "@microsoft.graph.conflictBehavior": "rename",
-                "name": upload_name,
+            session_payload = {
+                "item": {
+                    "@microsoft.graph.conflictBehavior": "rename",
+                    "name": upload_name,
+                }
             }
-        }
-        session = await g.post(session_path, json=session_payload)
-        upload_url = (session or {}).get("uploadUrl", "")
+            session = await g.post(session_path, json=session_payload)
+            upload_url = (session or {}).get("uploadUrl", "")
 
-        if not upload_url:
-            return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="No upload URL returned.")
+            if not upload_url:
+                return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="No upload URL returned.")
 
-        result = await _upload_large_file(upload_url, local_path, file_size, ctx)
+            result = await _upload_large_file(upload_url, local_path, file_size, ctx)
 
-    item_id = (result or {}).get("id", "unknown")
-    web_url = (result or {}).get("webUrl", "")
-    size_str = _fmt_size(file_size)
+        item_id = (result or {}).get("id", "unknown")
+        web_url = (result or {}).get("webUrl", "")
+        size_str = _fmt_size(file_size)
 
-    return UploadSiteFileResponse(
-        success=True,
-        action="upload_to_site",
-        site_id=site_id,
-        drive_id=drive_id,
-        folder_id=folder_id,
-        filename=upload_name,
-        size_bytes=file_size,
-        size_display=size_str,
-        file_id=item_id,
-        web_url=web_url,
-    )
+        return UploadSiteFileResponse(
+            success=True,
+            action="upload_to_site",
+            site_id=site_id,
+            drive_id=drive_id,
+            folder_id=folder_id,
+            filename=upload_name,
+            size_bytes=file_size,
+            size_display=size_str,
+            file_id=item_id,
+            web_url=web_url,
+        )
+    finally:
+        if temp_local_path is not None:
+            try:
+                temp_local_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------

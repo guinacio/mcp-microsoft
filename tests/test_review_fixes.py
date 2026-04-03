@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,15 @@ from mcp_microsoft.tools import attachments, onedrive, sharepoint
 
 
 @pytest.mark.asyncio
-async def test_sharepoint_tools_are_registered() -> None:
+async def test_sharepoint_tools_are_registered_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_ENABLE_SHAREPOINT", "true")
+    importlib.reload(server)
     tool_names = {tool.name for tool in await server.mcp.list_tools(run_middleware=False)}
     assert "search_sharepoint_sites" in tool_names
+    monkeypatch.delenv("MCP_ENABLE_SHAREPOINT", raising=False)
+    importlib.reload(server)
 
 
 @pytest.mark.asyncio

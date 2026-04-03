@@ -336,77 +336,87 @@ async def upload_file(
     import tempfile
 
     g = get_graph(profile)
+    temp_local_path: Path | None = None
 
-    # Base64 fallback: decode to a temp file when local_path is unavailable
-    if (local_path is None or not local_path.is_file()) and content_base64:
-        if not filename:
-            return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="filename is required when using content_base64.")
-        try:
-            raw = base64.b64decode(content_base64)
-        except Exception as e:
-            return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error=f"Invalid base64: {e}")
-        tmp = Path(tempfile.gettempdir()) / filename
-        tmp.write_bytes(raw)
-        local_path = tmp
+    try:
+        # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
+        if (local_path is None or not local_path.is_file()) and content_base64:
+            if not filename:
+                return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="filename is required when using content_base64.")
+            try:
+                raw = base64.b64decode(content_base64, validate=True)
+            except Exception as e:
+                return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error=f"Invalid base64: {e}")
+            suffix = Path(filename).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(raw)
+                temp_local_path = Path(tmp.name)
+            local_path = temp_local_path
 
-    if local_path is None:
-        return UploadFileResponse(success=False, action="upload_file", error="Provide local_path or content_base64 with filename.")
+        if local_path is None:
+            return UploadFileResponse(success=False, action="upload_file", error="Provide local_path or content_base64 with filename.")
 
-    if not local_path.is_file():
-        return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="File not found.")
+        if not local_path.is_file():
+            return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="File not found.")
 
-    upload_name = filename or local_path.name
-    encoded_name = quote(upload_name, safe="")  # percent-encode for URL path segment
-    file_size = local_path.stat().st_size
+        upload_name = filename or local_path.name
+        encoded_name = quote(upload_name, safe="")  # percent-encode for URL path segment
+        file_size = local_path.stat().st_size
 
-    if file_size <= _4MB:
-        # Simple PUT upload
-        file_bytes = local_path.read_bytes()
-        if parent_folder_id:
-            path = f"/me/drive/items/{parent_folder_id}:/{encoded_name}:/content"
+        if file_size <= _4MB:
+            # Simple PUT upload
+            file_bytes = local_path.read_bytes()
+            if parent_folder_id:
+                path = f"/me/drive/items/{parent_folder_id}:/{encoded_name}:/content"
+            else:
+                path = f"/me/drive/root:/{encoded_name}:/content"
+
+            if ctx:
+                await ctx.info(f"Uploading {upload_name} ({_fmt_size(file_size)})...")
+            result = await g.put(path, content=file_bytes)
+            if ctx:
+                await ctx.info("Upload complete.")
         else:
-            path = f"/me/drive/root:/{encoded_name}:/content"
+            # Resumable upload session for large files
+            if parent_folder_id:
+                session_path = f"/me/drive/items/{parent_folder_id}:/{encoded_name}:/createUploadSession"
+            else:
+                session_path = f"/me/drive/root:/{encoded_name}:/createUploadSession"
 
-        if ctx:
-            await ctx.info(f"Uploading {upload_name} ({_fmt_size(file_size)})...")
-        result = await g.put(path, content=file_bytes)
-        if ctx:
-            await ctx.info("Upload complete.")
-    else:
-        # Resumable upload session for large files
-        if parent_folder_id:
-            session_path = f"/me/drive/items/{parent_folder_id}:/{encoded_name}:/createUploadSession"
-        else:
-            session_path = f"/me/drive/root:/{encoded_name}:/createUploadSession"
-
-        session_payload = {
-            "item": {
-                "@microsoft.graph.conflictBehavior": "rename",
-                "name": upload_name,
+            session_payload = {
+                "item": {
+                    "@microsoft.graph.conflictBehavior": "rename",
+                    "name": upload_name,
+                }
             }
-        }
-        session = await g.post(session_path, json=session_payload)
-        upload_url = (session or {}).get("uploadUrl", "")
+            session = await g.post(session_path, json=session_payload)
+            upload_url = (session or {}).get("uploadUrl", "")
 
-        if not upload_url:
-            return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="No upload URL returned.")
+            if not upload_url:
+                return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="No upload URL returned.")
 
-        result = await _upload_large_file(upload_url, local_path, file_size, ctx)
+            result = await _upload_large_file(upload_url, local_path, file_size, ctx)
 
-    item_id = (result or {}).get("id", "unknown")
-    web_url = (result or {}).get("webUrl", "")
-    size_str = _fmt_size(file_size)
+        item_id = (result or {}).get("id", "unknown")
+        web_url = (result or {}).get("webUrl", "")
+        size_str = _fmt_size(file_size)
 
-    return UploadFileResponse(
-        success=True,
-        action="upload_file",
-        filename=upload_name,
-        size_bytes=file_size,
-        size_display=size_str,
-        file_id=item_id,
-        web_url=web_url,
-        parent_folder_id=parent_folder_id,
-    )
+        return UploadFileResponse(
+            success=True,
+            action="upload_file",
+            filename=upload_name,
+            size_bytes=file_size,
+            size_display=size_str,
+            file_id=item_id,
+            web_url=web_url,
+            parent_folder_id=parent_folder_id,
+        )
+    finally:
+        if temp_local_path is not None:
+            try:
+                temp_local_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 async def _upload_large_file(

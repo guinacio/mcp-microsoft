@@ -21,6 +21,8 @@ from typing import Any, ClassVar
 import msal
 from dotenv import load_dotenv
 
+from mcp_microsoft.feature_flags import resolve_optional_service_enabled
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -37,6 +39,9 @@ DEFAULT_SCOPES: list[str] = [
     "Contacts.ReadWrite",
     # OneDrive
     "Files.ReadWrite",
+]
+
+TEAMS_SCOPES: list[str] = [
     # Teams — channels and channel messages
     "Team.ReadBasic.All",
     "Channel.ReadBasic.All",
@@ -53,6 +58,16 @@ DEFAULT_SCOPES: list[str] = [
 SHAREPOINT_SCOPES: list[str] = [
     "Sites.ReadWrite.All",
 ]
+
+
+def build_default_scopes(profile_name: str | None = None) -> list[str]:
+    """Build the consent scope list for profiles without explicit overrides."""
+    scopes = list(DEFAULT_SCOPES)
+    if resolve_optional_service_enabled("MCP_ENABLE_TEAMS", profile_name):
+        scopes.extend(TEAMS_SCOPES)
+    if resolve_optional_service_enabled("MCP_ENABLE_SHAREPOINT", profile_name):
+        scopes.extend(SHAREPOINT_SCOPES)
+    return list(dict.fromkeys(scopes))
 
 # ---------------------------------------------------------------------------
 # Profile name validation
@@ -88,10 +103,7 @@ class ProfileConfig:
     def effective_scopes(self) -> list[str]:
         if self.scopes:
             return self.scopes
-        base = list(DEFAULT_SCOPES)
-        if self.tenant_id != "consumers":
-            base.extend(SHAREPOINT_SCOPES)
-        return base
+        return build_default_scopes(self.name)
 
     @property
     def authority(self) -> str:
@@ -475,11 +487,11 @@ def is_corporate_account(profile: ProfileConfig) -> bool:
     None / ""                | False  | no tenant configured — fail-safe
     "consumers"              | False  | explicit personal-account alias
     "9188040d-..."           | False  | GUID form of "consumers"
-    "common"                 | True   | ambiguous — err toward corporate
+    "common"                 | True   | ambiguous sign-in audience — err toward corporate
     "organizations"          | True   | explicit corporate alias
     any GUID / named tenant  | True   | real AAD tenant → corporate
     """
-    tid = (profile.tenant_id or "").strip()
+    tid = (profile.tenant_id or "").strip().lower()
     if not tid:
         return False
     return tid not in _PERSONAL_TENANT_IDS

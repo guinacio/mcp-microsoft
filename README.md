@@ -10,7 +10,7 @@ Microsoft 365 MCP server — Mail, Calendar, OneDrive, and SharePoint via the Mi
 
 `mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers the four most-used surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, and SharePoint — 56 tools in total.
 
-The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. SharePoint tools are included automatically for work accounts and excluded for personal-only tenants, since the `Sites.ReadWrite.All` scope is unavailable to consumer accounts.
+The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. On manual installs, Teams and SharePoint auto-enable for corporate-oriented profiles such as `common`, `organizations`, or a specific tenant. In Claude Desktop / MCPB, the installer toggles remain authoritative. In any environment, you can override the default with `MCP_ENABLE_TEAMS` / `MCP_ENABLE_SHAREPOINT` to force either service on or off.
 
 Multi-account support is a first-class feature. Named profiles let you configure separate client IDs for each account and switch between them on any tool call by passing `profile="work"`. Profiles and MSAL token caches are stored in `~/.microsoft-mcp/` and survive server restarts without re-authentication.
 
@@ -105,6 +105,9 @@ cd mcp-microsoft
 uv sync
 export MS365_CLIENT_ID=your-client-id
 export MS365_TENANT_ID=common
+# Optional overrides:
+# export MCP_ENABLE_SHAREPOINT=false
+# export MCP_ENABLE_TEAMS=false
 uv run mcp-microsoft
 ```
 
@@ -140,11 +143,21 @@ You need an Azure App Registration to get a `client_id`. This is a one-time step
    - `Mail.ReadWrite`
    - `Mail.Send`
    - `Calendars.ReadWrite`
+   - `Contacts.ReadWrite`
    - `Files.ReadWrite`
-   - `Sites.ReadWrite.All` *(work accounts only — required for SharePoint)*
    - `offline_access` *(usually pre-added)*
-7. For `Sites.ReadWrite.All`: click **Grant admin consent**. Your IT administrator must approve this once per tenant.
-8. From the **Overview** page, copy the **Application (client) ID** and, if targeting a specific tenant, the **Directory (tenant) ID**.
+7. If you want to enable **SharePoint** tools, also add `Sites.ReadWrite.All`.
+8. If you want to enable **Teams** tools, also add:
+   - `Team.ReadBasic.All`
+   - `Channel.ReadBasic.All`
+   - `Channel.Create`
+   - `ChannelMessage.Read.All`
+   - `ChannelMessage.Send`
+   - `Chat.ReadWrite`
+   - `Chat.Create`
+   - `OnlineMeetings.ReadWrite`
+9. For admin-restricted permissions such as `Sites.ReadWrite.All`, click **Grant admin consent**. Your IT administrator must approve this once per tenant.
+10. From the **Overview** page, copy the **Application (client) ID** and, if targeting a specific tenant, the **Directory (tenant) ID**.
 
 For a detailed walkthrough with screenshots, see [`docs/azure-setup.md`](docs/azure-setup.md).
 
@@ -197,8 +210,10 @@ Profiles are stored in `~/.microsoft-mcp/profiles.json`. Token caches are stored
 | `MS365_CLIENT_ID` | Yes (for bootstrap) | — | Azure App Registration client ID for the default profile |
 | `MS365_TENANT_ID` | No | `common` | Tenant ID for the default profile |
 | `MS365_CREDENTIALS_DIR` | No | `~/.microsoft-mcp/` | Directory for `profiles.json` and token caches |
+| `MCP_ENABLE_SHAREPOINT` | No | auto-detect | Set to `true` to force-enable SharePoint tools or `false` to force-disable them |
+| `MCP_ENABLE_TEAMS` | No | auto-detect | Set to `true` to force-enable Teams tools or `false` to force-disable them |
 
-These variables are only used to bootstrap the `default` profile on first run. Once `profiles.json` exists they have no effect. Use the profile management tools to modify accounts.
+`MS365_CLIENT_ID`, `MS365_TENANT_ID`, and `MS365_CREDENTIALS_DIR` are only used to bootstrap the `default` profile on first run. The `MCP_ENABLE_*` flags are evaluated at server startup and override the auto-detection behavior when present.
 
 ## Development
 
