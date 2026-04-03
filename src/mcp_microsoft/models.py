@@ -624,6 +624,44 @@ class UpdateListItemResponse(ActionResult):
     fields: dict[str, Any] = Field(default_factory=dict)
 
 
+class SearchHit(MCPModel):
+    """A single result from the Microsoft Search API."""
+
+    hit_id: str = ""
+    rank: int = 0
+    # Human-readable excerpt with search-term highlights (HTML tags stripped).
+    summary: str = ""
+    # Type of the matched resource: "driveItem", "listItem", "message", "event", "site".
+    resource_type: str = ""
+    # Display name / filename.
+    name: str = ""
+    web_url: str = ""
+    # ISO-8601 last modified timestamp.
+    last_modified_at: str = ""
+    last_modified_by: str = ""
+    # File size in bytes (0 for non-file resources).
+    size_bytes: int = 0
+    # MIME type for driveItem hits; empty for other types.
+    mime_type: str = ""
+    # SharePoint site id and path; populated for driveItem and listItem.
+    site_id: str = ""
+    drive_id: str = ""
+    parent_path: str = ""
+
+
+class SearchContentResponse(MCPModel):
+    """Response from the Microsoft Search API (POST /search/query)."""
+
+    query: str = ""
+    entity_types: list[str] = Field(default_factory=list)
+    total: int = 0
+    count: int = 0
+    hits: list[SearchHit] = Field(default_factory=list)
+    more_results_available: bool = False
+    # Pass as `skip` on the next call to retrieve the next page.
+    next_skip: int | None = None
+
+
 class DeleteListItemResponse(ActionResult):
     site_id: str = ""
     list_id: str = ""

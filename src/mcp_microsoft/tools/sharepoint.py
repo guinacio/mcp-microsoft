@@ -8,6 +8,7 @@ Note: SharePoint is only available with work/organizational Microsoft 365
 accounts. Personal Outlook.com/Live accounts do not support SharePoint.
 
 Implemented:
+  - search_content            ← Microsoft Search API (tenant-wide full-text)
   - search_sharepoint_sites
   - get_sharepoint_site
   - list_site_libraries
@@ -41,6 +42,8 @@ from mcp_microsoft.models import (
     ListSiteFilesResponse,
     ListSiteLibrariesResponse,
     ListSiteListsResponse,
+    SearchContentResponse,
+    SearchHit,
     SearchSharePointSitesResponse,
     SharePointFields,
     SharePointLibraryInfo,
@@ -926,12 +929,172 @@ async def delete_list_item(
 
 
 # ---------------------------------------------------------------------------
+# search_content
+# ---------------------------------------------------------------------------
+
+_SEARCH_ENTITY_TYPES = frozenset(
+    {"driveItem", "listItem", "site", "message", "event", "chatMessage"}
+)
+
+# Fields requested from Graph for driveItem hits.
+_DRIVE_ITEM_FIELDS = [
+    "id", "name", "webUrl", "size",
+    "lastModifiedDateTime", "lastModifiedBy",
+    "parentReference", "file",
+]
+
+# Fields requested for listItem hits (SharePoint list rows).
+_LIST_ITEM_FIELDS = [
+    "id", "webUrl", "lastModifiedDateTime", "lastModifiedBy",
+    "parentReference", "fields",
+]
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML tags from a search summary excerpt."""
+    import re
+    return re.sub(r"<[^>]+>", "", text or "").strip()
+
+
+def _parse_hit(hit: dict) -> SearchHit:
+    resource = hit.get("resource") or {}
+    odata_type = resource.get("@odata.type", "")
+    # "#microsoft.graph.driveItem" -> "driveItem"
+    resource_type = odata_type.split(".")[-1] if odata_type else ""
+
+    last_modified_by_obj = resource.get("lastModifiedBy") or {}
+    last_modified_by = (
+        (last_modified_by_obj.get("user") or {}).get("displayName", "")
+        or (last_modified_by_obj.get("application") or {}).get("displayName", "")
+    )
+
+    parent_ref = resource.get("parentReference") or {}
+    file_obj = resource.get("file") or {}
+
+    return SearchHit(
+        hit_id=hit.get("hitId", ""),
+        rank=hit.get("rank", 0),
+        summary=_strip_html(hit.get("summary", "")),
+        resource_type=resource_type,
+        name=resource.get("name") or resource.get("displayName") or resource.get("subject") or "",
+        web_url=resource.get("webUrl", ""),
+        last_modified_at=resource.get("lastModifiedDateTime") or resource.get("receivedDateTime") or "",
+        last_modified_by=last_modified_by,
+        size_bytes=resource.get("size") or 0,
+        mime_type=(file_obj.get("mimeType") or ""),
+        site_id=parent_ref.get("siteId", ""),
+        drive_id=parent_ref.get("driveId", ""),
+        parent_path=parent_ref.get("path", ""),
+    )
+
+
+async def search_content(
+    query: str,
+    entity_types: Optional[list[str]] = None,
+    site_id: Optional[str] = None,
+    max_results: int = 25,
+    skip: int = 0,
+    profile: str | None = None,
+) -> SearchContentResponse:
+    """
+    Full-text search across Microsoft 365 content using the Microsoft Search API.
+
+    Uses the same full-text index as SharePoint's built-in search — searching
+    file content, metadata, and list fields across all sites the user has
+    access to, not just navigation hierarchy.
+
+    Supports KQL (Keyword Query Language) for advanced filtering:
+        "budget 2024"                      — full-text across all content
+        "author:John budget"               — by author
+        "filetype:xlsx budget"             — Excel files about budget
+        "contenttype:Document project"     — Word docs about a project
+        "modified:2024-01-01..2024-03-31"  — modified in a date range
+        "path:https://tenant.sharepoint.com/sites/Finance budget"
+                                           — scoped to a specific site URL
+
+    Args:
+        query: KQL search query string.
+        entity_types: Resource types to search. Any combination of:
+            "driveItem"   — files in SharePoint libraries and OneDrive (default)
+            "listItem"    — SharePoint list rows (non-file content)
+            "site"        — SharePoint sites
+            "message"     — emails (requires Mail.Read scope)
+            "event"       — calendar events (requires Calendars.Read scope)
+            Defaults to ["driveItem"].
+        site_id: Optional SharePoint site ID to restrict the search to a
+            specific site. When omitted the search is tenant-wide.
+        max_results: Maximum results to return per page (1-500). Defaults to 25.
+        skip: Number of results to skip for pagination. Pass the next_skip
+            value from a previous response to fetch the next page.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Ranked search hits with name, URL, summary excerpt, author, and
+        file metadata. Use next_skip for subsequent pages.
+    """
+    if entity_types is None:
+        entity_types = ["driveItem"]
+
+    unknown = [et for et in entity_types if et not in _SEARCH_ENTITY_TYPES]
+    if unknown:
+        raise ValueError(
+            f"Unknown entity type(s): {unknown}. "
+            f"Valid types: {sorted(_SEARCH_ENTITY_TYPES)}"
+        )
+
+    max_results = max(1, min(500, max_results))
+
+    # Build the $search request object.
+    search_request: dict = {
+        "entityTypes": entity_types,
+        "query": {"queryString": query},
+        "from": skip,
+        "size": max_results,
+    }
+
+    # Request only the fields we need to keep responses lean.
+    if "driveItem" in entity_types:
+        search_request["fields"] = _DRIVE_ITEM_FIELDS
+    elif "listItem" in entity_types:
+        search_request["fields"] = _LIST_ITEM_FIELDS
+
+    # Scope to a specific site when requested.
+    if site_id:
+        search_request["contentSources"] = [f"/sites/{site_id}"]
+
+    g = _get_sharepoint_graph(profile)
+    result = await g.post("/search/query", json={"requests": [search_request]})
+
+    # Graph wraps responses in value[0].hitsContainers[0].
+    containers = ((result.get("value") or [{}])[0]).get("hitsContainers") or []
+    container = containers[0] if containers else {}
+
+    raw_hits: list[dict] = container.get("hits") or []
+    total: int = container.get("total") or 0
+    more: bool = container.get("moreResultsAvailable") or False
+
+    hits = [_parse_hit(h) for h in raw_hits]
+    next_skip = skip + len(hits) if more else None
+
+    return SearchContentResponse(
+        query=query,
+        entity_types=entity_types,
+        total=total,
+        count=len(hits),
+        hits=hits,
+        more_results_available=more,
+        next_skip=next_skip,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
 
 
 def register(server) -> None:
     """Register all SharePoint tools with the given FastMCP server instance."""
+    server.tool(annotations=_READ_ONLY)(search_content)
     server.tool(annotations=_READ_ONLY)(search_sharepoint_sites)
     server.tool(annotations=_READ_ONLY)(get_sharepoint_site)
     server.tool(annotations=_READ_ONLY)(list_site_libraries)
