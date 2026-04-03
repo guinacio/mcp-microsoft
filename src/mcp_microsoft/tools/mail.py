@@ -410,7 +410,7 @@ async def filter_emails(
     folder: str = "inbox",
     max_results: int = 50,
     sort_order: Literal["newest", "oldest"] = "newest",
-    page_token: Optional[int] = None,
+    skip_token: Optional[str] = None,
     profile: str | None = None,
 ) -> ListEmailsResponse:
     """
@@ -438,7 +438,8 @@ async def filter_emails(
         folder: Well-known folder name or folder ID. Defaults to 'inbox'.
         max_results: Maximum number of messages to return (1-100). Defaults to 50.
         sort_order: 'newest' (default) or 'oldest' first.
-        page_token: Integer offset for pagination ($skip). Omit for the first page.
+        skip_token: Opaque pagination cursor returned as next_page_token from a
+                    previous call. Omit for the first page.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
@@ -478,26 +479,26 @@ async def filter_emails(
     if clauses:
         params["$filter"] = " and ".join(clauses)
 
-    if page_token is not None:
-        params["$skip"] = int(page_token)
+    if skip_token is not None:
+        params["$skiptoken"] = skip_token
 
     result = await g.get(f"/me/mailFolders/{folder}/messages", params=params)
 
     messages = result.get("value", [])
     next_link = result.get("@odata.nextLink")
 
-    next_page_token: int | None = None
+    from urllib.parse import parse_qs, urlparse
+    next_page_token: str | None = None
     if next_link:
-        skip_match = re.search(r"\$skip=(\d+)", next_link)
-        if skip_match:
-            next_page_token = int(skip_match.group(1))
+        qs = parse_qs(urlparse(next_link).query)
+        next_page_token = qs.get("$skiptoken", [None])[0]
 
     return ListEmailsResponse(
         folder=folder,
         count=len(messages),
         messages=[_message_summary(msg) for msg in messages],
         next_page_token=next_page_token,
-        has_more=next_link is not None,
+        has_more=(next_page_token is not None),
     )
 
 
@@ -561,7 +562,7 @@ Subject: {subject}
             f"Send this email?
 
 {preview}",
-            schema=_Confirmation,
+            response_type=_Confirmation,
         )
         if result.action != "accept" or not result.data.confirmed:
             return SendEmailResponse(success=False, action="send_email", error="Cancelled by user.")
@@ -833,7 +834,7 @@ async def delete_email(
     if confirm and ctx:
         result = await ctx.elicit(
             f"Permanently delete this email? This action is IRREVERSIBLE.\n\nMessage ID: {message_id}",
-            schema=_Confirmation,
+            response_type=_Confirmation,
         )
         if result.action != "accept" or not result.data.confirmed:
             return DeleteEmailResponse(success=False, action="permanent_delete", message_id=message_id, error="Cancelled by user.", irreversible=True)
