@@ -82,6 +82,46 @@ _TEAMS_NAMESPACE = "teams_"
 # authenticate_ / filter_ have no natural classification; they fall through
 # to the default.
 
+# ---------------------------------------------------------------------------
+# Title humanization
+# ---------------------------------------------------------------------------
+
+# Namespaces that become a display prefix in the tool title.
+_TITLE_NAMESPACES = ("teams_",)
+
+
+def _humanize_title(name: str) -> str:
+    """Convert a snake_case tool name to a human-readable Title Case string.
+
+    Examples::
+
+        read_email              → "Read Email"
+        send_email              → "Send Email"
+        teams_list_joined       → "Teams List Joined"
+        search_sharepoint_sites → "Search SharePoint Sites"
+        add_ms_profile          → "Add MS Profile"
+        list_enabled_services   → "List Enabled Services"
+    """
+    # Word-level corrections for abbreviations and proper nouns.
+    _WORD_FIX: dict[str, str] = {
+        "ms": "MS",
+        "sharepoint": "SharePoint",
+        "onedrive": "OneDrive",
+        "odata": "OData",
+    }
+
+    prefix = ""
+    base = name
+    for ns in _TITLE_NAMESPACES:
+        if name.startswith(ns):
+            prefix = ns.rstrip("_").capitalize() + " "
+            base = name[len(ns):]
+            break
+    words = " ".join(
+        _WORD_FIX.get(w, w.capitalize()) for w in base.split("_") if w
+    )
+    return f"{prefix}{words}".strip()
+
 
 # ---------------------------------------------------------------------------
 # Classification helpers
@@ -168,6 +208,10 @@ def apply_tool_annotations(server: FastMCP) -> None:
     for key, component in components.items():
         if not key.startswith("tool:"):
             continue
+        # Set a human-readable title if not already provided.
+        if not component.title:
+            component.title = _humanize_title(component.name)
+
         # Only infer when no explicit annotations have been provided.
         if component.annotations is not None:
             continue

@@ -554,14 +554,13 @@ async def send_email(
     """
     if confirm and ctx:
         to_display = to if isinstance(to, str) else ", ".join(to)
-        preview = f"To: {to_display}
-Subject: {subject}
-
-{body[:200]}{'...' if len(body) > 200 else ''}"
+        preview = (
+            f"To: {to_display}\n"
+            f"Subject: {subject}\n\n"
+            f"{body[:200]}{'...' if len(body) > 200 else ''}"
+        )
         result = await ctx.elicit(
-            f"Send this email?
-
-{preview}",
+            f"Send this email?\n\n{preview}",
             response_type=_Confirmation,
         )
         if result.action != "accept" or not result.data.confirmed:

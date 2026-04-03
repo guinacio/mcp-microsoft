@@ -7,12 +7,22 @@ currently active, based on feature flags and account type.
 
 from __future__ import annotations
 
-from mcp_microsoft.feature_flags import is_teams_enabled
+import os
 
 
-def _is_teams_active() -> bool:
-    if is_teams_enabled():
-        return True
+def _env_flag(name: str) -> bool | None:
+    """Return True/False if the env var is explicitly set, or None if absent."""
+    val = os.getenv(name, "")
+    if not val:
+        return None
+    return val.lower() in ("1", "true", "yes", "on")
+
+
+def _is_corporate_service_active(env_name: str) -> bool:
+    """Same logic as server.py _should_register_corporate_service."""
+    flag = _env_flag(env_name)
+    if flag is not None:
+        return flag
     try:
         from mcp_microsoft.profiles import ProfileManager, is_corporate_account
         profile = ProfileManager.get().resolve_profile(None)
@@ -28,8 +38,8 @@ async def list_enabled_services() -> dict:
         "calendar": True,
         "contacts": True,
         "onedrive": True,
-        "sharepoint": True,  # always registered; Graph returns 403 for personal accounts
-        "teams": _is_teams_active(),
+        "sharepoint": _is_corporate_service_active("MCP_ENABLE_SHAREPOINT"),
+        "teams": _is_corporate_service_active("MCP_ENABLE_TEAMS"),
         "drafts": True,
         "folders": True,
         "attachments": True,

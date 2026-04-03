@@ -17,8 +17,8 @@ from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 
-from mcp_microsoft.feature_flags import is_teams_enabled
-from mcp_microsoft.feature_flags import is_teams_enabled
+import os
+
 from mcp_microsoft.graph import close_http_clients, initialize_http_clients
 
 _log = logging.getLogger(__name__)
@@ -59,16 +59,27 @@ folders.register(mcp)
 attachments.register(mcp)
 calendar.register(mcp)
 onedrive.register(mcp)
-sharepoint.register(mcp)
 profiles.register(mcp)
 contacts.register(mcp)
 
-# Teams tools — corporate accounts only, or set MCP_ENABLE_TEAMS=1 to force on.
-# Personal accounts (Outlook.com, Hotmail, Live) always receive 401 from the
-# Teams Graph endpoints.
-def _should_register_teams() -> bool:
-    if is_teams_enabled():
-        return True
+
+def _env_flag(name: str) -> bool | None:
+    """Return True/False if the env var is explicitly set, or None if absent."""
+    val = os.getenv(name, "")
+    if not val:
+        return None
+    return val.lower() in ("1", "true", "yes", "on")
+
+
+def _should_register_corporate_service(env_name: str) -> bool:
+    """Decide whether to register a corporate-only service (Teams / SharePoint).
+
+    If the env var is explicitly set (MCPB toggle), respect it.
+    If unset (non-MCPB / manual setup), auto-detect from account type.
+    """
+    flag = _env_flag(env_name)
+    if flag is not None:
+        return flag
     try:
         from mcp_microsoft.profiles import ProfileManager, is_corporate_account
         profile = ProfileManager.get().resolve_profile(None)
@@ -77,13 +88,18 @@ def _should_register_teams() -> bool:
         return False
 
 
-if _should_register_teams():
+# SharePoint — corporate accounts only.
+if _should_register_corporate_service("MCP_ENABLE_SHAREPOINT"):
+    sharepoint.register(mcp)
+else:
+    _log.info("SharePoint tools not registered (disabled or personal account)")
+
+# Teams — corporate accounts only.
+if _should_register_corporate_service("MCP_ENABLE_TEAMS"):
     from mcp_microsoft.tools import teams
     teams.register(mcp)
 else:
-    _log.info(
-        "Teams tools not registered (corporate account or MCP_ENABLE_TEAMS=1 required)"
-    )
+    _log.info("Teams tools not registered (disabled or personal account)")
 
 # Service discovery tool
 from mcp_microsoft.tools import services  # noqa: E402
