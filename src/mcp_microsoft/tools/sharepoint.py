@@ -1022,7 +1022,10 @@ async def search_content(
             "event"       — calendar events (requires Calendars.Read scope)
             Defaults to ["driveItem"].
         site_id: Optional SharePoint site ID to restrict the search to a
-            specific site. When omitted the search is tenant-wide.
+            specific site. When provided, the site's webUrl is fetched and a
+            KQL ``path:"<webUrl>"`` clause is injected into the query string
+            so that only items under that site's URL path are returned.
+            When omitted the search is tenant-wide.
         max_results: Maximum results to return per page (1-500). Defaults to 25.
         skip: Number of results to skip for pagination. Pass the next_skip
             value from a previous response to fetch the next page.
@@ -1058,11 +1061,18 @@ async def search_content(
     elif "listItem" in entity_types:
         search_request["fields"] = _LIST_ITEM_FIELDS
 
-    # Scope to a specific site when requested.
-    if site_id:
-        search_request["contentSources"] = [f"/sites/{site_id}"]
-
     g = _get_sharepoint_graph(profile)
+
+    # Scope to a specific site when requested.
+    # contentSources is for external connector items only — use a KQL
+    # path: clause with the site's webUrl to restrict SharePoint search scope.
+    if site_id:
+        site_data = await g.get(f"/sites/{site_id}", params={"$select": "webUrl"})
+        site_url = site_data.get("webUrl", "")
+        if site_url:
+            current_query = search_request["query"].get("queryString", "")
+            search_request["query"]["queryString"] = f'{current_query} path:"{site_url}"'.strip()
+
     result = await g.post("/search/query", json={"requests": [search_request]})
 
     # Graph wraps responses in value[0].hitsContainers[0].
