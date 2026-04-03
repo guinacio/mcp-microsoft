@@ -28,7 +28,9 @@ import re
 from datetime import datetime
 from typing import Any, Literal, Optional, Union
 
+from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel
 
 from mcp_microsoft.models import (
     Address,
@@ -54,6 +56,15 @@ from mcp_microsoft.models import (
 )
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.graph import get_graph
+
+# ---------------------------------------------------------------------------
+# Elicitation helpers
+# ---------------------------------------------------------------------------
+
+
+class _Confirmation(BaseModel):
+    confirmed: bool
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -519,6 +530,8 @@ async def send_email(
     save_to_sent: bool = True,
     reply_to: Optional[Union[str, list[str]]] = None,
     profile: str | None = None,
+    confirm: bool = False,
+    ctx: Context | None = None,
 ) -> SendEmailResponse:
     """
     Send a new email message.
@@ -533,10 +546,26 @@ async def send_email(
         save_to_sent: When True (default), save a copy in Sent Items.
         reply_to: Optional reply-to address(es).
         profile: Microsoft 365 profile to use. Omit to use the default profile.
+        confirm: When True, prompt the user to confirm before sending. Defaults to False.
 
     Returns:
         Structured send confirmation.
     """
+    if confirm and ctx:
+        to_display = to if isinstance(to, str) else ", ".join(to)
+        preview = f"To: {to_display}
+Subject: {subject}
+
+{body[:200]}{'...' if len(body) > 200 else ''}"
+        result = await ctx.elicit(
+            f"Send this email?
+
+{preview}",
+            schema=_Confirmation,
+        )
+        if result.action != "accept" or not result.data.confirmed:
+            return SendEmailResponse(success=False, action="send_email", error="Cancelled by user.")
+
     p = SendEmailInput.model_validate({
         "to": to, "subject": subject, "body": body,
         "cc": cc, "bcc": bcc, "body_type": body_type,
@@ -781,7 +810,12 @@ async def trash_email(message_id: str, profile: str | None = None) -> TrashEmail
 # ---------------------------------------------------------------------------
 
 
-async def delete_email(message_id: str, profile: str | None = None) -> DeleteEmailResponse:
+async def delete_email(
+    message_id: str,
+    profile: str | None = None,
+    confirm: bool = False,
+    ctx: Context | None = None,
+) -> DeleteEmailResponse:
     """
     Permanently delete a message from the mailbox. This action is IRREVERSIBLE.
 
@@ -791,10 +825,19 @@ async def delete_email(message_id: str, profile: str | None = None) -> DeleteEma
     Args:
         message_id: The Graph message ID to permanently delete.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
+        confirm: When True, prompt the user to confirm before deleting. Defaults to False.
 
     Returns:
         Structured delete confirmation.
     """
+    if confirm and ctx:
+        result = await ctx.elicit(
+            f"Permanently delete this email? This action is IRREVERSIBLE.\n\nMessage ID: {message_id}",
+            schema=_Confirmation,
+        )
+        if result.action != "accept" or not result.data.confirmed:
+            return DeleteEmailResponse(success=False, action="permanent_delete", message_id=message_id, error="Cancelled by user.", irreversible=True)
+
     g = get_graph(profile)
     await g.post(f"/me/messages/{message_id}/permanentDelete")
     return DeleteEmailResponse(
