@@ -19,7 +19,6 @@ from mcp.types import ToolAnnotations
 
 from mcp_microsoft.models import AttachmentInfo, DownloadAttachmentResponse, ListAttachmentsResponse
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # list_attachments
@@ -28,7 +27,6 @@ from mcp_microsoft.server import mcp
 _READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
 _WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_attachments(message_id: str, profile: str | None = None) -> ListAttachmentsResponse:
     """
     List all attachments on an email message.
@@ -70,7 +68,6 @@ async def list_attachments(message_id: str, profile: str | None = None) -> ListA
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def download_attachment(
     message_id: str,
     attachment_id: str,
@@ -80,12 +77,16 @@ async def download_attachment(
     """
     Download an email attachment, saving it to disk or returning a file payload.
 
+    When running in Claude Desktop, always provide save_path (e.g. the user's
+    Downloads folder) so the file is written to disk. Omitting save_path returns
+    a FastMCP file object, which is only useful for programmatic embedding.
+
     Args:
         message_id: The Graph message ID that contains the attachment.
         attachment_id: The attachment ID from list_attachments.
-        save_path: Optional path to save the file. If this is a directory,
-            the attachment's original filename is used inside that directory.
-            If omitted, the attachment is returned as a FastMCP file object.
+        save_path: Path to save the file on the host machine. If this is a
+            directory, the attachment's original filename is used inside it.
+            Recommended: always provide a path for Claude Desktop usage.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
@@ -155,3 +156,14 @@ def _fmt_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024:.1f} KB"
     else:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all attachment tools with the given FastMCP server instance."""
+    server.tool(annotations=_READ_ONLY)(list_attachments)
+    server.tool(annotations=_WRITE)(download_attachment)

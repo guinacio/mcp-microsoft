@@ -12,11 +12,14 @@ Run:
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 
 from mcp_microsoft.graph import close_http_clients, initialize_http_clients
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # FastMCP app
@@ -35,38 +38,69 @@ async def app_lifespan(_server: FastMCP):
 mcp = FastMCP("mcp-microsoft", lifespan=app_lifespan)
 
 # ---------------------------------------------------------------------------
-# Tool registration — import submodules so their @mcp.tool() decorators run
+# Tool registration — import submodules and call their register(mcp) functions
 # ---------------------------------------------------------------------------
 
-# Mail tools
-from mcp_microsoft.tools import mail  # noqa: E402, F401
+from mcp_microsoft.tools import mail
+from mcp_microsoft.tools import drafts
+from mcp_microsoft.tools import folders
+from mcp_microsoft.tools import attachments
+from mcp_microsoft.tools import calendar
+from mcp_microsoft.tools import onedrive
+from mcp_microsoft.tools import sharepoint
+from mcp_microsoft.tools import profiles
+from mcp_microsoft.tools import contacts
 
-# Draft tools
-from mcp_microsoft.tools import drafts  # noqa: E402, F401
+mail.register(mcp)
+drafts.register(mcp)
+folders.register(mcp)
+attachments.register(mcp)
+calendar.register(mcp)
+onedrive.register(mcp)
+sharepoint.register(mcp)
+profiles.register(mcp)
+contacts.register(mcp)
 
-# Folder tools
-from mcp_microsoft.tools import folders  # noqa: E402, F401
+# Teams tools — only available for corporate/work accounts.
+# Personal accounts (Outlook.com, Hotmail, Live) always receive 401 from the
+# Teams Graph endpoints, so there is no value in exposing 18 tools that can
+# never succeed.  We gate registration at startup based on the default profile's
+# tenant_id.  If no profile is configured yet, we default to NOT registering
+# (fail-safe).
+def _register_teams_if_corporate() -> None:
+    try:
+        from mcp_microsoft.profiles import ProfileManager, is_corporate_account
 
-# Attachment tools
-from mcp_microsoft.tools import attachments  # noqa: E402, F401
+        mgr = ProfileManager.get()
+        # resolve_profile(None) returns the default profile; raises if none configured.
+        profile = mgr.resolve_profile(None)
+        if is_corporate_account(profile):
+            from mcp_microsoft.tools import teams
+            teams.register(mcp)
+        else:
+            _log.info(
+                "Teams tools not registered: profile %r uses a personal Microsoft "
+                "account (tenant_id=%r). Teams requires a work/school account.",
+                profile.name,
+                profile.tenant_id,
+            )
+    except Exception:
+        # No profiles configured yet — skip Teams registration (fail-safe).
+        _log.debug(
+            "Teams tools not registered: no active profile found at startup.",
+            exc_info=True,
+        )
 
-# Calendar tools
-from mcp_microsoft.tools import calendar  # noqa: E402, F401
 
-# OneDrive tools
-from mcp_microsoft.tools import onedrive  # noqa: E402, F401
+_register_teams_if_corporate()
 
-# SharePoint tools
-from mcp_microsoft.tools import sharepoint  # noqa: E402, F401
+# ---------------------------------------------------------------------------
+# Tool annotations — infer readOnlyHint / destructiveHint / idempotentHint
+# ---------------------------------------------------------------------------
 
-# Profile management tools
-from mcp_microsoft.tools import profiles  # noqa: E402, F401
+from mcp_microsoft.common.tool_annotations import apply_tool_annotations  # noqa: E402
 
-# Contacts tools
-from mcp_microsoft.tools import contacts  # noqa: E402, F401
-
-# Teams tools
-from mcp_microsoft.tools import teams  # noqa: E402, F401
+apply_tool_annotations(mcp)
 
 # ---------------------------------------------------------------------------
 # Entry point

@@ -38,7 +38,6 @@ from mcp_microsoft.models import (
     UploadFileResponse,
 )
 from mcp_microsoft.graph import get_graph, get_transfer_http_client
-from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -116,7 +115,6 @@ def _drive_item_payload(item: dict[str, Any]) -> DriveItemInfo:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_drive_items(
     folder_id: Optional[str] = None,
     max_results: int = 25,
@@ -162,7 +160,6 @@ async def list_drive_items(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_drive_item(item_id: str, profile: str | None = None) -> DriveItemDetailResponse:
     """
     Get metadata for a specific OneDrive file or folder.
@@ -223,7 +220,6 @@ async def get_drive_item(item_id: str, profile: str | None = None) -> DriveItemD
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def search_drive(query: str, max_results: int = 10, profile: str | None = None) -> SearchDriveResponse:
     """
     Search for files and folders in OneDrive by name or content.
@@ -255,7 +251,6 @@ async def search_drive(query: str, max_results: int = 10, profile: str | None = 
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def create_drive_folder(
     name: str,
     parent_folder_id: Optional[str] = None,
@@ -306,37 +301,32 @@ async def create_drive_folder(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def upload_file(
-    local_path: Path,
+    local_path: Optional[Path] = None,
     parent_folder_id: Optional[str] = None,
     filename: Optional[str] = None,
     content_base64: Optional[str] = None,
     profile: str | None = None,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> UploadFileResponse:
     """
-    Upload a local file to OneDrive.
+    Upload a file to OneDrive.
 
-    Files under 4 MB use the simple PUT upload. Larger files use a
-    resumable upload session automatically.
-
-    IMPORTANT: local_path must be a file on the machine running this MCP
-    server (the user's computer), NOT a container or sandbox path. If your
-    content only exists in memory, first write it to a file on the user's
-    filesystem (e.g. their home directory or a temp folder), then pass
-    that path here.
-
-    Alternatively, pass file content as base64 via content_base64 when
-    local filesystem access is not available (e.g. container environments).
-    When using content_base64, filename is required.
+    Two modes of operation:
+    1. **Local file**: pass local_path pointing to a file on the MCP server host.
+       Files under 4 MB use simple PUT; larger files use resumable upload.
+    2. **Base64 content**: pass content_base64 with the file bytes encoded as
+       base64, plus filename. Use this when local filesystem access is not
+       available (e.g. container/sandbox environments).
 
     Args:
-        local_path: Absolute path to the file on the user's local machine.
+        local_path: Absolute path to the file on the host machine. Optional
+                    when content_base64 is provided instead.
         parent_folder_id: Optional destination folder ID. Defaults to OneDrive root.
-        filename: Optional filename in OneDrive. Defaults to the local file's name.
-        content_base64: Optional base64-encoded file content. Use as a fallback
-                        when local_path is not accessible. Requires filename.
+        filename: Filename in OneDrive. Required when using content_base64.
+                  Defaults to the local file's name when using local_path.
+        content_base64: Base64-encoded file content. Use as an alternative to
+                        local_path when the file isn't on disk. Requires filename.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
@@ -348,7 +338,7 @@ async def upload_file(
     g = get_graph(profile)
 
     # Base64 fallback: decode to a temp file when local_path is unavailable
-    if not local_path.is_file() and content_base64:
+    if (local_path is None or not local_path.is_file()) and content_base64:
         if not filename:
             return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="filename is required when using content_base64.")
         try:
@@ -358,6 +348,9 @@ async def upload_file(
         tmp = Path(tempfile.gettempdir()) / filename
         tmp.write_bytes(raw)
         local_path = tmp
+
+    if local_path is None:
+        return UploadFileResponse(success=False, action="upload_file", error="Provide local_path or content_base64 with filename.")
 
     if not local_path.is_file():
         return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="File not found.")
@@ -374,7 +367,11 @@ async def upload_file(
         else:
             path = f"/me/drive/root:/{encoded_name}:/content"
 
+        if ctx:
+            await ctx.info(f"Uploading {upload_name} ({_fmt_size(file_size)})...")
         result = await g.put(path, content=file_bytes)
+        if ctx:
+            await ctx.info("Upload complete.")
     else:
         # Resumable upload session for large files
         if parent_folder_id:
@@ -477,7 +474,6 @@ async def _upload_large_file(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def download_file(
     item_id: str,
     destination_path: Path,
@@ -540,7 +536,6 @@ async def download_file(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_DESTRUCTIVE)
 async def delete_drive_item(item_id: str, profile: str | None = None) -> DeleteDriveItemResponse:
     """
     Delete a file or folder from OneDrive.
@@ -565,7 +560,6 @@ async def delete_drive_item(item_id: str, profile: str | None = None) -> DeleteD
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def move_or_copy_item(
     item_id: str,
     destination_folder_id: str,
@@ -689,3 +683,20 @@ async def move_or_copy_item(
             name=item_name or None,
             destination_folder_id=destination_folder_id,
         )
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all OneDrive tools with the given FastMCP server instance."""
+    server.tool(annotations=_READ_ONLY)(list_drive_items)
+    server.tool(annotations=_READ_ONLY)(get_drive_item)
+    server.tool(annotations=_READ_ONLY)(search_drive)
+    server.tool(annotations=_WRITE)(create_drive_folder)
+    server.tool(annotations=_WRITE)(upload_file)
+    server.tool(annotations=_WRITE)(download_file)
+    server.tool(annotations=_DESTRUCTIVE)(delete_drive_item)
+    server.tool(annotations=_WRITE)(move_or_copy_item)

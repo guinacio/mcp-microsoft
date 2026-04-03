@@ -23,7 +23,6 @@ from mcp_microsoft.models import (
     MailFolderInfo,
 )
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # list_folders
@@ -33,7 +32,6 @@ _READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
 _WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
 _DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_folders(include_child_folders: bool = False, profile: str | None = None) -> ListFoldersResponse:
     """
     List mail folders in the mailbox.
@@ -111,14 +109,13 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def create_folder(
     display_name: str,
     parent_folder_id: Optional[str] = None,
     profile: str | None = None,
 ) -> CreateFolderResponse:
     """
-    Create a new mail folder.
+    Create a new mail folder in the mailbox (not OneDrive — use create_drive_folder for files).
 
     Args:
         display_name: The name for the new folder.
@@ -158,7 +155,6 @@ async def create_folder(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_DESTRUCTIVE)
 async def delete_folder(folder_id: str, profile: str | None = None) -> DeleteFolderResponse:
     """
     Delete a mail folder and all its contents.
@@ -170,7 +166,9 @@ async def delete_folder(folder_id: str, profile: str | None = None) -> DeleteFol
     (inbox, drafts, sentitems, etc.) cannot be deleted via this API.
 
     Args:
-        folder_id: The folder ID to delete (opaque Graph ID, not a well-known name).
+        folder_id: The opaque Graph ID of the folder to delete. This is NOT a
+            display name or well-known name — use list_folders first to obtain
+            the folder ID by its display name.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
@@ -179,3 +177,15 @@ async def delete_folder(folder_id: str, profile: str | None = None) -> DeleteFol
     g = get_graph(profile)
     await g.delete(f"/me/mailFolders/{folder_id}")
     return DeleteFolderResponse(success=True, action="delete_folder", folder_id=folder_id, irreversible=True)
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all folder tools with the given FastMCP server instance."""
+    server.tool(annotations=_READ_ONLY)(list_folders)
+    server.tool(annotations=_WRITE)(create_folder)
+    server.tool(annotations=_DESTRUCTIVE)(delete_folder)

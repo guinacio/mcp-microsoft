@@ -7,6 +7,7 @@ Implemented:
   - list_emails
   - read_email
   - search_emails
+  - filter_emails
   - send_email
   - reply_email
   - forward_email
@@ -15,6 +16,9 @@ Implemented:
   - move_email
   - trash_email
   - delete_email
+  - bulk_move_emails
+  - bulk_trash_emails
+  - bulk_delete_emails
 """
 
 from __future__ import annotations
@@ -29,6 +33,11 @@ from mcp.types import ToolAnnotations
 from mcp_microsoft.models import (
     Address,
     AttachmentInfo,
+    BulkDeleteEmailsResponse,
+    BulkEmailFailure,
+    BulkMovedEmail,
+    BulkMoveEmailsResponse,
+    BulkTrashEmailsResponse,
     DeleteEmailResponse,
     DisplayAddress,
     ForwardEmailResponse,
@@ -44,7 +53,6 @@ from mcp_microsoft.models import (
     TrashEmailResponse,
 )
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -170,12 +178,12 @@ def _message_summary(msg: dict[str, Any]) -> MessageSummary:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_emails(
     folder: str = "inbox",
     max_results: int = 10,
     unread_only: bool = False,
-    page_token: Optional[int] = None,
+    sort_order: Literal["newest", "oldest"] = "newest",
+    skip_token: Optional[str] = None,
     profile: str | None = None,
 ) -> ListEmailsResponse:
     """
@@ -187,40 +195,45 @@ async def list_emails(
                 junkemail, archive. Defaults to 'inbox'.
         max_results: Maximum number of messages to return (1-100). Defaults to 10.
         unread_only: When True, return only unread messages. Defaults to False.
-        page_token: Integer offset for pagination ($skip). Omit for the first page.
+        sort_order: 'newest' (default) or 'oldest' first.
+        skip_token: Opaque pagination cursor returned as next_page_token from a
+                    previous call. Omit for the first page.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Structured message summaries with pagination metadata.
+        Structured message summaries with pagination metadata. When has_more is
+        True, pass next_page_token as skip_token to retrieve the next page.
     """
+    from urllib.parse import parse_qs, urlparse
+
     g = get_graph(profile)
+    order = "receivedDateTime asc" if sort_order == "oldest" else "receivedDateTime desc"
     params: dict = {
         "$top": max_results,
         "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments,importance",
-        "$orderby": "receivedDateTime desc",
+        "$orderby": order,
     }
     if unread_only:
         params["$filter"] = "isRead eq false"
-    if page_token is not None:
-        params["$skip"] = int(page_token)
+    if skip_token is not None:
+        params["$skiptoken"] = skip_token
 
     result = await g.get(f"/me/mailFolders/{folder}/messages", params=params)
 
     messages = result.get("value", [])
-    next_link = result.get("@odata.nextLink")
+    next_link = result.get("@odata.nextLink", "")
 
-    next_page_token: int | None = None
+    next_page_token: str | None = None
     if next_link:
-        skip_match = re.search(r"\$skip=(\d+)", next_link)
-        if skip_match:
-            next_page_token = int(skip_match.group(1))
+        qs = parse_qs(urlparse(next_link).query)
+        next_page_token = qs.get("$skiptoken", [None])[0]
 
     return ListEmailsResponse(
         folder=folder,
         count=len(messages),
         messages=[_message_summary(msg) for msg in messages],
         next_page_token=next_page_token,
-        has_more=next_link is not None,
+        has_more=(next_page_token is not None),
     )
 
 
@@ -229,7 +242,6 @@ async def list_emails(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def read_email(
     message_id: str,
     summary_mode: bool = False,
@@ -325,7 +337,6 @@ async def read_email(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def search_emails(
     query: str,
     max_results: int = 10,
@@ -336,10 +347,12 @@ async def search_emails(
     Search messages using Graph KQL $search syntax.
 
     Note: Graph $search and $filter cannot be combined in the same request.
+    The Graph API caps $search results at 25 regardless of the value requested.
 
     Args:
         query: KQL search string, e.g. 'from:alice@example.com' or 'project update'.
-        max_results: Maximum number of results (1-25 when using $search). Defaults to 10.
+        max_results: Maximum number of results (1-25). Values above 25 are
+            silently capped by the Graph API. Defaults to 10.
         folder: Optional well-known folder name or folder ID to restrict the search.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
@@ -349,7 +362,7 @@ async def search_emails(
     g = get_graph(profile)
     params: dict = {
         "$search": f'"{query}"',
-        "$top": max_results,
+        "$top": min(max_results, 25),
         "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
     }
 
@@ -370,11 +383,117 @@ async def search_emails(
 
 
 # ---------------------------------------------------------------------------
+# filter_emails
+# ---------------------------------------------------------------------------
+
+
+async def filter_emails(
+    from_address: Optional[str] = None,
+    to_address: Optional[str] = None,
+    subject_contains: Optional[str] = None,
+    received_after: Optional[str] = None,
+    received_before: Optional[str] = None,
+    has_attachments: Optional[bool] = None,
+    importance: Optional[Literal["low", "normal", "high"]] = None,
+    folder: str = "inbox",
+    max_results: int = 50,
+    sort_order: Literal["newest", "oldest"] = "newest",
+    page_token: Optional[int] = None,
+    profile: str | None = None,
+) -> ListEmailsResponse:
+    """
+    Find emails matching specific criteria using OData $filter.
+
+    Unlike search_emails (which is limited to 25 results), this tool
+    supports up to 100 results per page with full pagination — ideal for
+    finding all emails from a sender, within a date range, or matching
+    a subject.
+
+    All filter parameters are combined with AND logic. Omitted parameters
+    are not filtered on.
+
+    Args:
+        from_address: Filter by sender email address (exact match).
+        to_address: Filter by recipient email address (exact match).
+        subject_contains: Filter by subject containing this text (case-insensitive).
+        received_after: Only messages received on or after this date.
+            ISO 8601 format: '2026-01-01' or '2026-01-01T00:00:00Z'.
+        received_before: Only messages received before this date.
+            ISO 8601 format: '2026-03-31' or '2026-03-31T23:59:59Z'.
+        has_attachments: When True, only messages with attachments.
+            When False, only messages without.
+        importance: Filter by importance level: 'low', 'normal', or 'high'.
+        folder: Well-known folder name or folder ID. Defaults to 'inbox'.
+        max_results: Maximum number of messages to return (1-100). Defaults to 50.
+        sort_order: 'newest' (default) or 'oldest' first.
+        page_token: Integer offset for pagination ($skip). Omit for the first page.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Structured message summaries with pagination metadata.
+    """
+    g = get_graph(profile)
+    order = "receivedDateTime asc" if sort_order == "oldest" else "receivedDateTime desc"
+    params: dict = {
+        "$top": min(max(1, max_results), 100),
+        "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments,importance",
+        "$orderby": order,
+    }
+
+    # Build OData $filter clauses
+    clauses: list[str] = []
+    if from_address:
+        safe = from_address.replace("'", "''")
+        clauses.append(f"from/emailAddress/address eq '{safe}'")
+    if to_address:
+        safe = to_address.replace("'", "''")
+        clauses.append(f"toRecipients/any(r:r/emailAddress/address eq '{safe}')")
+    if subject_contains:
+        safe = subject_contains.replace("'", "''")
+        clauses.append(f"contains(subject, '{safe}')")
+    if received_after:
+        # Append time component if only a date was given
+        ts = received_after if "T" in received_after else f"{received_after}T00:00:00Z"
+        clauses.append(f"receivedDateTime ge {ts}")
+    if received_before:
+        ts = received_before if "T" in received_before else f"{received_before}T23:59:59Z"
+        clauses.append(f"receivedDateTime lt {ts}")
+    if has_attachments is not None:
+        clauses.append(f"hasAttachments eq {str(has_attachments).lower()}")
+    if importance:
+        clauses.append(f"importance eq '{importance}'")
+
+    if clauses:
+        params["$filter"] = " and ".join(clauses)
+
+    if page_token is not None:
+        params["$skip"] = int(page_token)
+
+    result = await g.get(f"/me/mailFolders/{folder}/messages", params=params)
+
+    messages = result.get("value", [])
+    next_link = result.get("@odata.nextLink")
+
+    next_page_token: int | None = None
+    if next_link:
+        skip_match = re.search(r"\$skip=(\d+)", next_link)
+        if skip_match:
+            next_page_token = int(skip_match.group(1))
+
+    return ListEmailsResponse(
+        folder=folder,
+        count=len(messages),
+        messages=[_message_summary(msg) for msg in messages],
+        next_page_token=next_page_token,
+        has_more=next_link is not None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # send_email
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def send_email(
     to: Union[str, list[str]],
     subject: str,
@@ -445,7 +564,6 @@ async def send_email(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def reply_email(
     message_id: str,
     body: str,
@@ -498,7 +616,6 @@ async def reply_email(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def forward_email(
     message_id: str,
     to: Union[str, list[str]],
@@ -539,7 +656,6 @@ async def forward_email(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_IDEMPOTENT_WRITE)
 async def mark_as_read(message_id: str, profile: str | None = None) -> MarkEmailReadResponse:
     """
     Mark a message as read.
@@ -556,7 +672,6 @@ async def mark_as_read(message_id: str, profile: str | None = None) -> MarkEmail
     return MarkEmailReadResponse(success=True, action="mark_as_read", message_id=message_id, is_read=True)
 
 
-@mcp.tool(annotations=_IDEMPOTENT_WRITE)
 async def mark_as_unread(message_id: str, profile: str | None = None) -> MarkEmailReadResponse:
     """
     Mark a message as unread.
@@ -578,7 +693,6 @@ async def mark_as_unread(message_id: str, profile: str | None = None) -> MarkEma
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def move_email(message_id: str, destination_folder: str, profile: str | None = None) -> MoveEmailResponse:
     """
     Move a message to a different mail folder.
@@ -612,7 +726,6 @@ async def move_email(message_id: str, destination_folder: str, profile: str | No
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def trash_email(message_id: str, profile: str | None = None) -> TrashEmailResponse:
     """
     Move a message to the Deleted Items folder (soft delete / recoverable).
@@ -648,7 +761,6 @@ async def trash_email(message_id: str, profile: str | None = None) -> TrashEmail
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_DESTRUCTIVE)
 async def delete_email(message_id: str, profile: str | None = None) -> DeleteEmailResponse:
     """
     Permanently delete a message from the mailbox. This action is IRREVERSIBLE.
@@ -671,3 +783,351 @@ async def delete_email(message_id: str, profile: str | None = None) -> DeleteEma
         message_id=message_id,
         irreversible=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch helper (Graph $batch endpoint, max 20 requests per batch)
+# ---------------------------------------------------------------------------
+
+
+def _build_batch_requests(
+    message_ids: list[str],
+    method: str,
+    url_template: str,
+    body: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """
+    Build Graph batch request entries with synthetic IDs.
+
+    Returns (requests_list, id_map) where id_map maps synthetic "1","2",…
+    back to the original message_id.
+    """
+    id_map: dict[str, str] = {}
+    requests: list[dict[str, Any]] = []
+    for idx, mid in enumerate(message_ids):
+        batch_id = str(idx + 1)
+        id_map[batch_id] = mid
+        entry: dict[str, Any] = {
+            "id": batch_id,
+            "method": method,
+            "url": url_template.format(mid=mid),
+        }
+        if body is not None:
+            entry["body"] = body
+            entry["headers"] = {"Content-Type": "application/json"}
+        requests.append(entry)
+    return requests, id_map
+
+
+def _parse_batch_error(resp: dict[str, Any]) -> tuple[str | None, str]:
+    """Extract error code and message from a batch response item."""
+    status = resp.get("status", 0)
+    body = resp.get("body")
+    if not isinstance(body, dict):
+        return None, f"HTTP {status}"
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None, f"HTTP {status}"
+    code = error.get("code")
+    message = error.get("message") or f"HTTP {status}"
+    return code, message
+
+
+async def _execute_batch(
+    g: Any,
+    requests: list[dict[str, Any]],
+    id_map: dict[str, str],
+) -> tuple[int, list[BulkEmailFailure], dict[str, dict[str, Any]]]:
+    """
+    Send requests via GraphClient.batch() (which handles $batch chunking).
+
+    Returns (succeeded_count, failures_list, success_bodies) where
+    success_bodies maps original message_id to the response body dict.
+    """
+    succeeded = 0
+    failures: list[BulkEmailFailure] = []
+    success_bodies: dict[str, dict[str, Any]] = {}
+
+    # Build a set of all expected batch IDs so we can detect missing responses.
+    expected_ids = {r["id"] for r in requests}
+
+    try:
+        responses = await g.batch(requests)
+    except Exception as exc:
+        # The entire batch call failed — record a failure for every request.
+        for req in requests:
+            mid = id_map.get(req["id"], req["id"])
+            failures.append(BulkEmailFailure(
+                message_id=mid, status=0, error=str(exc),
+            ))
+        return succeeded, failures, success_bodies
+
+    seen_ids: set[str] = set()
+    for resp in responses:
+        batch_id = resp.get("id", "")
+        seen_ids.add(batch_id)
+        mid = id_map.get(batch_id, batch_id)
+        status = resp.get("status", 0)
+
+        if 200 <= status < 300:
+            succeeded += 1
+            body = resp.get("body")
+            if isinstance(body, dict):
+                success_bodies[mid] = body
+        else:
+            code, error_msg = _parse_batch_error(resp)
+            failures.append(BulkEmailFailure(
+                message_id=mid, status=status, code=code, error=error_msg,
+            ))
+
+    # Detect missing responses (Graph returned fewer items than we sent).
+    missing = expected_ids - seen_ids
+    for batch_id in missing:
+        mid = id_map.get(batch_id, batch_id)
+        failures.append(BulkEmailFailure(
+            message_id=mid, status=0, error="No response from batch",
+        ))
+
+    return succeeded, failures, success_bodies
+
+
+# ---------------------------------------------------------------------------
+# bulk_move_emails
+# ---------------------------------------------------------------------------
+
+
+async def _collect_folder_message_ids(g: Any, folder: str) -> list[str]:
+    """Fetch all message IDs from a mail folder, paginating as needed."""
+    ids: list[str] = []
+    path = f"/me/mailFolders/{folder}/messages"
+    params: dict[str, Any] = {"$top": 100, "$select": "id"}
+    while path:
+        result = await g.get(path, params=params)
+        for msg in result.get("value", []):
+            mid = msg.get("id")
+            if mid:
+                ids.append(mid)
+        next_link = result.get("@odata.nextLink")
+        if next_link:
+            # nextLink is a full URL; extract relative path + query
+            import re as _re
+            m = _re.search(r"v1\.0(/.+)", next_link)
+            path = m.group(1) if m else ""
+            params = {}  # params are embedded in nextLink
+        else:
+            path = ""
+    return ids
+
+
+async def bulk_move_emails(
+    message_ids: Optional[list[str]] = None,
+    destination_folder: str = "",
+    source_folder: Optional[str] = None,
+    profile: str | None = None,
+) -> BulkMoveEmailsResponse:
+    """
+    Move multiple messages to a destination folder in one operation.
+
+    Uses the Graph batch API for efficiency (up to 20 per round-trip).
+
+    Two modes:
+    1. Pass message_ids explicitly.
+    2. Pass source_folder to move ALL messages from that folder (e.g. 'junkemail').
+
+    Args:
+        message_ids: List of Graph message IDs to move. Optional if source_folder is set.
+        destination_folder: Target folder — well-known name (e.g. 'archive',
+            'inbox', 'junkemail', 'deleteditems') or opaque folder ID.
+        source_folder: Move all messages from this folder instead of specifying IDs.
+            Well-known names: inbox, sentitems, drafts, deleteditems, junkemail, archive.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Summary with success/failure counts, new message IDs, and failure details.
+    """
+    if not destination_folder:
+        return BulkMoveEmailsResponse(success=False, action="bulk_move", error="destination_folder is required.")
+
+    g = get_graph(profile)
+
+    if source_folder and not message_ids:
+        message_ids = await _collect_folder_message_ids(g, source_folder)
+
+    if not message_ids:
+        return BulkMoveEmailsResponse(success=True, action="bulk_move", destination_folder=destination_folder, total=0, succeeded=0, failed=0)
+
+    requests, id_map = _build_batch_requests(
+        message_ids,
+        method="POST",
+        url_template="/me/messages/{mid}/move",
+        body={"destinationId": destination_folder},
+    )
+
+    succeeded, failures, success_bodies = await _execute_batch(g, requests, id_map)
+
+    moved = [
+        BulkMovedEmail(
+            source_message_id=mid,
+            new_message_id=body.get("id", ""),
+        )
+        for mid, body in success_bodies.items()
+    ]
+
+    return BulkMoveEmailsResponse(
+        success=len(failures) == 0,
+        action="bulk_move",
+        destination_folder=destination_folder,
+        total=len(message_ids),
+        succeeded=succeeded,
+        failed=len(failures),
+        moved=moved,
+        failures=failures,
+    )
+
+
+# ---------------------------------------------------------------------------
+# bulk_trash_emails
+# ---------------------------------------------------------------------------
+
+
+async def bulk_trash_emails(
+    message_ids: Optional[list[str]] = None,
+    folder: Optional[str] = None,
+    profile: str | None = None,
+) -> BulkTrashEmailsResponse:
+    """
+    Move multiple messages to Deleted Items (soft delete / recoverable).
+
+    Uses the Graph batch API for efficiency (up to 20 per round-trip).
+    For permanent deletion, use bulk_delete_emails instead.
+
+    Two modes:
+    1. Pass message_ids explicitly.
+    2. Pass folder to trash ALL messages from that folder (e.g. 'junkemail').
+
+    Args:
+        message_ids: List of Graph message IDs to trash. Optional if folder is set.
+        folder: Trash all messages from this folder instead of specifying IDs.
+            Well-known names: inbox, sentitems, drafts, junkemail, archive.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Summary with success/failure counts, new message IDs, and failure details.
+    """
+    g = get_graph(profile)
+
+    if folder and not message_ids:
+        message_ids = await _collect_folder_message_ids(g, folder)
+
+    if not message_ids:
+        return BulkTrashEmailsResponse(success=True, action="bulk_trash", total=0, succeeded=0, failed=0)
+
+    requests, id_map = _build_batch_requests(
+        message_ids,
+        method="POST",
+        url_template="/me/messages/{mid}/move",
+        body={"destinationId": "deleteditems"},
+    )
+
+    succeeded, failures, success_bodies = await _execute_batch(g, requests, id_map)
+
+    moved = [
+        BulkMovedEmail(
+            source_message_id=mid,
+            new_message_id=body.get("id", ""),
+        )
+        for mid, body in success_bodies.items()
+    ]
+
+    return BulkTrashEmailsResponse(
+        success=len(failures) == 0,
+        action="bulk_trash",
+        total=len(message_ids),
+        succeeded=succeeded,
+        failed=len(failures),
+        moved=moved,
+        failures=failures,
+    )
+
+
+# ---------------------------------------------------------------------------
+# bulk_delete_emails
+# ---------------------------------------------------------------------------
+
+
+async def bulk_delete_emails(
+    message_ids: Optional[list[str]] = None,
+    folder: Optional[str] = None,
+    profile: str | None = None,
+) -> BulkDeleteEmailsResponse:
+    """
+    Permanently delete multiple messages from the mailbox. This action is IRREVERSIBLE.
+
+    Uses the Graph batch API for efficiency (up to 20 per round-trip).
+    Messages will be hard-deleted and cannot be recovered from Deleted Items.
+    For a recoverable soft delete, use bulk_trash_emails instead.
+
+    Two modes:
+    1. Pass message_ids explicitly.
+    2. Pass folder to permanently delete ALL messages from that folder.
+
+    Args:
+        message_ids: List of Graph message IDs to permanently delete.
+            Optional if folder is set.
+        folder: Permanently delete all messages from this folder instead of
+            specifying IDs. Well-known names: inbox, sentitems, drafts,
+            deleteditems, junkemail, archive.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Summary with success/failure counts and failure details.
+    """
+    g = get_graph(profile)
+
+    if folder and not message_ids:
+        message_ids = await _collect_folder_message_ids(g, folder)
+
+    if not message_ids:
+        return BulkDeleteEmailsResponse(success=True, action="bulk_permanent_delete", total=0, succeeded=0, failed=0, irreversible=True)
+
+    requests, id_map = _build_batch_requests(
+        message_ids,
+        method="POST",
+        url_template="/me/messages/{mid}/permanentDelete",
+    )
+
+    succeeded, failures, _ = await _execute_batch(g, requests, id_map)
+
+    return BulkDeleteEmailsResponse(
+        success=len(failures) == 0,
+        action="bulk_permanent_delete",
+        total=len(message_ids),
+        succeeded=succeeded,
+        failed=len(failures),
+        irreversible=True,
+        failures=failures,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all mail tools with the given FastMCP server instance."""
+    server.tool(annotations=_READ_ONLY)(list_emails)
+    server.tool(annotations=_READ_ONLY)(read_email)
+    server.tool(annotations=_READ_ONLY)(search_emails)
+    server.tool(annotations=_READ_ONLY)(filter_emails)
+    server.tool(annotations=_WRITE)(send_email)
+    server.tool(annotations=_WRITE)(reply_email)
+    server.tool(annotations=_WRITE)(forward_email)
+    server.tool(annotations=_IDEMPOTENT_WRITE)(mark_as_read)
+    server.tool(annotations=_IDEMPOTENT_WRITE)(mark_as_unread)
+    server.tool(annotations=_WRITE)(move_email)
+    server.tool(annotations=_WRITE)(trash_email)
+    server.tool(annotations=_DESTRUCTIVE)(delete_email)
+    server.tool(annotations=_WRITE)(bulk_move_emails)
+    server.tool(annotations=_WRITE)(bulk_trash_emails)
+    server.tool(annotations=_DESTRUCTIVE)(bulk_delete_emails)

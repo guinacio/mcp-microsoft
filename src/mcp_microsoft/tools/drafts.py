@@ -26,7 +26,6 @@ from mcp_microsoft.models import (
     UpdateDraftResponse,
 )
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.server import mcp
 from mcp_microsoft.tools.mail import _fmt_date, _parse_recipients, _recipient_values
 
 # ---------------------------------------------------------------------------
@@ -37,7 +36,6 @@ BodyType = Literal["text", "html"]
 _READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
 _WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
 
-@mcp.tool(annotations=_WRITE)
 async def create_draft(
     to: Union[str, list[str]],
     subject: str,
@@ -91,7 +89,6 @@ async def create_draft(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_drafts(max_results: int = 10, profile: str | None = None) -> ListDraftsResponse:
     """
     List draft messages from the Drafts folder.
@@ -134,7 +131,6 @@ async def list_drafts(max_results: int = 10, profile: str | None = None) -> List
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_draft(draft_id: str, profile: str | None = None) -> DraftDetailResponse:
     """
     Fetch a draft message by ID.
@@ -190,7 +186,6 @@ async def get_draft(draft_id: str, profile: str | None = None) -> DraftDetailRes
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def update_draft(
     draft_id: str,
     subject: Optional[str] = None,
@@ -257,7 +252,6 @@ async def update_draft(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def send_draft(draft_id: str, profile: str | None = None) -> SendDraftResponse:
     """
     Send an existing draft message.
@@ -272,3 +266,17 @@ async def send_draft(draft_id: str, profile: str | None = None) -> SendDraftResp
     g = get_graph(profile)
     await g.post(f"/me/messages/{draft_id}/send", json={})
     return SendDraftResponse(success=True, action="send_draft", draft_id=draft_id)
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all draft tools with the given FastMCP server instance."""
+    server.tool(annotations=_WRITE)(create_draft)
+    server.tool(annotations=_READ_ONLY)(list_drafts)
+    server.tool(annotations=_READ_ONLY)(get_draft)
+    server.tool(annotations=_WRITE)(update_draft)
+    server.tool(annotations=_WRITE)(send_draft)

@@ -54,7 +54,6 @@ from mcp_microsoft.models import (
 )
 from mcp_microsoft.graph import get_graph, get_transfer_http_client
 from mcp_microsoft.profiles import ProfileManager
-from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -232,7 +231,6 @@ async def _upload_large_file(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def search_sharepoint_sites(
     query: str = "",
     max_results: int = 25,
@@ -276,7 +274,6 @@ async def search_sharepoint_sites(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_sharepoint_site(
     site_id: str,
     profile: str | None = None,
@@ -323,7 +320,6 @@ async def get_sharepoint_site(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_site_libraries(
     site_id: str,
     profile: str | None = None,
@@ -369,7 +365,6 @@ async def list_site_libraries(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_site_files(
     site_id: str,
     drive_id: str,
@@ -423,7 +418,6 @@ async def list_site_files(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_site_file(
     site_id: str,
     drive_id: str,
@@ -496,7 +490,6 @@ async def get_site_file(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def upload_to_site(
     site_id: str,
     drive_id: str,
@@ -616,7 +609,6 @@ async def upload_to_site(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def download_from_site(
     site_id: str,
     drive_id: str,
@@ -684,7 +676,6 @@ async def download_from_site(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_site_lists(
     site_id: str,
     max_results: int = 25,
@@ -733,7 +724,6 @@ async def list_site_lists(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_list_items(
     site_id: str,
     list_id: str,
@@ -812,7 +802,6 @@ async def get_list_items(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def create_list_item(
     site_id: str,
     list_id: str,
@@ -859,7 +848,6 @@ async def create_list_item(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def update_list_item(
     site_id: str,
     list_id: str,
@@ -906,7 +894,6 @@ async def update_list_item(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_DESTRUCTIVE)
 async def delete_list_item(
     site_id: str,
     list_id: str,
@@ -936,3 +923,24 @@ async def delete_list_item(
         list_id=list_id,
         item_id=item_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all SharePoint tools with the given FastMCP server instance."""
+    server.tool(annotations=_READ_ONLY)(search_sharepoint_sites)
+    server.tool(annotations=_READ_ONLY)(get_sharepoint_site)
+    server.tool(annotations=_READ_ONLY)(list_site_libraries)
+    server.tool(annotations=_READ_ONLY)(list_site_files)
+    server.tool(annotations=_READ_ONLY)(get_site_file)
+    server.tool(annotations=_WRITE)(upload_to_site)
+    server.tool(annotations=_WRITE)(download_from_site)
+    server.tool(annotations=_READ_ONLY)(list_site_lists)
+    server.tool(annotations=_READ_ONLY)(get_list_items)
+    server.tool(annotations=_WRITE)(create_list_item)
+    server.tool(annotations=_WRITE)(update_list_item)
+    server.tool(annotations=_DESTRUCTIVE)(delete_list_item)

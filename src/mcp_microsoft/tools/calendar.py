@@ -45,7 +45,6 @@ from mcp_microsoft.models import (
     UpdateEventResponse,
 )
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -147,7 +146,6 @@ def _event_summary(event: dict[str, Any]) -> EventSummary:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_calendars(profile: str | None = None) -> ListCalendarsResponse:
     """
     List all calendars in the user's mailbox.
@@ -187,7 +185,6 @@ async def list_calendars(profile: str | None = None) -> ListCalendarsResponse:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_events(
     max_results: int = 10,
     filter_start: Optional[str] = None,
@@ -242,7 +239,6 @@ async def list_events(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_upcoming_events(
     start_datetime: str,
     end_datetime: str,
@@ -295,7 +291,6 @@ async def list_upcoming_events(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_event(event_id: str, profile: str | None = None) -> EventDetailResponse:
     """
     Fetch a calendar event by ID with full details.
@@ -389,7 +384,6 @@ async def get_event(event_id: str, profile: str | None = None) -> EventDetailRes
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def create_event(
     subject: str,
     start_datetime: str,
@@ -486,7 +480,6 @@ async def create_event(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def update_event(
     event_id: str,
     subject: Optional[str] = None,
@@ -567,7 +560,6 @@ async def update_event(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_DESTRUCTIVE)
 async def delete_event(event_id: str, profile: str | None = None) -> DeleteEventResponse:
     """
     Delete a calendar event.
@@ -589,7 +581,6 @@ async def delete_event(event_id: str, profile: str | None = None) -> DeleteEvent
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def rsvp_event(
     event_id: str,
     response: RsvpResponse,
@@ -631,7 +622,6 @@ async def rsvp_event(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_free_busy(
     email_addresses: Union[str, list[str]],
     start_datetime: str,
@@ -711,7 +701,6 @@ async def get_free_busy(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def find_meeting_times(
     attendees: Union[str, list[str]],
     duration_minutes: int = 60,
@@ -794,3 +783,22 @@ async def find_meeting_times(
         empty_suggestions_reason=emptiness or None,
         timezone=timezone,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all calendar tools with the given FastMCP server instance."""
+    server.tool(annotations=_READ_ONLY)(list_calendars)
+    server.tool(annotations=_READ_ONLY)(list_events)
+    server.tool(annotations=_READ_ONLY)(list_upcoming_events)
+    server.tool(annotations=_READ_ONLY)(get_event)
+    server.tool(annotations=_WRITE)(create_event)
+    server.tool(annotations=_WRITE)(update_event)
+    server.tool(annotations=_DESTRUCTIVE)(delete_event)
+    server.tool(annotations=_WRITE)(rsvp_event)
+    server.tool(annotations=_READ_ONLY)(get_free_busy)
+    server.tool(annotations=_READ_ONLY)(find_meeting_times)

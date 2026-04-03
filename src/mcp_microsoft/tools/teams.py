@@ -55,7 +55,6 @@ from typing import Any, Literal, Optional
 from mcp.types import ToolAnnotations
 
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # Tool annotation constants
@@ -125,7 +124,6 @@ def _extract_sender(msg: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_list_joined(
     top: int = 50,
     profile: str | None = None,
@@ -156,7 +154,6 @@ async def teams_list_joined(
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_get(
     team_id: str,
     profile: str | None = None,
@@ -176,7 +173,6 @@ async def teams_get(
     return await g.get(f"/teams/{team_id}")
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_list_channels(
     team_id: str,
     top: int = 50,
@@ -210,7 +206,6 @@ async def teams_list_channels(
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_get_channel(
     team_id: str,
     channel_id: str,
@@ -231,7 +226,6 @@ async def teams_get_channel(
     return await g.get(f"/teams/{team_id}/channels/{channel_id}")
 
 
-@mcp.tool(annotations=_WRITE)
 async def teams_create_channel(
     team_id: str,
     display_name: str,
@@ -283,7 +277,6 @@ async def teams_create_channel(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_list_channel_messages(
     team_id: str,
     channel_id: str,
@@ -327,7 +320,6 @@ async def teams_list_channel_messages(
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_get_channel_message(
     team_id: str,
     channel_id: str,
@@ -351,7 +343,6 @@ async def teams_get_channel_message(
     return await g.get(f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}")
 
 
-@mcp.tool(annotations=_WRITE)
 async def teams_send_channel_message(
     team_id: str,
     channel_id: str,
@@ -393,7 +384,6 @@ async def teams_send_channel_message(
     }
 
 
-@mcp.tool(annotations=_WRITE)
 async def teams_reply_to_channel_message(
     team_id: str,
     channel_id: str,
@@ -433,7 +423,6 @@ async def teams_reply_to_channel_message(
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_list_message_replies(
     team_id: str,
     channel_id: str,
@@ -483,7 +472,6 @@ async def teams_list_message_replies(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_list_chats(
     top: int = 20,
     chat_type: str = "",
@@ -519,7 +507,6 @@ async def teams_list_chats(
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_get_chat(
     chat_id: str,
     profile: str | None = None,
@@ -539,7 +526,6 @@ async def teams_get_chat(
     return await g.get(f"/me/chats/{chat_id}", params={"$expand": "members"})
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_list_chat_messages(
     chat_id: str,
     top: int = 20,
@@ -579,7 +565,6 @@ async def teams_list_chat_messages(
     }
 
 
-@mcp.tool(annotations=_WRITE)
 async def teams_send_chat_message(
     chat_id: str,
     content: str,
@@ -612,7 +597,6 @@ async def teams_send_chat_message(
     }
 
 
-@mcp.tool(annotations=_WRITE)
 async def teams_create_chat(
     members: list[str],
     topic: str = "",
@@ -678,7 +662,6 @@ async def teams_create_chat(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def teams_create_meeting(
     subject: str,
     start_datetime: str,
@@ -736,7 +719,6 @@ async def teams_create_meeting(
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_get_meeting(
     meeting_id: str,
     profile: str | None = None,
@@ -757,7 +739,6 @@ async def teams_get_meeting(
     return await g.get(f"/me/onlineMeetings/{meeting_id}")
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def teams_list_meetings(
     start_after: Optional[str] = None,
     start_before: Optional[str] = None,
@@ -815,3 +796,34 @@ async def teams_list_meetings(
         "value": meetings,
         "next_link": result.get("@odata.nextLink"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all Teams tools with the given FastMCP server instance."""
+    # Teams & Channels
+    server.tool(annotations=_READ_ONLY)(teams_list_joined)
+    server.tool(annotations=_READ_ONLY)(teams_get)
+    server.tool(annotations=_READ_ONLY)(teams_list_channels)
+    server.tool(annotations=_READ_ONLY)(teams_get_channel)
+    server.tool(annotations=_WRITE)(teams_create_channel)
+    # Channel Messages
+    server.tool(annotations=_READ_ONLY)(teams_list_channel_messages)
+    server.tool(annotations=_READ_ONLY)(teams_get_channel_message)
+    server.tool(annotations=_WRITE)(teams_send_channel_message)
+    server.tool(annotations=_WRITE)(teams_reply_to_channel_message)
+    server.tool(annotations=_READ_ONLY)(teams_list_message_replies)
+    # Chats
+    server.tool(annotations=_READ_ONLY)(teams_list_chats)
+    server.tool(annotations=_READ_ONLY)(teams_get_chat)
+    server.tool(annotations=_READ_ONLY)(teams_list_chat_messages)
+    server.tool(annotations=_WRITE)(teams_send_chat_message)
+    server.tool(annotations=_WRITE)(teams_create_chat)
+    # Online Meetings
+    server.tool(annotations=_WRITE)(teams_create_meeting)
+    server.tool(annotations=_READ_ONLY)(teams_get_meeting)
+    server.tool(annotations=_READ_ONLY)(teams_list_meetings)

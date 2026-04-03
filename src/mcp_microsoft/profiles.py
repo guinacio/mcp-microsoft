@@ -40,10 +40,12 @@ DEFAULT_SCOPES: list[str] = [
     # Teams — channels and channel messages
     "Team.ReadBasic.All",
     "Channel.ReadBasic.All",
+    "Channel.Create",
     "ChannelMessage.Read.All",
     "ChannelMessage.Send",
     # Teams — chats (1:1 and group)
     "Chat.ReadWrite",
+    "Chat.Create",
     # Teams — online meetings
     "OnlineMeetings.ReadWrite",
 ]
@@ -443,3 +445,41 @@ class ProfileManager:
             return False
         result = app.acquire_token_silent(cfg.effective_scopes, account=accounts[0])
         return result is not None and "access_token" in result
+
+
+# ---------------------------------------------------------------------------
+# Corporate-account guard (used by server.py to gate Teams tool registration)
+# ---------------------------------------------------------------------------
+
+#: Tenant IDs that are definitively personal / consumer accounts.
+_PERSONAL_TENANT_IDS: frozenset[str] = frozenset(
+    {
+        "consumers",
+        # The well-known GUID Microsoft uses as the "consumers" alias
+        "9188040d-6c67-4c5b-b112-36a304b66dad",
+    }
+)
+
+
+def is_corporate_account(profile: ProfileConfig) -> bool:
+    """Return True if *profile* is a work/school (corporate) Microsoft account.
+
+    Teams is an M365 corporate product and its Graph API endpoints always
+    return 401 for personal (Outlook.com / Hotmail / Live) accounts.  Use
+    this helper to decide whether to expose Teams tools.
+
+    Decision table
+    --------------
+    tenant_id value          | result | reason
+    -------------------------|--------|----------------------------------
+    None / ""                | False  | no tenant configured — fail-safe
+    "consumers"              | False  | explicit personal-account alias
+    "9188040d-..."           | False  | GUID form of "consumers"
+    "common"                 | True   | ambiguous — err toward corporate
+    "organizations"          | True   | explicit corporate alias
+    any GUID / named tenant  | True   | real AAD tenant → corporate
+    """
+    tid = (profile.tenant_id or "").strip()
+    if not tid:
+        return False
+    return tid not in _PERSONAL_TENANT_IDS

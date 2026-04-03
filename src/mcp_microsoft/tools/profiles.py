@@ -27,7 +27,6 @@ from mcp_microsoft.models import (
     RemoveProfileResponse,
     SetDefaultProfileResponse,
 )
-from mcp_microsoft.server import mcp
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +43,6 @@ _LOCAL_IDEMPOTENT = ToolAnnotations(
 _LOCAL_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=False)
 _AUTH_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
 
-@mcp.tool(annotations=_LOCAL_READ)
 async def list_ms_profiles() -> ListProfilesResponse:
     """
     List all configured Microsoft 365 profiles.
@@ -88,7 +86,6 @@ async def list_ms_profiles() -> ListProfilesResponse:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_LOCAL_WRITE)
 async def add_ms_profile(
     name: str,
     client_id: str,
@@ -143,7 +140,6 @@ async def add_ms_profile(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_LOCAL_DESTRUCTIVE)
 async def remove_ms_profile(name: str) -> RemoveProfileResponse:
     """
     Remove a Microsoft 365 profile and its cached tokens.
@@ -172,7 +168,6 @@ async def remove_ms_profile(name: str) -> RemoveProfileResponse:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_AUTH_WRITE)
 async def authenticate_ms_profile(profile: Optional[str] = None) -> AuthenticateProfileResponse:
     """
     Trigger authentication for a profile.
@@ -219,7 +214,6 @@ async def authenticate_ms_profile(profile: Optional[str] = None) -> Authenticate
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_LOCAL_IDEMPOTENT)
 async def set_default_ms_profile(name: str) -> SetDefaultProfileResponse:
     """
     Change which profile is used by default when no profile is specified.
@@ -239,3 +233,17 @@ async def set_default_ms_profile(name: str) -> SetDefaultProfileResponse:
         return SetDefaultProfileResponse(success=False, action="set_default_profile", profile=name, error=str(exc))
 
     return SetDefaultProfileResponse(success=True, action="set_default_profile", profile=name)
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all profile management tools with the given FastMCP server instance."""
+    server.tool(annotations=_LOCAL_READ)(list_ms_profiles)
+    server.tool(annotations=_LOCAL_WRITE)(add_ms_profile)
+    server.tool(annotations=_LOCAL_DESTRUCTIVE)(remove_ms_profile)
+    server.tool(annotations=_AUTH_WRITE)(authenticate_ms_profile)
+    server.tool(annotations=_LOCAL_IDEMPOTENT)(set_default_ms_profile)

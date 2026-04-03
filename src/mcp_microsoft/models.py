@@ -44,7 +44,7 @@ class ListEmailsResponse(MCPModel):
     folder: str = ""
     count: int = 0
     messages: list[MessageSummary] = Field(default_factory=list)
-    next_page_token: int | None = None
+    next_page_token: str | None = None
     has_more: bool = False
 
 
@@ -129,6 +129,43 @@ class TrashEmailResponse(MoveEmailResponse):
 class DeleteEmailResponse(ActionResult):
     message_id: str = ""
     irreversible: bool = True
+
+
+class BulkEmailFailure(MCPModel):
+    message_id: str = ""
+    status: int = 0
+    code: str | None = None
+    error: str = ""
+
+
+class BulkMovedEmail(MCPModel):
+    source_message_id: str = ""
+    new_message_id: str = ""
+
+
+class BulkMoveEmailsResponse(ActionResult):
+    destination_folder: str = ""
+    total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    moved: list[BulkMovedEmail] = Field(default_factory=list)
+    failures: list[BulkEmailFailure] = Field(default_factory=list)
+
+
+class BulkTrashEmailsResponse(ActionResult):
+    total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    moved: list[BulkMovedEmail] = Field(default_factory=list)
+    failures: list[BulkEmailFailure] = Field(default_factory=list)
+
+
+class BulkDeleteEmailsResponse(ActionResult):
+    total: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    irreversible: bool = True
+    failures: list[BulkEmailFailure] = Field(default_factory=list)
 
 
 class DraftSummary(MCPModel):
@@ -662,6 +699,8 @@ class ListContactsResponse(MCPModel):
     count: int = 0
     folder_id: str | None = None
     contacts: list[ContactInfo] = Field(default_factory=list)
+    next_page_token: str | None = None
+    has_more: bool = False
 
 
 class GetContactResponse(MCPModel):

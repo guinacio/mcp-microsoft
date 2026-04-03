@@ -264,6 +264,57 @@ class GraphClient:
             headers={"Content-Type": content_type},
         )
 
+    async def batch(self, requests: list[dict]) -> list[dict]:
+        """
+        Execute Graph API requests via the $batch endpoint.
+
+        Accepts up to any number of requests and automatically chunks them into
+        groups of 20 (the Graph API limit per batch call).  All chunks are sent
+        sequentially and their responses are combined into a single flat list.
+
+        Each request dict must contain:
+            "id"     - caller-assigned string identifier (must be unique within
+                       the full list; duplicate IDs across chunks are safe because
+                       each chunk is a separate HTTP call, but callers should keep
+                       them unique for easy result look-up).
+            "method" - HTTP method string, e.g. "GET", "POST", "DELETE".
+            "url"    - Relative Graph path, e.g. "/me/messages/{id}/move".
+                       Do NOT include the base URL.
+
+        Optional keys per request dict:
+            "body"    - dict to send as the JSON request body.
+            "headers" - dict of additional per-request headers (e.g.
+                        {"Content-Type": "application/json"} when body is set).
+
+        Returns:
+            A flat list of response dicts, one per input request, in the order
+            they were returned by Graph (which may differ from input order).
+            Each response dict has at minimum:
+                "id"     - matches the "id" from the originating request.
+                "status" - HTTP status code (int).
+                "body"   - parsed JSON body dict, or {} when Graph returns none.
+
+        Raises:
+            httpx.HTTPStatusError: if the $batch POST itself fails (network or
+                auth error).  Per-item failures inside a successful batch call
+                are NOT raised — callers must inspect the "status" field of each
+                response dict to detect them.
+        """
+        _BATCH_CHUNK = 20
+        responses: list[dict] = []
+
+        for offset in range(0, len(requests), _BATCH_CHUNK):
+            chunk = requests[offset : offset + _BATCH_CHUNK]
+            result = await self.post("/$batch", json={"requests": chunk})
+            for resp in (result or {}).get("responses", []):
+                responses.append({
+                    "id": resp.get("id", ""),
+                    "status": resp.get("status", 0),
+                    "body": resp.get("body") or {},
+                })
+
+        return responses
+
     async def get_raw(self, path: str) -> bytes:
         """GET request that returns raw bytes (used for file downloads)."""
         url = f"{GRAPH_BASE}{path}"

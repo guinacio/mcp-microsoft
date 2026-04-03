@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 from mcp.types import ToolAnnotations
 
@@ -37,7 +38,6 @@ from mcp_microsoft.models import (
     UpdateContactResponse,
 )
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.server import mcp
 
 # ---------------------------------------------------------------------------
 # Annotation constants
@@ -69,9 +69,9 @@ def _normalize_contact(c: dict[str, Any]) -> ContactInfo:
     """Normalize a Graph contact object into a ContactInfo summary."""
     return ContactInfo(
         id=c.get("id", ""),
-        display_name=c.get("displayName", ""),
-        given_name=c.get("givenName", ""),
-        surname=c.get("surname", ""),
+        display_name=c.get("displayName") or "",
+        given_name=c.get("givenName") or "",
+        surname=c.get("surname") or "",
         email_addresses=[
             ContactEmailAddress(
                 address=ea.get("address", ""),
@@ -92,12 +92,11 @@ def _normalize_contact(c: dict[str, Any]) -> ContactInfo:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_contacts(
     folder_id: Optional[str] = None,
     search: Optional[str] = None,
     top: int = 50,
-    skip: int = 0,
+    skip_token: Optional[str] = None,
     profile: str | None = None,
 ) -> ListContactsResponse:
     """
@@ -110,11 +109,14 @@ async def list_contacts(
                 Note: $search requires the ConsistencyLevel header and may not be
                 supported in all tenants. Use search_contacts for broader compatibility.
         top: Maximum number of contacts to return (1-100). Defaults to 50.
-        skip: Number of contacts to skip for pagination. Defaults to 0.
+        skip_token: Opaque pagination cursor returned as next_page_token from a
+                    previous call. Omit for the first page.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured list of contacts with id, name, email, phone, and job info.
+        When has_more is True, pass next_page_token as skip_token to retrieve
+        the next page.
     """
     g = get_graph(profile)
     top = max(1, min(top, 100))
@@ -122,9 +124,10 @@ async def list_contacts(
     params: dict[str, Any] = {
         "$select": _CONTACT_SELECT,
         "$top": top,
-        "$skip": skip,
         "$orderby": "displayName",
     }
+    if skip_token is not None:
+        params["$skiptoken"] = skip_token
 
     extra_headers: dict[str, str] | None = None
     if search:
@@ -140,10 +143,18 @@ async def list_contacts(
     result = await g.get(path, params=params, headers=extra_headers)
     contacts = (result or {}).get("value", [])
 
+    next_link = (result or {}).get("@odata.nextLink", "")
+    next_page_token: str | None = None
+    if next_link:
+        qs = parse_qs(urlparse(next_link).query)
+        next_page_token = qs.get("$skiptoken", [None])[0]
+
     return ListContactsResponse(
         count=len(contacts),
         folder_id=folder_id,
         contacts=[_normalize_contact(c) for c in contacts],
+        next_page_token=next_page_token,
+        has_more=(next_page_token is not None),
     )
 
 
@@ -152,7 +163,6 @@ async def list_contacts(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_contact(
     contact_id: str,
     profile: str | None = None,
@@ -174,9 +184,9 @@ async def get_contact(
 
     return GetContactResponse(
         id=c.get("id", ""),
-        display_name=c.get("displayName", ""),
-        given_name=c.get("givenName", ""),
-        surname=c.get("surname", ""),
+        display_name=c.get("displayName") or "",
+        given_name=c.get("givenName") or "",
+        surname=c.get("surname") or "",
         email_addresses=[
             ContactEmailAddress(
                 address=ea.get("address", ""),
@@ -198,7 +208,6 @@ async def get_contact(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def create_contact(
     display_name: str,
     given_name: Optional[str] = None,
@@ -285,7 +294,6 @@ async def create_contact(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_WRITE)
 async def update_contact(
     contact_id: str,
     display_name: Optional[str] = None,
@@ -375,7 +383,6 @@ async def update_contact(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_DESTRUCTIVE)
 async def delete_contact(
     contact_id: str,
     profile: str | None = None,
@@ -404,7 +411,6 @@ async def delete_contact(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_contact_folders(
     profile: str | None = None,
 ) -> ListContactFoldersResponse:
@@ -448,7 +454,6 @@ async def list_contact_folders(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def search_contacts(
     query: str,
     top: int = 25,
@@ -496,7 +501,6 @@ async def search_contacts(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_contact_photo(
     contact_id: str,
     save_path: Optional[str] = None,
@@ -535,3 +539,20 @@ async def get_contact_photo(
         saved_path=saved_path,
         size_bytes=len(raw),
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
+
+def register(server) -> None:
+    """Register all contact tools with the given FastMCP server instance."""
+    server.tool(annotations=_READ_ONLY)(list_contacts)
+    server.tool(annotations=_READ_ONLY)(get_contact)
+    server.tool(annotations=_WRITE)(create_contact)
+    server.tool(annotations=_WRITE)(update_contact)
+    server.tool(annotations=_DESTRUCTIVE)(delete_contact)
+    server.tool(annotations=_READ_ONLY)(list_contact_folders)
+    server.tool(annotations=_READ_ONLY)(search_contacts)
+    server.tool(annotations=_READ_ONLY)(get_contact_photo)
