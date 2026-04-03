@@ -23,7 +23,9 @@
       "env": {
         "MS365_CLIENT_ID": "${user_config.client_id}",
         "MS365_TENANT_ID": "${user_config.tenant_id}",
-        "MS365_CREDENTIALS_DIR": "${user_config.credentials_dir}"
+        "MS365_CREDENTIALS_DIR": "${user_config.credentials_dir}",
+        "MCP_ENABLE_TEAMS": "${user_config.enable_teams}",
+        "MCP_ENABLE_SHAREPOINT": "${user_config.enable_sharepoint}"
       }
     }
   },
@@ -155,6 +157,20 @@
       "type": "directory",
       "title": "Credentials Directory",
       "description": "Directory for storing profiles and token caches. Defaults to ~/.microsoft-mcp/",
+      "required": false
+    },
+    "enable_teams": {
+      "type": "string",
+      "title": "Enable Teams Tools",
+      "description": "Set to '1' or 'true' to register Microsoft Teams tools. Requires a work/organisational account with a specific tenant_id.",
+      "default": "",
+      "required": false
+    },
+    "enable_sharepoint": {
+      "type": "string",
+      "title": "Enable SharePoint Tools",
+      "description": "Set to '1' or 'true' to register SharePoint tools. Requires a work/organisational account.",
+      "default": "",
       "required": false
     }
   }

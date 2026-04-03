@@ -17,6 +17,8 @@ from contextlib import asynccontextmanager
 
 from fastmcp import FastMCP
 
+from mcp_microsoft.feature_flags import is_teams_enabled
+from mcp_microsoft.feature_flags import is_teams_enabled
 from mcp_microsoft.graph import close_http_clients, initialize_http_clients
 
 _log = logging.getLogger(__name__)
@@ -61,46 +63,37 @@ sharepoint.register(mcp)
 profiles.register(mcp)
 contacts.register(mcp)
 
-# Teams tools — only available for corporate/work accounts.
+# Teams tools — corporate accounts only, or set MCP_ENABLE_TEAMS=1 to force on.
 # Personal accounts (Outlook.com, Hotmail, Live) always receive 401 from the
-# Teams Graph endpoints, so there is no value in exposing 18 tools that can
-# never succeed.  We gate registration at startup based on the default profile's
-# tenant_id.  If no profile is configured yet, we default to NOT registering
-# (fail-safe).
-def _register_teams_if_corporate() -> None:
+# Teams Graph endpoints.
+def _should_register_teams() -> bool:
+    if is_teams_enabled():
+        return True
     try:
         from mcp_microsoft.profiles import ProfileManager, is_corporate_account
-
-        mgr = ProfileManager.get()
-        # resolve_profile(None) returns the default profile; raises if none configured.
-        profile = mgr.resolve_profile(None)
-        if is_corporate_account(profile):
-            from mcp_microsoft.tools import teams
-            teams.register(mcp)
-        else:
-            _log.info(
-                "Teams tools not registered: profile %r uses a personal Microsoft "
-                "account (tenant_id=%r). Teams requires a work/school account.",
-                profile.name,
-                profile.tenant_id,
-            )
+        profile = ProfileManager.get().resolve_profile(None)
+        return is_corporate_account(profile)
     except Exception:
-        # No profiles configured yet — skip Teams registration (fail-safe).
-        _log.debug(
-            "Teams tools not registered: no active profile found at startup.",
-            exc_info=True,
-        )
+        return False
 
 
-_register_teams_if_corporate()
+if _should_register_teams():
+    from mcp_microsoft.tools import teams
+    teams.register(mcp)
+else:
+    _log.info(
+        "Teams tools not registered (corporate account or MCP_ENABLE_TEAMS=1 required)"
+    )
+
+# Service discovery tool
+from mcp_microsoft.tools import services  # noqa: E402
+services.register(mcp)
 
 # ---------------------------------------------------------------------------
 # Tool annotations — infer readOnlyHint / destructiveHint / idempotentHint
 # ---------------------------------------------------------------------------
 
 from mcp_microsoft.common.tool_annotations import apply_tool_annotations  # noqa: E402
-
-apply_tool_annotations(mcp)
 
 # ---------------------------------------------------------------------------
 # Entry point
