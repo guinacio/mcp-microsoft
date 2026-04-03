@@ -95,6 +95,8 @@ services.register(mcp)
 
 from mcp_microsoft.common.tool_annotations import apply_tool_annotations  # noqa: E402
 
+apply_tool_annotations(mcp)
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
