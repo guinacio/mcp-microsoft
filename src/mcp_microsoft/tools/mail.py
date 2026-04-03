@@ -23,17 +23,17 @@ Implemented:
 
 from __future__ import annotations
 
-import html as html_module
-import re
-from datetime import datetime
-from typing import Any, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional
 
-from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations
-from pydantic import BaseModel
+from fastmcp.server.context import Context
+from pydantic import BaseModel, Field
 
+from mcp_microsoft.common.mail_utils import (
+    format_mail_datetime,
+    parse_recipients,
+    recipient_values,
+)
 from mcp_microsoft.models import (
-    Address,
     AttachmentInfo,
     BulkDeleteEmailsResponse,
     BulkEmailFailure,
@@ -55,6 +55,22 @@ from mcp_microsoft.models import (
     TrashEmailResponse,
 )
 from mcp_microsoft.common.request_model import ToolRequestModel
+from mcp_microsoft.common.text import strip_html
+from mcp_microsoft.common.tooling import (
+    DESTRUCTIVE_TOOL,
+    IDEMPOTENT_WRITE_TOOL,
+    READ_ONLY_TOOL,
+    WRITE_TOOL,
+    register_tool,
+)
+from mcp_microsoft.graph_types import (
+    GraphAttachment,
+    GraphItemBody,
+    GraphMessage,
+    GraphRecipient,
+    GraphSender,
+    parse_graph_collection,
+)
 from mcp_microsoft.graph import get_graph
 
 # ---------------------------------------------------------------------------
@@ -66,123 +82,238 @@ class _Confirmation(BaseModel):
     confirmed: bool
 
 
+class _BatchRequestEntry(BaseModel):
+    id: str
+    method: str
+    url: str
+    body: dict[str, Any] | None = None
+    headers: dict[str, str] | None = None
+
+
+class _BatchOperation(BaseModel):
+    method: str
+    url_template: str
+    body: dict[str, Any] | None = None
+
+
+class _BatchRequestPlan(BaseModel):
+    requests: list[_BatchRequestEntry] = Field(default_factory=list)
+    message_ids_by_batch_id: dict[str, str] = Field(default_factory=dict)
+
+
+class _BatchErrorBody(BaseModel):
+    code: str | None = None
+    message: str | None = None
+
+
+class _BatchResponseBody(BaseModel):
+    error: _BatchErrorBody | None = None
+
+
+class _BatchResponseEntry(BaseModel):
+    id: str = ""
+    status: int = 0
+    body: dict[str, Any] | None = None
+
+
+class _BatchExecutionResult(BaseModel):
+    succeeded_message_ids: list[str] = Field(default_factory=list)
+    failures: list[BulkEmailFailure] = Field(default_factory=list)
+    response_messages: dict[str, GraphMessage] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
 BodyType = Literal["text", "html"]
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
-_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
-_IDEMPOTENT_WRITE = ToolAnnotations(
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
-)
-_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
 
 
-def _parse_recipients(
-    value: Optional[Union[str, list[str]]],
-) -> list[dict]:
-    """
-    Convert a comma-separated string or list of addresses to Graph recipient format.
-
-    Example:
-        "alice@example.com, bob@example.com"
-        -> [{"emailAddress": {"address": "alice@example.com"}}, ...]
-    """
-    if not value:
-        return []
-    if isinstance(value, str):
-        addresses = [addr.strip() for addr in value.split(",") if addr.strip()]
-    else:
-        addresses = [addr.strip() for addr in value if addr.strip()]
-    return [{"emailAddress": {"address": addr}} for addr in addresses]
+class ListEmailsInput(ToolRequestModel):
+    folder: str = "inbox"
+    max_results: int = 10
+    unread_only: bool = False
+    sort_order: Literal["newest", "oldest"] = "newest"
+    skip_token: str | None = None
+    profile: str | None = None
 
 
-def _strip_html(html: str) -> str:
-    """
-    Convert an HTML string to plain text by stripping tags and unescaping entities.
-    """
-    # Remove <style> and <script> blocks entirely
-    text = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
-    # Replace block-level line breaks
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"</p>", "\n\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"</?(div|tr|li|h[1-6]|blockquote)[^>]*>", "\n", text, flags=re.IGNORECASE)
-    # Strip remaining tags
-    text = re.sub(r"<[^>]+>", "", text)
-    # Unescape HTML entities
-    text = html_module.unescape(text)
-    # Collapse excessive whitespace / blank lines
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+class ReadEmailInput(ToolRequestModel):
+    message_id: str
+    summary_mode: bool = False
+    profile: str | None = None
+
+
+class SearchEmailsInput(ToolRequestModel):
+    query: str
+    max_results: int = 10
+    folder: str | None = None
+    profile: str | None = None
+
+
+class FilterEmailsInput(ToolRequestModel):
+    from_address: str | None = None
+    to_address: str | None = None
+    subject_contains: str | None = None
+    received_after: str | None = None
+    received_before: str | None = None
+    has_attachments: bool | None = None
+    importance: Literal["low", "normal", "high"] | None = None
+    folder: str = "inbox"
+    max_results: int = 50
+    sort_order: Literal["newest", "oldest"] = "newest"
+    skip_token: str | None = None
+    profile: str | None = None
+
+
+class SendEmailInput(ToolRequestModel):
+    to: str | list[str]
+    subject: str
+    body: str
+    cc: str | list[str] | None = None
+    bcc: str | list[str] | None = None
+    body_type: BodyType = "text"
+    save_to_sent: bool = True
+    reply_to: str | list[str] | None = None
+    profile: str | None = None
+    confirm: bool = False
+
+
+class ReplyEmailInput(ToolRequestModel):
+    message_id: str
+    body: str
+    reply_all: bool = False
+    body_type: BodyType = "text"
+    profile: str | None = None
+
+
+class ForwardEmailInput(ToolRequestModel):
+    message_id: str
+    to: str | list[str]
+    comment: str | None = None
+    profile: str | None = None
+
+
+class MarkAsReadInput(ToolRequestModel):
+    message_id: str
+    profile: str | None = None
+
+
+class MarkAsUnreadInput(ToolRequestModel):
+    message_id: str
+    profile: str | None = None
+
+
+class MoveEmailInput(ToolRequestModel):
+    message_id: str
+    destination_folder: str
+    profile: str | None = None
+
+
+class TrashEmailInput(ToolRequestModel):
+    message_id: str
+    profile: str | None = None
+
+
+class DeleteEmailInput(ToolRequestModel):
+    message_id: str
+    profile: str | None = None
+    confirm: bool = False
+
+
+class BulkMoveEmailsInput(ToolRequestModel):
+    message_ids: list[str] | None = None
+    destination_folder: str = ""
+    source_folder: str | None = None
+    profile: str | None = None
+
+
+class BulkTrashEmailsInput(ToolRequestModel):
+    message_ids: list[str] | None = None
+    folder: str | None = None
+    profile: str | None = None
+
+
+class BulkDeleteEmailsInput(ToolRequestModel):
+    message_ids: list[str] | None = None
+    folder: str | None = None
+    profile: str | None = None
+
+
+def _body_text(body: GraphItemBody) -> str:
+    """Convert a Graph message body into readable plain text when needed."""
+    if body.content_type.lower() == "html":
+        return strip_html(body.content)
+    return body.content
 
 
 def _fmt_date(iso: Optional[str]) -> str:
     """Format an ISO 8601 date string to a human-readable form."""
-    if not iso:
-        return ""
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return iso
+    return format_mail_datetime(iso)
 
 
-def _fmt_sender(sender_obj: Optional[dict]) -> str:
+def _fmt_sender(sender_obj: GraphSender | None) -> str:
     """Format a Graph sender/from object as 'Name <email>' or just 'email'."""
     if not sender_obj:
         return "unknown"
-    ea = sender_obj.get("emailAddress", {})
-    name = ea.get("name", "")
-    addr = ea.get("address", "unknown")
+    ea = sender_obj.email_address
+    name = ea.name
+    addr = ea.address or "unknown"
     return f"{name} <{addr}>" if name else addr
 
 
-def _fmt_recipients(recipients: list[dict]) -> str:
+def _fmt_recipients(recipients: list[GraphRecipient]) -> str:
     """Format a list of Graph recipient objects as a comma-separated string."""
     parts = []
     for r in recipients or []:
-        ea = r.get("emailAddress", {})
-        name = ea.get("name", "")
-        addr = ea.get("address", "")
+        ea = r.email_address
+        name = ea.name
+        addr = ea.address
         parts.append(f"{name} <{addr}>" if name else addr)
     return ", ".join(parts)
 
 
-def _recipient_values(recipients: list[dict]) -> list[Address]:
-    """Normalize Graph recipient objects into simple dictionaries."""
-    values: list[Address] = []
-    for recipient in recipients or []:
-        email_address = recipient.get("emailAddress", {})
-        values.append(Address(name=email_address.get("name", ""), address=email_address.get("address", "")))
-    return values
-
-
-def _display_address_from_sender(sender_obj: dict[str, Any] | None) -> DisplayAddress:
+def _display_address_from_sender(sender_obj: GraphSender | None) -> DisplayAddress:
     """Normalize a Graph sender into a typed address model."""
-    email_address = (sender_obj or {}).get("emailAddress", {})
+    email_address = sender_obj.email_address if sender_obj else None
     return DisplayAddress(
         display=_fmt_sender(sender_obj),
-        name=email_address.get("name", ""),
-        address=email_address.get("address", ""),
+        name=email_address.name if email_address else "",
+        address=email_address.address if email_address else "",
     )
 
 
-def _message_summary(msg: dict[str, Any]) -> MessageSummary:
+def _message_summary(msg: GraphMessage) -> MessageSummary:
     """Normalize a Graph message into a summary payload."""
     return MessageSummary(
-        id=msg.get("id", ""),
-        subject=msg.get("subject") or "(no subject)",
-        from_=_display_address_from_sender(msg.get("from")),
-        received_at=msg.get("receivedDateTime"),
-        received_at_display=_fmt_date(msg.get("receivedDateTime")),
-        is_read=msg.get("isRead", False),
-        has_attachments=msg.get("hasAttachments", False),
-        importance=msg.get("importance", ""),
-        preview=(msg.get("bodyPreview") or "").replace("\n", " ")[:120],
+        id=msg.id,
+        subject=msg.subject or "(no subject)",
+        from_=_display_address_from_sender(msg.from_),
+        received_at=msg.received_date_time,
+        received_at_display=_fmt_date(msg.received_date_time),
+        is_read=msg.is_read,
+        has_attachments=msg.has_attachments,
+        importance=msg.importance,
+        preview=msg.body_preview.replace("\n", " ")[:120],
     )
+
+
+def _attachment_info(att: GraphAttachment) -> AttachmentInfo:
+    size_kb = att.size // 1024
+    return AttachmentInfo(
+        id=att.id,
+        name=att.name or "unnamed",
+        content_type=att.content_type,
+        size_bytes=att.size,
+        size_kb=size_kb,
+    )
+
+
+def _graph_message_from_payload(payload: dict[str, Any] | None) -> GraphMessage | None:
+    """Parse a Graph message response body when the operation returns one."""
+    if not isinstance(payload, dict):
+        return None
+    return GraphMessage.model_validate(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -191,12 +322,7 @@ def _message_summary(msg: dict[str, Any]) -> MessageSummary:
 
 
 async def list_emails(
-    folder: str = "inbox",
-    max_results: int = 10,
-    unread_only: bool = False,
-    sort_order: Literal["newest", "oldest"] = "newest",
-    skip_token: Optional[str] = None,
-    profile: str | None = None,
+    params: ListEmailsInput,
 ) -> ListEmailsResponse:
     """
     List emails from a mail folder.
@@ -218,21 +344,21 @@ async def list_emails(
     """
     from urllib.parse import parse_qs, urlparse
 
-    g = get_graph(profile)
-    order = "receivedDateTime asc" if sort_order == "oldest" else "receivedDateTime desc"
-    params: dict = {
-        "$top": max_results,
+    g = get_graph(params.profile)
+    order = "receivedDateTime asc" if params.sort_order == "oldest" else "receivedDateTime desc"
+    query: dict[str, Any] = {
+        "$top": params.max_results,
         "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments,importance",
         "$orderby": order,
     }
-    if unread_only:
-        params["$filter"] = "isRead eq false"
-    if skip_token is not None:
-        params["$skiptoken"] = skip_token
+    if params.unread_only:
+        query["$filter"] = "isRead eq false"
+    if params.skip_token is not None:
+        query["$skiptoken"] = params.skip_token
 
-    result = await g.get(f"/me/mailFolders/{folder}/messages", params=params)
+    result = await g.get(f"/me/mailFolders/{params.folder}/messages", params=query)
 
-    messages = result.get("value", [])
+    messages = parse_graph_collection(result, GraphMessage)
     next_link = result.get("@odata.nextLink", "")
 
     next_page_token: str | None = None
@@ -241,7 +367,7 @@ async def list_emails(
         next_page_token = qs.get("$skiptoken", [None])[0]
 
     return ListEmailsResponse(
-        folder=folder,
+        folder=params.folder,
         count=len(messages),
         messages=[_message_summary(msg) for msg in messages],
         next_page_token=next_page_token,
@@ -255,9 +381,7 @@ async def list_emails(
 
 
 async def read_email(
-    message_id: str,
-    summary_mode: bool = False,
-    profile: str | None = None,
+    params: ReadEmailInput,
 ) -> ReadEmailResponse | ReadEmailSummaryResponse:
     """
     Fetch a full email message by ID.
@@ -271,8 +395,8 @@ async def read_email(
     Returns:
         Structured message details.
     """
-    g = get_graph(profile)
-    params = {
+    g = get_graph(params.profile)
+    query = {
         "$select": (
             "id,subject,from,toRecipients,ccRecipients,receivedDateTime,"
             "body,bodyPreview,attachments,isRead,conversationId,importance"
@@ -280,67 +404,42 @@ async def read_email(
         "$expand": "attachments($select=id,name,size,contentType)",
     }
 
-    msg = await g.get(f"/me/messages/{message_id}", params=params)
+    msg = GraphMessage.model_validate(await g.get(f"/me/messages/{params.message_id}", params=query))
 
-    subject = msg.get("subject") or "(no subject)"
-    sender = _fmt_sender(msg.get("from"))
-    to_str = _fmt_recipients(msg.get("toRecipients", []))
-    cc_str = _fmt_recipients(msg.get("ccRecipients", []))
-    date = _fmt_date(msg.get("receivedDateTime"))
-    is_read = msg.get("isRead", False)
-    conv_id = msg.get("conversationId", "")
+    subject = msg.subject or "(no subject)"
+    to_str = _fmt_recipients(msg.to_recipients)
+    cc_str = _fmt_recipients(msg.cc_recipients)
+    date = _fmt_date(msg.received_date_time)
+    is_read = msg.is_read
+    conv_id = msg.conversation_id
 
-    if summary_mode:
+    if params.summary_mode:
         return ReadEmailSummaryResponse(
-            id=message_id,
+            id=params.message_id,
             subject=subject,
-            from_=_display_address_from_sender(msg.get("from")),
-            received_at=msg.get("receivedDateTime"),
+            from_=_display_address_from_sender(msg.from_),
+            received_at=msg.received_date_time,
             received_at_display=date,
             is_read=is_read,
-            preview=(msg.get("bodyPreview") or "").replace("\n", " "),
-        )
-
-    # Full mode — extract body text
-    body_obj = msg.get("body") or {}
-    content_type = (body_obj.get("contentType") or "text").lower()
-    raw_body = body_obj.get("content", "")
-    if content_type == "html":
-        body_text = _strip_html(raw_body)
-    else:
-        body_text = raw_body
-
-    # Attachments
-    attachments = msg.get("attachments", []) or []
-    attachment_items: list[AttachmentInfo] = []
-    for att in attachments:
-        size_kb = (att.get("size") or 0) // 1024
-        attachment_items.append(
-            AttachmentInfo(
-                id=att.get("id", ""),
-                name=att.get("name", "unnamed"),
-                content_type=att.get("contentType", ""),
-                size_bytes=att.get("size", 0),
-                size_kb=size_kb,
-            )
+            preview=msg.body_preview.replace("\n", " "),
         )
 
     return ReadEmailResponse(
-        id=message_id,
+        id=params.message_id,
         subject=subject,
-        from_=_display_address_from_sender(msg.get("from")),
-        to=_recipient_values(msg.get("toRecipients", [])),
+        from_=_display_address_from_sender(msg.from_),
+        to=recipient_values(msg.to_recipients),
         to_display=to_str,
-        cc=_recipient_values(msg.get("ccRecipients", [])),
+        cc=recipient_values(msg.cc_recipients),
         cc_display=cc_str,
-        received_at=msg.get("receivedDateTime"),
+        received_at=msg.received_date_time,
         received_at_display=date,
         is_read=is_read,
         conversation_id=conv_id,
-        importance=msg.get("importance", ""),
-        body=body_text,
-        body_content_type=content_type,
-        attachments=attachment_items,
+        importance=msg.importance,
+        body=_body_text(msg.body),
+        body_content_type=msg.body.content_type.lower(),
+        attachments=[_attachment_info(att) for att in msg.attachments],
     )
 
 
@@ -350,10 +449,7 @@ async def read_email(
 
 
 async def search_emails(
-    query: str,
-    max_results: int = 10,
-    folder: Optional[str] = None,
-    profile: str | None = None,
+    params: SearchEmailsInput,
 ) -> SearchEmailsResponse:
     """
     Search messages using Graph KQL $search syntax.
@@ -371,24 +467,24 @@ async def search_emails(
     Returns:
         Structured search results.
     """
-    g = get_graph(profile)
-    params: dict = {
-        "$search": f'"{query}"',
-        "$top": min(max_results, 25),
+    g = get_graph(params.profile)
+    query_params: dict[str, Any] = {
+        "$search": f'"{params.query}"',
+        "$top": min(params.max_results, 25),
         "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
     }
 
-    if folder:
-        path = f"/me/mailFolders/{folder}/messages"
+    if params.folder:
+        path = f"/me/mailFolders/{params.folder}/messages"
     else:
         path = "/me/messages"
 
-    result = await g.get(path, params=params)
-    messages = result.get("value", [])
+    result = await g.get(path, params=query_params)
+    messages = parse_graph_collection(result, GraphMessage)
 
     return SearchEmailsResponse(
-        query=query,
-        folder=folder,
+        query=params.query,
+        folder=params.folder,
         count=len(messages),
         messages=[_message_summary(msg) for msg in messages],
     )
@@ -400,18 +496,7 @@ async def search_emails(
 
 
 async def filter_emails(
-    from_address: Optional[str] = None,
-    to_address: Optional[str] = None,
-    subject_contains: Optional[str] = None,
-    received_after: Optional[str] = None,
-    received_before: Optional[str] = None,
-    has_attachments: Optional[bool] = None,
-    importance: Optional[Literal["low", "normal", "high"]] = None,
-    folder: str = "inbox",
-    max_results: int = 50,
-    sort_order: Literal["newest", "oldest"] = "newest",
-    skip_token: Optional[str] = None,
-    profile: str | None = None,
+    params: FilterEmailsInput,
 ) -> ListEmailsResponse:
     """
     Find emails matching specific criteria using OData $filter.
@@ -445,46 +530,46 @@ async def filter_emails(
     Returns:
         Structured message summaries with pagination metadata.
     """
-    g = get_graph(profile)
-    order = "receivedDateTime asc" if sort_order == "oldest" else "receivedDateTime desc"
-    params: dict = {
-        "$top": min(max(1, max_results), 100),
+    g = get_graph(params.profile)
+    order = "receivedDateTime asc" if params.sort_order == "oldest" else "receivedDateTime desc"
+    query: dict[str, Any] = {
+        "$top": min(max(1, params.max_results), 100),
         "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments,importance",
         "$orderby": order,
     }
 
     # Build OData $filter clauses
     clauses: list[str] = []
-    if from_address:
-        safe = from_address.replace("'", "''")
+    if params.from_address:
+        safe = params.from_address.replace("'", "''")
         clauses.append(f"from/emailAddress/address eq '{safe}'")
-    if to_address:
-        safe = to_address.replace("'", "''")
+    if params.to_address:
+        safe = params.to_address.replace("'", "''")
         clauses.append(f"toRecipients/any(r:r/emailAddress/address eq '{safe}')")
-    if subject_contains:
-        safe = subject_contains.replace("'", "''")
+    if params.subject_contains:
+        safe = params.subject_contains.replace("'", "''")
         clauses.append(f"contains(subject, '{safe}')")
-    if received_after:
+    if params.received_after:
         # Append time component if only a date was given
-        ts = received_after if "T" in received_after else f"{received_after}T00:00:00Z"
+        ts = params.received_after if "T" in params.received_after else f"{params.received_after}T00:00:00Z"
         clauses.append(f"receivedDateTime ge {ts}")
-    if received_before:
-        ts = received_before if "T" in received_before else f"{received_before}T23:59:59Z"
+    if params.received_before:
+        ts = params.received_before if "T" in params.received_before else f"{params.received_before}T23:59:59Z"
         clauses.append(f"receivedDateTime lt {ts}")
-    if has_attachments is not None:
-        clauses.append(f"hasAttachments eq {str(has_attachments).lower()}")
-    if importance:
-        clauses.append(f"importance eq '{importance}'")
+    if params.has_attachments is not None:
+        clauses.append(f"hasAttachments eq {str(params.has_attachments).lower()}")
+    if params.importance:
+        clauses.append(f"importance eq '{params.importance}'")
 
     if clauses:
-        params["$filter"] = " and ".join(clauses)
+        query["$filter"] = " and ".join(clauses)
 
-    if skip_token is not None:
-        params["$skiptoken"] = skip_token
+    if params.skip_token is not None:
+        query["$skiptoken"] = params.skip_token
 
-    result = await g.get(f"/me/mailFolders/{folder}/messages", params=params)
+    result = await g.get(f"/me/mailFolders/{params.folder}/messages", params=query)
 
-    messages = result.get("value", [])
+    messages = parse_graph_collection(result, GraphMessage)
     next_link = result.get("@odata.nextLink")
 
     from urllib.parse import parse_qs, urlparse
@@ -494,7 +579,7 @@ async def filter_emails(
         next_page_token = qs.get("$skiptoken", [None])[0]
 
     return ListEmailsResponse(
-        folder=folder,
+        folder=params.folder,
         count=len(messages),
         messages=[_message_summary(msg) for msg in messages],
         next_page_token=next_page_token,
@@ -507,31 +592,8 @@ async def filter_emails(
 # ---------------------------------------------------------------------------
 
 
-class SendEmailInput(ToolRequestModel):
-    """Validated input for the send_email tool."""
-
-    to: Union[str, list[str]]
-    subject: str
-    body: str
-    cc: Optional[Union[str, list[str]]] = None
-    bcc: Optional[Union[str, list[str]]] = None
-    body_type: BodyType = "text"
-    save_to_sent: bool = True
-    reply_to: Optional[Union[str, list[str]]] = None
-    profile: str | None = None
-
-
 async def send_email(
-    to: Union[str, list[str]],
-    subject: str,
-    body: str,
-    cc: Optional[Union[str, list[str]]] = None,
-    bcc: Optional[Union[str, list[str]]] = None,
-    body_type: BodyType = "text",
-    save_to_sent: bool = True,
-    reply_to: Optional[Union[str, list[str]]] = None,
-    profile: str | None = None,
-    confirm: bool = False,
+    params: SendEmailInput,
     ctx: Context | None = None,
 ) -> SendEmailResponse:
     """
@@ -552,12 +614,12 @@ async def send_email(
     Returns:
         Structured send confirmation.
     """
-    if confirm and ctx:
-        to_display = to if isinstance(to, str) else ", ".join(to)
+    if params.confirm and ctx:
+        to_display = params.to if isinstance(params.to, str) else ", ".join(params.to)
         preview = (
             f"To: {to_display}\n"
-            f"Subject: {subject}\n\n"
-            f"{body[:200]}{'...' if len(body) > 200 else ''}"
+            f"Subject: {params.subject}\n\n"
+            f"{params.body[:200]}{'...' if len(params.body) > 200 else ''}"
         )
         result = await ctx.elicit(
             f"Send this email?\n\n{preview}",
@@ -566,31 +628,26 @@ async def send_email(
         if result.action != "accept" or not result.data.confirmed:
             return SendEmailResponse(success=False, action="send_email", error="Cancelled by user.")
 
-    p = SendEmailInput.model_validate({
-        "to": to, "subject": subject, "body": body,
-        "cc": cc, "bcc": bcc, "body_type": body_type,
-        "save_to_sent": save_to_sent, "reply_to": reply_to, "profile": profile,
-    })
-    g = get_graph(p.profile)
+    g = get_graph(params.profile)
     message: dict = {
-        "subject": p.subject,
+        "subject": params.subject,
         "body": {
-            "contentType": "HTML" if p.body_type.lower() == "html" else "Text",
-            "content": p.body,
+            "contentType": "HTML" if params.body_type.lower() == "html" else "Text",
+            "content": params.body,
         },
-        "toRecipients": _parse_recipients(p.to),
+        "toRecipients": parse_recipients(params.to),
     }
 
-    if p.cc:
-        message["ccRecipients"] = _parse_recipients(p.cc)
-    if p.bcc:
-        message["bccRecipients"] = _parse_recipients(p.bcc)
-    if p.reply_to:
-        message["replyTo"] = _parse_recipients(p.reply_to)
+    if params.cc:
+        message["ccRecipients"] = parse_recipients(params.cc)
+    if params.bcc:
+        message["bccRecipients"] = parse_recipients(params.bcc)
+    if params.reply_to:
+        message["replyTo"] = parse_recipients(params.reply_to)
 
     payload = {
         "message": message,
-        "saveToSentItems": p.save_to_sent,
+        "saveToSentItems": params.save_to_sent,
     }
 
     await g.post("/me/sendMail", json=payload)
@@ -602,9 +659,9 @@ async def send_email(
         cc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("ccRecipients", [])],
         bcc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("bccRecipients", [])],
         reply_to=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("replyTo", [])],
-        subject=p.subject,
-        body_type=p.body_type,
-        saved_to_sent_items=p.save_to_sent,
+        subject=params.subject,
+        body_type=params.body_type,
+        saved_to_sent_items=params.save_to_sent,
     )
 
 
@@ -614,11 +671,7 @@ async def send_email(
 
 
 async def reply_email(
-    message_id: str,
-    body: str,
-    reply_all: bool = False,
-    body_type: BodyType = "text",
-    profile: str | None = None,
+    params: ReplyEmailInput,
 ) -> ReplyEmailResponse:
     """
     Reply to an existing email message.
@@ -633,30 +686,30 @@ async def reply_email(
     Returns:
         Structured reply confirmation.
     """
-    g = get_graph(profile)
-    endpoint = "replyAll" if reply_all else "reply"
-    if body_type.lower() == "html":
+    g = get_graph(params.profile)
+    endpoint = "replyAll" if params.reply_all else "reply"
+    if params.body_type.lower() == "html":
         payload = {
             "message": {
                 "body": {
                     "contentType": "HTML",
-                    "content": body,
+                    "content": params.body,
                 }
             }
         }
     else:
         payload = {
             "message": {},
-            "comment": body,
+            "comment": params.body,
         }
 
-    await g.post(f"/me/messages/{message_id}/{endpoint}", json=payload)
+    await g.post(f"/me/messages/{params.message_id}/{endpoint}", json=payload)
 
     return ReplyEmailResponse(
         success=True,
-        action="reply_all" if reply_all else "reply",
-        message_id=message_id,
-        body_type=body_type,
+        action="reply_all" if params.reply_all else "reply",
+        message_id=params.message_id,
+        body_type=params.body_type,
     )
 
 
@@ -666,10 +719,7 @@ async def reply_email(
 
 
 async def forward_email(
-    message_id: str,
-    to: Union[str, list[str]],
-    comment: Optional[str] = None,
-    profile: str | None = None,
+    params: ForwardEmailInput,
 ) -> ForwardEmailResponse:
     """
     Forward an email message to one or more recipients.
@@ -683,20 +733,20 @@ async def forward_email(
     Returns:
         Structured forward confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     payload: dict = {
-        "toRecipients": _parse_recipients(to),
-        "comment": comment or "",
+        "toRecipients": parse_recipients(params.to),
+        "comment": params.comment or "",
     }
 
-    await g.post(f"/me/messages/{message_id}/forward", json=payload)
+    await g.post(f"/me/messages/{params.message_id}/forward", json=payload)
 
     return ForwardEmailResponse(
         success=True,
         action="forward",
-        message_id=message_id,
+        message_id=params.message_id,
         to=[addr.get("emailAddress", {}).get("address", "") for addr in payload["toRecipients"]],
-        comment=comment or "",
+        comment=params.comment or "",
     )
 
 
@@ -705,7 +755,7 @@ async def forward_email(
 # ---------------------------------------------------------------------------
 
 
-async def mark_as_read(message_id: str, profile: str | None = None) -> MarkEmailReadResponse:
+async def mark_as_read(params: MarkAsReadInput) -> MarkEmailReadResponse:
     """
     Mark a message as read.
 
@@ -716,12 +766,12 @@ async def mark_as_read(message_id: str, profile: str | None = None) -> MarkEmail
     Returns:
         Structured update confirmation.
     """
-    g = get_graph(profile)
-    await g.patch(f"/me/messages/{message_id}", json={"isRead": True})
-    return MarkEmailReadResponse(success=True, action="mark_as_read", message_id=message_id, is_read=True)
+    g = get_graph(params.profile)
+    await g.patch(f"/me/messages/{params.message_id}", json={"isRead": True})
+    return MarkEmailReadResponse(success=True, action="mark_as_read", message_id=params.message_id, is_read=True)
 
 
-async def mark_as_unread(message_id: str, profile: str | None = None) -> MarkEmailReadResponse:
+async def mark_as_unread(params: MarkAsUnreadInput) -> MarkEmailReadResponse:
     """
     Mark a message as unread.
 
@@ -732,9 +782,9 @@ async def mark_as_unread(message_id: str, profile: str | None = None) -> MarkEma
     Returns:
         Structured update confirmation.
     """
-    g = get_graph(profile)
-    await g.patch(f"/me/messages/{message_id}", json={"isRead": False})
-    return MarkEmailReadResponse(success=True, action="mark_as_unread", message_id=message_id, is_read=False)
+    g = get_graph(params.profile)
+    await g.patch(f"/me/messages/{params.message_id}", json={"isRead": False})
+    return MarkEmailReadResponse(success=True, action="mark_as_unread", message_id=params.message_id, is_read=False)
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +792,7 @@ async def mark_as_unread(message_id: str, profile: str | None = None) -> MarkEma
 # ---------------------------------------------------------------------------
 
 
-async def move_email(message_id: str, destination_folder: str, profile: str | None = None) -> MoveEmailResponse:
+async def move_email(params: MoveEmailInput) -> MoveEmailResponse:
     """
     Move a message to a different mail folder.
 
@@ -755,18 +805,19 @@ async def move_email(message_id: str, destination_folder: str, profile: str | No
     Returns:
         Structured move confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     result = await g.post(
-        f"/me/messages/{message_id}/move",
-        json={"destinationId": destination_folder},
+        f"/me/messages/{params.message_id}/move",
+        json={"destinationId": params.destination_folder},
     )
-    new_id = (result or {}).get("id", message_id)
+    moved_message = _graph_message_from_payload(result if isinstance(result, dict) else None)
+    new_id = moved_message.id if moved_message and moved_message.id else params.message_id
     return MoveEmailResponse(
         success=True,
         action="move",
-        message_id=message_id,
+        message_id=params.message_id,
         new_message_id=new_id,
-        destination_folder=destination_folder,
+        destination_folder=params.destination_folder,
     )
 
 
@@ -775,7 +826,7 @@ async def move_email(message_id: str, destination_folder: str, profile: str | No
 # ---------------------------------------------------------------------------
 
 
-async def trash_email(message_id: str, profile: str | None = None) -> TrashEmailResponse:
+async def trash_email(params: TrashEmailInput) -> TrashEmailResponse:
     """
     Move a message to the Deleted Items folder (soft delete / recoverable).
 
@@ -788,20 +839,21 @@ async def trash_email(message_id: str, profile: str | None = None) -> TrashEmail
     Returns:
         Structured trash confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     result = await g.post(
-        f"/me/messages/{message_id}/move",
+        f"/me/messages/{params.message_id}/move",
         json={"destinationId": "deleteditems"},
     )
-    new_id = (result or {}).get("id", message_id)
+    moved_message = _graph_message_from_payload(result if isinstance(result, dict) else None)
+    new_id = moved_message.id if moved_message and moved_message.id else params.message_id
     return TrashEmailResponse(
         success=True,
         action="trash",
-        message_id=message_id,
+        message_id=params.message_id,
         new_message_id=new_id,
         destination_folder="deleteditems",
         soft_delete=True,
-        profile=profile,
+        profile=params.profile,
     )
 
 
@@ -811,9 +863,7 @@ async def trash_email(message_id: str, profile: str | None = None) -> TrashEmail
 
 
 async def delete_email(
-    message_id: str,
-    profile: str | None = None,
-    confirm: bool = False,
+    params: DeleteEmailInput,
     ctx: Context | None = None,
 ) -> DeleteEmailResponse:
     """
@@ -830,20 +880,20 @@ async def delete_email(
     Returns:
         Structured delete confirmation.
     """
-    if confirm and ctx:
+    if params.confirm and ctx:
         result = await ctx.elicit(
-            f"Permanently delete this email? This action is IRREVERSIBLE.\n\nMessage ID: {message_id}",
+            f"Permanently delete this email? This action is IRREVERSIBLE.\n\nMessage ID: {params.message_id}",
             response_type=_Confirmation,
         )
         if result.action != "accept" or not result.data.confirmed:
-            return DeleteEmailResponse(success=False, action="permanent_delete", message_id=message_id, error="Cancelled by user.", irreversible=True)
+            return DeleteEmailResponse(success=False, action="permanent_delete", message_id=params.message_id, error="Cancelled by user.", irreversible=True)
 
-    g = get_graph(profile)
-    await g.post(f"/me/messages/{message_id}/permanentDelete")
+    g = get_graph(params.profile)
+    await g.post(f"/me/messages/{params.message_id}/permanentDelete")
     return DeleteEmailResponse(
         success=True,
         action="permanent_delete",
-        message_id=message_id,
+        message_id=params.message_id,
         irreversible=True,
     )
 
@@ -855,103 +905,98 @@ async def delete_email(
 
 def _build_batch_requests(
     message_ids: list[str],
-    method: str,
-    url_template: str,
-    body: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    operation: _BatchOperation,
+) -> _BatchRequestPlan:
     """
     Build Graph batch request entries with synthetic IDs.
 
-    Returns (requests_list, id_map) where id_map maps synthetic "1","2",…
-    back to the original message_id.
+    Returns a typed plan that preserves the mapping between synthetic batch IDs
+    and the original message IDs.
     """
-    id_map: dict[str, str] = {}
-    requests: list[dict[str, Any]] = []
+    plan = _BatchRequestPlan()
+    requests: list[_BatchRequestEntry] = []
     for idx, mid in enumerate(message_ids):
         batch_id = str(idx + 1)
-        id_map[batch_id] = mid
-        entry: dict[str, Any] = {
-            "id": batch_id,
-            "method": method,
-            "url": url_template.format(mid=mid),
-        }
-        if body is not None:
-            entry["body"] = body
-            entry["headers"] = {"Content-Type": "application/json"}
-        requests.append(entry)
-    return requests, id_map
+        plan.message_ids_by_batch_id[batch_id] = mid
+        requests.append(
+            _BatchRequestEntry(
+                id=batch_id,
+                method=operation.method,
+                url=operation.url_template.format(mid=mid),
+                body=operation.body,
+                headers={"Content-Type": "application/json"} if operation.body is not None else None,
+            )
+        )
+    plan.requests = requests
+    return plan
 
 
-def _parse_batch_error(resp: dict[str, Any]) -> tuple[str | None, str]:
+def _parse_batch_error(resp: _BatchResponseEntry) -> tuple[str | None, str]:
     """Extract error code and message from a batch response item."""
-    status = resp.get("status", 0)
-    body = resp.get("body")
-    if not isinstance(body, dict):
+    status = resp.status
+    if not isinstance(resp.body, dict):
         return None, f"HTTP {status}"
-    error = body.get("error")
-    if not isinstance(error, dict):
+    body = _BatchResponseBody.model_validate(resp.body)
+    if body.error is None:
         return None, f"HTTP {status}"
-    code = error.get("code")
-    message = error.get("message") or f"HTTP {status}"
-    return code, message
+    return body.error.code, body.error.message or f"HTTP {status}"
 
 
 async def _execute_batch(
     g: Any,
-    requests: list[dict[str, Any]],
-    id_map: dict[str, str],
-) -> tuple[int, list[BulkEmailFailure], dict[str, dict[str, Any]]]:
+    plan: _BatchRequestPlan,
+    success_parser: Callable[[dict[str, Any] | None], GraphMessage | None] | None = None,
+) -> _BatchExecutionResult:
     """
     Send requests via GraphClient.batch() (which handles $batch chunking).
 
-    Returns (succeeded_count, failures_list, success_bodies) where
-    success_bodies maps original message_id to the response body dict.
+    Returns typed success and failure details keyed by the original message IDs.
     """
-    succeeded = 0
-    failures: list[BulkEmailFailure] = []
-    success_bodies: dict[str, dict[str, Any]] = {}
+    result = _BatchExecutionResult()
 
     # Build a set of all expected batch IDs so we can detect missing responses.
-    expected_ids = {r["id"] for r in requests}
+    expected_ids = {request.id for request in plan.requests}
 
     try:
-        responses = await g.batch(requests)
+        responses = await g.batch([request.model_dump(exclude_none=True) for request in plan.requests])
     except Exception as exc:
         # The entire batch call failed — record a failure for every request.
-        for req in requests:
-            mid = id_map.get(req["id"], req["id"])
-            failures.append(BulkEmailFailure(
+        for req in plan.requests:
+            mid = plan.message_ids_by_batch_id.get(req.id, req.id)
+            result.failures.append(BulkEmailFailure(
                 message_id=mid, status=0, error=str(exc),
             ))
-        return succeeded, failures, success_bodies
+        return result
 
     seen_ids: set[str] = set()
-    for resp in responses:
-        batch_id = resp.get("id", "")
+    for raw_response in responses:
+        resp = _BatchResponseEntry.model_validate(raw_response)
+        batch_id = resp.id
         seen_ids.add(batch_id)
-        mid = id_map.get(batch_id, batch_id)
-        status = resp.get("status", 0)
+        mid = plan.message_ids_by_batch_id.get(batch_id, batch_id)
+        status = resp.status
 
         if 200 <= status < 300:
-            succeeded += 1
-            body = resp.get("body")
-            if isinstance(body, dict):
-                success_bodies[mid] = body
+            result.succeeded_message_ids.append(mid)
+            if success_parser is not None:
+                parsed_message = success_parser(resp.body)
+                if parsed_message is not None:
+                    result.response_messages[mid] = parsed_message
         else:
             code, error_msg = _parse_batch_error(resp)
-            failures.append(BulkEmailFailure(
+            result.failures.append(BulkEmailFailure(
                 message_id=mid, status=status, code=code, error=error_msg,
             ))
 
     # Detect missing responses (Graph returned fewer items than we sent).
     missing = expected_ids - seen_ids
     for batch_id in missing:
-        mid = id_map.get(batch_id, batch_id)
-        failures.append(BulkEmailFailure(
+        mid = plan.message_ids_by_batch_id.get(batch_id, batch_id)
+        result.failures.append(BulkEmailFailure(
             message_id=mid, status=0, error="No response from batch",
         ))
 
-    return succeeded, failures, success_bodies
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -967,9 +1012,9 @@ async def _collect_folder_message_ids(g: Any, folder: str) -> list[str]:
     while path:
         result = await g.get(path, params=params)
         for msg in result.get("value", []):
-            mid = msg.get("id")
-            if mid:
-                ids.append(mid)
+            parsed = GraphMessage.model_validate(msg)
+            if parsed.id:
+                ids.append(parsed.id)
         next_link = result.get("@odata.nextLink")
         if next_link:
             # nextLink is a full URL; extract relative path + query
@@ -983,10 +1028,7 @@ async def _collect_folder_message_ids(g: Any, folder: str) -> list[str]:
 
 
 async def bulk_move_emails(
-    message_ids: Optional[list[str]] = None,
-    destination_folder: str = "",
-    source_folder: Optional[str] = None,
-    profile: str | None = None,
+    params: BulkMoveEmailsInput,
 ) -> BulkMoveEmailsResponse:
     """
     Move multiple messages to a destination folder in one operation.
@@ -1008,43 +1050,46 @@ async def bulk_move_emails(
     Returns:
         Summary with success/failure counts, new message IDs, and failure details.
     """
-    if not destination_folder:
+    if not params.destination_folder:
         return BulkMoveEmailsResponse(success=False, action="bulk_move", error="destination_folder is required.")
 
-    g = get_graph(profile)
+    g = get_graph(params.profile)
+    message_ids = params.message_ids
 
-    if source_folder and not message_ids:
-        message_ids = await _collect_folder_message_ids(g, source_folder)
+    if params.source_folder and not message_ids:
+        message_ids = await _collect_folder_message_ids(g, params.source_folder)
 
     if not message_ids:
-        return BulkMoveEmailsResponse(success=True, action="bulk_move", destination_folder=destination_folder, total=0, succeeded=0, failed=0)
+        return BulkMoveEmailsResponse(success=True, action="bulk_move", destination_folder=params.destination_folder, total=0, succeeded=0, failed=0)
 
-    requests, id_map = _build_batch_requests(
+    plan = _build_batch_requests(
         message_ids,
-        method="POST",
-        url_template="/me/messages/{mid}/move",
-        body={"destinationId": destination_folder},
+        _BatchOperation(
+            method="POST",
+            url_template="/me/messages/{mid}/move",
+            body={"destinationId": params.destination_folder},
+        ),
     )
 
-    succeeded, failures, success_bodies = await _execute_batch(g, requests, id_map)
+    batch_result = await _execute_batch(g, plan, success_parser=_graph_message_from_payload)
 
     moved = [
         BulkMovedEmail(
             source_message_id=mid,
-            new_message_id=body.get("id", ""),
+            new_message_id=message.id,
         )
-        for mid, body in success_bodies.items()
+        for mid, message in batch_result.response_messages.items()
     ]
 
     return BulkMoveEmailsResponse(
-        success=len(failures) == 0,
+        success=len(batch_result.failures) == 0,
         action="bulk_move",
-        destination_folder=destination_folder,
+        destination_folder=params.destination_folder,
         total=len(message_ids),
-        succeeded=succeeded,
-        failed=len(failures),
+        succeeded=len(batch_result.succeeded_message_ids),
+        failed=len(batch_result.failures),
         moved=moved,
-        failures=failures,
+        failures=batch_result.failures,
     )
 
 
@@ -1054,9 +1099,7 @@ async def bulk_move_emails(
 
 
 async def bulk_trash_emails(
-    message_ids: Optional[list[str]] = None,
-    folder: Optional[str] = None,
-    profile: str | None = None,
+    params: BulkTrashEmailsInput,
 ) -> BulkTrashEmailsResponse:
     """
     Move multiple messages to Deleted Items (soft delete / recoverable).
@@ -1077,39 +1120,42 @@ async def bulk_trash_emails(
     Returns:
         Summary with success/failure counts, new message IDs, and failure details.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
+    message_ids = params.message_ids
 
-    if folder and not message_ids:
-        message_ids = await _collect_folder_message_ids(g, folder)
+    if params.folder and not message_ids:
+        message_ids = await _collect_folder_message_ids(g, params.folder)
 
     if not message_ids:
         return BulkTrashEmailsResponse(success=True, action="bulk_trash", total=0, succeeded=0, failed=0)
 
-    requests, id_map = _build_batch_requests(
+    plan = _build_batch_requests(
         message_ids,
-        method="POST",
-        url_template="/me/messages/{mid}/move",
-        body={"destinationId": "deleteditems"},
+        _BatchOperation(
+            method="POST",
+            url_template="/me/messages/{mid}/move",
+            body={"destinationId": "deleteditems"},
+        ),
     )
 
-    succeeded, failures, success_bodies = await _execute_batch(g, requests, id_map)
+    batch_result = await _execute_batch(g, plan, success_parser=_graph_message_from_payload)
 
     moved = [
         BulkMovedEmail(
             source_message_id=mid,
-            new_message_id=body.get("id", ""),
+            new_message_id=message.id,
         )
-        for mid, body in success_bodies.items()
+        for mid, message in batch_result.response_messages.items()
     ]
 
     return BulkTrashEmailsResponse(
-        success=len(failures) == 0,
+        success=len(batch_result.failures) == 0,
         action="bulk_trash",
         total=len(message_ids),
-        succeeded=succeeded,
-        failed=len(failures),
+        succeeded=len(batch_result.succeeded_message_ids),
+        failed=len(batch_result.failures),
         moved=moved,
-        failures=failures,
+        failures=batch_result.failures,
     )
 
 
@@ -1119,9 +1165,7 @@ async def bulk_trash_emails(
 
 
 async def bulk_delete_emails(
-    message_ids: Optional[list[str]] = None,
-    folder: Optional[str] = None,
-    profile: str | None = None,
+    params: BulkDeleteEmailsInput,
 ) -> BulkDeleteEmailsResponse:
     """
     Permanently delete multiple messages from the mailbox. This action is IRREVERSIBLE.
@@ -1145,52 +1189,50 @@ async def bulk_delete_emails(
     Returns:
         Summary with success/failure counts and failure details.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
+    message_ids = params.message_ids
 
-    if folder and not message_ids:
-        message_ids = await _collect_folder_message_ids(g, folder)
+    if params.folder and not message_ids:
+        message_ids = await _collect_folder_message_ids(g, params.folder)
 
     if not message_ids:
         return BulkDeleteEmailsResponse(success=True, action="bulk_permanent_delete", total=0, succeeded=0, failed=0, irreversible=True)
 
-    requests, id_map = _build_batch_requests(
+    plan = _build_batch_requests(
         message_ids,
-        method="POST",
-        url_template="/me/messages/{mid}/permanentDelete",
+        _BatchOperation(
+            method="POST",
+            url_template="/me/messages/{mid}/permanentDelete",
+        ),
     )
 
-    succeeded, failures, _ = await _execute_batch(g, requests, id_map)
+    batch_result = await _execute_batch(g, plan)
 
     return BulkDeleteEmailsResponse(
-        success=len(failures) == 0,
+        success=len(batch_result.failures) == 0,
         action="bulk_permanent_delete",
         total=len(message_ids),
-        succeeded=succeeded,
-        failed=len(failures),
+        succeeded=len(batch_result.succeeded_message_ids),
+        failed=len(batch_result.failures),
         irreversible=True,
-        failures=failures,
+        failures=batch_result.failures,
     )
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
 
 
 def register(server) -> None:
     """Register all mail tools with the given FastMCP server instance."""
-    server.tool(annotations=_READ_ONLY)(list_emails)
-    server.tool(annotations=_READ_ONLY)(read_email)
-    server.tool(annotations=_READ_ONLY)(search_emails)
-    server.tool(annotations=_READ_ONLY)(filter_emails)
-    server.tool(annotations=_WRITE)(send_email)
-    server.tool(annotations=_WRITE)(reply_email)
-    server.tool(annotations=_WRITE)(forward_email)
-    server.tool(annotations=_IDEMPOTENT_WRITE)(mark_as_read)
-    server.tool(annotations=_IDEMPOTENT_WRITE)(mark_as_unread)
-    server.tool(annotations=_WRITE)(move_email)
-    server.tool(annotations=_WRITE)(trash_email)
-    server.tool(annotations=_DESTRUCTIVE)(delete_email)
-    server.tool(annotations=_WRITE)(bulk_move_emails)
-    server.tool(annotations=_WRITE)(bulk_trash_emails)
-    server.tool(annotations=_DESTRUCTIVE)(bulk_delete_emails)
+    register_tool(server, list_emails, annotations=READ_ONLY_TOOL)
+    register_tool(server, read_email, annotations=READ_ONLY_TOOL)
+    register_tool(server, search_emails, annotations=READ_ONLY_TOOL)
+    register_tool(server, filter_emails, annotations=READ_ONLY_TOOL)
+    register_tool(server, send_email, annotations=WRITE_TOOL)
+    register_tool(server, reply_email, annotations=WRITE_TOOL)
+    register_tool(server, forward_email, annotations=WRITE_TOOL)
+    register_tool(server, mark_as_read, annotations=IDEMPOTENT_WRITE_TOOL)
+    register_tool(server, mark_as_unread, annotations=IDEMPOTENT_WRITE_TOOL)
+    register_tool(server, move_email, annotations=WRITE_TOOL)
+    register_tool(server, trash_email, annotations=WRITE_TOOL)
+    register_tool(server, delete_email, annotations=DESTRUCTIVE_TOOL)
+    register_tool(server, bulk_move_emails, annotations=WRITE_TOOL)
+    register_tool(server, bulk_trash_emails, annotations=WRITE_TOOL)
+    register_tool(server, bulk_delete_emails, annotations=DESTRUCTIVE_TOOL)

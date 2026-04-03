@@ -19,17 +19,26 @@ Implemented:
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Literal, Optional, Union
 
-from mcp.types import ToolAnnotations
-
+from mcp_microsoft.common.formatting import format_datetime_display
+from mcp_microsoft.common.request_model import ToolRequestModel
+from mcp_microsoft.common.text import strip_html
+from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.graph_types import (
+    GraphAttendee,
+    GraphCalendar,
+    GraphEvent,
+    GraphItemBody,
+    parse_graph_collection,
+)
 from mcp_microsoft.models import (
     AttendeeAvailabilityInfo,
     AttendeeInfo,
     CreateEventResponse,
     DeleteEventResponse,
     DisplayAddress,
+    EventRecurrenceInfo,
     EventDetailResponse,
     EventSummary,
     FreeBusyResponse,
@@ -52,30 +61,102 @@ from mcp_microsoft.graph import get_graph
 
 BodyType = Literal["text", "html"]
 RsvpResponse = Literal["accept", "decline", "tentativelyAccept"]
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
-_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
-_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
 
 
-def _fmt_dt(iso: Optional[str]) -> str:
-    """Format an ISO 8601 datetime to a human-readable form."""
-    if not iso:
-        return ""
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return iso
+class ListCalendarsInput(ToolRequestModel):
+    profile: str | None = None
 
 
-def _fmt_attendees(attendees: list[dict]) -> str:
+class ListEventsInput(ToolRequestModel):
+    max_results: int = 10
+    filter_start: str | None = None
+    calendar_id: str | None = None
+    profile: str | None = None
+
+
+class ListUpcomingEventsInput(ToolRequestModel):
+    start_datetime: str
+    end_datetime: str
+    max_results: int = 25
+    calendar_id: str | None = None
+    profile: str | None = None
+
+
+class GetEventInput(ToolRequestModel):
+    event_id: str
+    profile: str | None = None
+
+
+class CreateEventInput(ToolRequestModel):
+    subject: str
+    start_datetime: str
+    end_datetime: str
+    timezone: str = "UTC"
+    body: str | None = None
+    body_type: BodyType = "text"
+    location: str | None = None
+    attendees: str | list[str] | None = None
+    optional_attendees: str | list[str] | None = None
+    is_all_day: bool = False
+    is_online_meeting: bool = False
+    calendar_id: str | None = None
+    profile: str | None = None
+
+
+class UpdateEventInput(ToolRequestModel):
+    event_id: str
+    subject: str | None = None
+    start_datetime: str | None = None
+    end_datetime: str | None = None
+    timezone: str = "UTC"
+    body: str | None = None
+    body_type: BodyType = "text"
+    location: str | None = None
+    attendees: str | list[str] | None = None
+    is_all_day: bool | None = None
+    profile: str | None = None
+
+
+class DeleteEventInput(ToolRequestModel):
+    event_id: str
+    profile: str | None = None
+
+
+class RsvpEventInput(ToolRequestModel):
+    event_id: str
+    response: RsvpResponse
+    comment: str | None = None
+    send_response: bool = True
+    profile: str | None = None
+
+
+class GetFreeBusyInput(ToolRequestModel):
+    email_addresses: str | list[str]
+    start_datetime: str
+    end_datetime: str
+    timezone: str = "UTC"
+    profile: str | None = None
+
+
+class FindMeetingTimesInput(ToolRequestModel):
+    attendees: str | list[str]
+    duration_minutes: int = 60
+    start_datetime: str | None = None
+    end_datetime: str | None = None
+    timezone: str = "UTC"
+    max_candidates: int = 5
+    is_organizer_optional: bool = False
+    profile: str | None = None
+
+
+def _fmt_attendees(attendees: list[GraphAttendee]) -> str:
     """Format Graph attendee objects as a readable string."""
     parts = []
     for att in attendees or []:
-        ea = att.get("emailAddress", {})
-        name = ea.get("name", "")
-        addr = ea.get("address", "")
-        status = (att.get("status") or {}).get("response", "")
+        ea = att.email_address
+        name = ea.name
+        addr = ea.address
+        status = att.status.response
         label = f"{name} <{addr}>" if name else addr
         if status and status != "none":
             label += f" [{status}]"
@@ -108,36 +189,42 @@ def _parse_attendees(
     ]
 
 
-def _attendee_values(attendees: list[dict]) -> list[AttendeeInfo]:
+def _attendee_values(attendees: list[GraphAttendee]) -> list[AttendeeInfo]:
     """Normalize Graph attendee objects into simple dictionaries."""
     values: list[AttendeeInfo] = []
     for attendee in attendees or []:
-        email_address = attendee.get("emailAddress", {})
         values.append(
             AttendeeInfo(
-                name=email_address.get("name", ""),
-                address=email_address.get("address", ""),
-                type=attendee.get("type", ""),
-                response=(attendee.get("status") or {}).get("response", ""),
+                name=attendee.email_address.name,
+                address=attendee.email_address.address,
+                type=attendee.type,
+                response=attendee.status.response,
             )
         )
     return values
 
 
-def _event_summary(event: dict[str, Any]) -> EventSummary:
+def _event_body_text(body: GraphItemBody) -> str:
+    raw_body = body.content
+    if body.content_type.lower() == "html" and raw_body:
+        return strip_html(raw_body)
+    return raw_body
+
+
+def _event_summary(event: GraphEvent) -> EventSummary:
     """Normalize a Graph event into a summary payload."""
     return EventSummary(
-        id=event.get("id", ""),
-        subject=event.get("subject") or "(no subject)",
-        start=event.get("start", {}).get("dateTime"),
-        start_display=_fmt_dt(event.get("start", {}).get("dateTime")),
-        end=event.get("end", {}).get("dateTime"),
-        end_display=_fmt_dt(event.get("end", {}).get("dateTime")),
-        timezone=event.get("start", {}).get("timeZone", ""),
-        location=(event.get("location") or {}).get("displayName", ""),
-        is_all_day=event.get("isAllDay", False),
-        is_cancelled=event.get("isCancelled", False),
-        response_status=(event.get("responseStatus") or {}).get("response", ""),
+        id=event.id,
+        subject=event.subject or "(no subject)",
+        start=event.start.date_time,
+        start_display=format_datetime_display(event.start.date_time),
+        end=event.end.date_time,
+        end_display=format_datetime_display(event.end.date_time),
+        timezone=event.start.time_zone,
+        location=event.location.display_name,
+        is_all_day=event.is_all_day,
+        is_cancelled=event.is_cancelled,
+        response_status=event.response_status.response,
     )
 
 
@@ -146,7 +233,7 @@ def _event_summary(event: dict[str, Any]) -> EventSummary:
 # ---------------------------------------------------------------------------
 
 
-async def list_calendars(profile: str | None = None) -> ListCalendarsResponse:
+async def list_calendars(params: ListCalendarsInput) -> ListCalendarsResponse:
     """
     List all calendars in the user's mailbox.
 
@@ -156,24 +243,24 @@ async def list_calendars(profile: str | None = None) -> ListCalendarsResponse:
     Returns:
         Structured calendar metadata.
     """
-    g = get_graph(profile)
-    params = {
+    g = get_graph(params.profile)
+    query = {
         "$select": "id,name,color,isDefaultCalendar,canEdit",
         "$top": 50,
     }
 
-    result = await g.get("/me/calendars", params=params)
-    calendars = result.get("value", [])
+    result = await g.get("/me/calendars", params=query)
+    calendars = parse_graph_collection(result, GraphCalendar)
 
     return ListCalendarsResponse(
         count=len(calendars),
         calendars=[
             CalendarInfo(
-                id=cal.get("id", ""),
-                name=cal.get("name", "(unnamed)"),
-                color=cal.get("color", "auto"),
-                is_default=cal.get("isDefaultCalendar", False),
-                can_edit=cal.get("canEdit", False),
+                id=cal.id,
+                name=cal.name or "(unnamed)",
+                color=cal.color or "auto",
+                is_default=cal.is_default_calendar,
+                can_edit=cal.can_edit,
             )
             for cal in calendars
         ],
@@ -186,10 +273,7 @@ async def list_calendars(profile: str | None = None) -> ListCalendarsResponse:
 
 
 async def list_events(
-    max_results: int = 10,
-    filter_start: Optional[str] = None,
-    calendar_id: Optional[str] = None,
-    profile: str | None = None,
+    params: ListEventsInput,
 ) -> ListEventsResponse:
     """
     List events from a calendar.
@@ -207,28 +291,28 @@ async def list_events(
     Returns:
         Structured event summaries.
     """
-    g = get_graph(profile)
-    params: dict = {
-        "$top": max_results,
+    g = get_graph(params.profile)
+    query: dict[str, Any] = {
+        "$top": params.max_results,
         "$select": "id,subject,start,end,location,organizer,isAllDay,isCancelled,responseStatus",
         "$orderby": "start/dateTime",
     }
-    if filter_start:
+    if params.filter_start:
         # Sanitize: strip quotes to prevent OData injection
-        safe_start = filter_start.replace("'", "")
-        params["$filter"] = f"start/dateTime ge '{safe_start}'"
+        safe_start = params.filter_start.replace("'", "")
+        query["$filter"] = f"start/dateTime ge '{safe_start}'"
 
-    if calendar_id:
-        path = f"/me/calendars/{calendar_id}/events"
+    if params.calendar_id:
+        path = f"/me/calendars/{params.calendar_id}/events"
     else:
         path = "/me/calendar/events"
 
-    result = await g.get(path, params=params)
-    events = result.get("value", [])
+    result = await g.get(path, params=query)
+    events = parse_graph_collection(result, GraphEvent)
 
     return ListEventsResponse(
-        calendar_id=calendar_id,
-        filter_start=filter_start,
+        calendar_id=params.calendar_id,
+        filter_start=params.filter_start,
         count=len(events),
         events=[_event_summary(ev) for ev in events],
     )
@@ -240,11 +324,7 @@ async def list_events(
 
 
 async def list_upcoming_events(
-    start_datetime: str,
-    end_datetime: str,
-    max_results: int = 25,
-    calendar_id: Optional[str] = None,
-    profile: str | None = None,
+    params: ListUpcomingEventsInput,
 ) -> ListUpcomingEventsResponse:
     """
     List upcoming events using the calendarView endpoint, which correctly
@@ -260,27 +340,27 @@ async def list_upcoming_events(
     Returns:
         Structured event summaries within the time window.
     """
-    g = get_graph(profile)
-    params: dict = {
-        "startDateTime": start_datetime,
-        "endDateTime": end_datetime,
-        "$top": max_results,
+    g = get_graph(params.profile)
+    query: dict[str, Any] = {
+        "startDateTime": params.start_datetime,
+        "endDateTime": params.end_datetime,
+        "$top": params.max_results,
         "$select": "id,subject,start,end,location,organizer,isAllDay,isCancelled,responseStatus",
         "$orderby": "start/dateTime",
     }
 
-    if calendar_id:
-        path = f"/me/calendars/{calendar_id}/calendarView"
+    if params.calendar_id:
+        path = f"/me/calendars/{params.calendar_id}/calendarView"
     else:
         path = "/me/calendar/calendarView"
 
-    result = await g.get(path, params=params)
-    events = result.get("value", [])
+    result = await g.get(path, params=query)
+    events = parse_graph_collection(result, GraphEvent)
 
     return ListUpcomingEventsResponse(
-        calendar_id=calendar_id,
-        start_datetime=start_datetime,
-        end_datetime=end_datetime,
+        calendar_id=params.calendar_id,
+        start_datetime=params.start_datetime,
+        end_datetime=params.end_datetime,
         count=len(events),
         events=[_event_summary(ev) for ev in events],
     )
@@ -291,7 +371,7 @@ async def list_upcoming_events(
 # ---------------------------------------------------------------------------
 
 
-async def get_event(event_id: str, profile: str | None = None) -> EventDetailResponse:
+async def get_event(params: GetEventInput) -> EventDetailResponse:
     """
     Fetch a calendar event by ID with full details.
 
@@ -302,8 +382,8 @@ async def get_event(event_id: str, profile: str | None = None) -> EventDetailRes
     Returns:
         Structured event details.
     """
-    g = get_graph(profile)
-    params = {
+    g = get_graph(params.profile)
+    query = {
         "$select": (
             "id,subject,body,start,end,location,organizer,attendees,"
             "isAllDay,isCancelled,recurrence,onlineMeeting,webLink,"
@@ -311,71 +391,54 @@ async def get_event(event_id: str, profile: str | None = None) -> EventDetailRes
         ),
     }
 
-    ev = await g.get(f"/me/events/{event_id}", params=params)
+    ev = GraphEvent.model_validate(await g.get(f"/me/events/{params.event_id}", params=query))
 
-    subject = ev.get("subject") or "(no subject)"
-    start = _fmt_dt(ev.get("start", {}).get("dateTime"))
-    start_tz = ev.get("start", {}).get("timeZone", "")
-    end = _fmt_dt(ev.get("end", {}).get("dateTime"))
-    location = (ev.get("location") or {}).get("displayName", "")
-    organizer_ea = (ev.get("organizer") or {}).get("emailAddress") or {}
-    organizer = f"{organizer_ea.get('name', '')} <{organizer_ea.get('address', '')}>".strip()
-    attendees_str = _fmt_attendees(ev.get("attendees", []))
-    show_as = ev.get("showAs", "")
-    web_link = ev.get("webLink", "")
-
-    # Online meeting info
-    online = ev.get("onlineMeeting") or {}
-    join_url = online.get("joinUrl", "")
-
-    # Body
-    body_obj = ev.get("body") or {}
-    content_type = (body_obj.get("contentType") or "text").lower()
-    raw_body = body_obj.get("content", "")
-    if content_type == "html" and raw_body:
-        import html as html_module
-        import re
-        text = re.sub(r"<(style|script)[^>]*>.*?</\1>", "", raw_body, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", "", text)
-        body_text = html_module.unescape(text).strip()
-    else:
-        body_text = raw_body
-
-    # Recurrence
-    recurrence = ev.get("recurrence")
+    subject = ev.subject or "(no subject)"
+    start = format_datetime_display(ev.start.date_time)
+    start_tz = ev.start.time_zone
+    end = format_datetime_display(ev.end.date_time)
+    location = ev.location.display_name
+    organizer_ea = ev.organizer.email_address
+    organizer = organizer_ea.display
+    attendees_str = _fmt_attendees(ev.attendees)
+    show_as = ev.show_as
+    web_link = ev.web_link
+    join_url = ev.online_meeting.join_url if ev.online_meeting else ""
+    recurrence = EventRecurrenceInfo.model_validate(
+        ev.recurrence.model_dump(by_alias=True)
+    ) if ev.recurrence else None
     recurrence_str = ""
     if recurrence:
-        pattern = recurrence.get("pattern", {})
-        recurrence_str = f"{pattern.get('type', '')} (interval: {pattern.get('interval', 1)})"
+        pattern = ev.recurrence.pattern if ev.recurrence else None
+        recurrence_str = f"{pattern.type} (interval: {pattern.interval})" if pattern else ""
 
     return EventDetailResponse(
-        id=event_id,
+        id=params.event_id,
         subject=subject,
-        start=ev.get("start", {}).get("dateTime"),
+        start=ev.start.date_time,
         start_display=start,
-        end=ev.get("end", {}).get("dateTime"),
+        end=ev.end.date_time,
         end_display=end,
         timezone=start_tz,
         location=location,
         organizer=DisplayAddress(
             display=organizer,
-            name=organizer_ea.get("name", ""),
-            address=organizer_ea.get("address", ""),
+            name=organizer_ea.name,
+            address=organizer_ea.address,
         ),
-        attendees=_attendee_values(ev.get("attendees", [])),
+        attendees=_attendee_values(ev.attendees),
         attendees_display=attendees_str,
-        is_all_day=ev.get("isAllDay", False),
-        is_cancelled=ev.get("isCancelled", False),
+        is_all_day=ev.is_all_day,
+        is_cancelled=ev.is_cancelled,
         show_as=show_as,
         web_link=web_link,
         join_url=join_url,
-        body=body_text,
-        body_content_type=content_type,
+        body=_event_body_text(ev.body),
+        body_content_type=ev.body.content_type.lower(),
         recurrence=recurrence,
         recurrence_display=recurrence_str,
-        importance=ev.get("importance", ""),
-        sensitivity=ev.get("sensitivity", ""),
+        importance=ev.importance,
+        sensitivity=ev.sensitivity,
     )
 
 
@@ -385,19 +448,7 @@ async def get_event(event_id: str, profile: str | None = None) -> EventDetailRes
 
 
 async def create_event(
-    subject: str,
-    start_datetime: str,
-    end_datetime: str,
-    timezone: str = "UTC",
-    body: Optional[str] = None,
-    body_type: BodyType = "text",
-    location: Optional[str] = None,
-    attendees: Optional[Union[str, list[str]]] = None,
-    optional_attendees: Optional[Union[str, list[str]]] = None,
-    is_all_day: bool = False,
-    is_online_meeting: bool = False,
-    calendar_id: Optional[str] = None,
-    profile: str | None = None,
+    params: CreateEventInput,
 ) -> CreateEventResponse:
     """
     Create a new calendar event.
@@ -420,56 +471,52 @@ async def create_event(
     Returns:
         Structured event creation confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     event: dict = {
-        "subject": subject,
-        "start": _build_datetime(start_datetime, timezone),
-        "end": _build_datetime(end_datetime, timezone),
-        "isAllDay": is_all_day,
+        "subject": params.subject,
+        "start": _build_datetime(params.start_datetime, params.timezone),
+        "end": _build_datetime(params.end_datetime, params.timezone),
+        "isAllDay": params.is_all_day,
     }
 
-    if body:
+    if params.body:
         event["body"] = {
-            "contentType": "HTML" if body_type.lower() == "html" else "Text",
-            "content": body,
+            "contentType": "HTML" if params.body_type.lower() == "html" else "Text",
+            "content": params.body,
         }
 
-    if location:
-        event["location"] = {"displayName": location}
+    if params.location:
+        event["location"] = {"displayName": params.location}
 
     all_attendees = []
-    all_attendees.extend(_parse_attendees(attendees, "required"))
-    all_attendees.extend(_parse_attendees(optional_attendees, "optional"))
+    all_attendees.extend(_parse_attendees(params.attendees, "required"))
+    all_attendees.extend(_parse_attendees(params.optional_attendees, "optional"))
     if all_attendees:
         event["attendees"] = all_attendees
 
-    if is_online_meeting:
+    if params.is_online_meeting:
         event["isOnlineMeeting"] = True
         event["onlineMeetingProvider"] = "teamsForBusiness"
 
-    if calendar_id:
-        path = f"/me/calendars/{calendar_id}/events"
+    if params.calendar_id:
+        path = f"/me/calendars/{params.calendar_id}/events"
     else:
         path = "/me/calendar/events"
 
-    result = await g.post(path, json=event)
-
-    event_id = (result or {}).get("id", "unknown")
-    web_link = (result or {}).get("webLink", "")
-    join_url = ""
-    online_meeting = (result or {}).get("onlineMeeting") or {}
-    if online_meeting:
-        join_url = online_meeting.get("joinUrl", "")
+    created = GraphEvent.model_validate(await g.post(path, json=event) or {})
+    event_id = created.id or "unknown"
+    web_link = created.web_link
+    join_url = created.online_meeting.join_url if created.online_meeting else ""
 
     return CreateEventResponse(
         success=True,
         action="create_event",
         event_id=event_id,
-        subject=subject,
-        start_datetime=start_datetime,
-        end_datetime=end_datetime,
-        timezone=timezone,
-        calendar_id=calendar_id,
+        subject=params.subject,
+        start_datetime=params.start_datetime,
+        end_datetime=params.end_datetime,
+        timezone=params.timezone,
+        calendar_id=params.calendar_id,
         web_link=web_link,
         join_url=join_url,
     )
@@ -481,17 +528,7 @@ async def create_event(
 
 
 async def update_event(
-    event_id: str,
-    subject: Optional[str] = None,
-    start_datetime: Optional[str] = None,
-    end_datetime: Optional[str] = None,
-    timezone: str = "UTC",
-    body: Optional[str] = None,
-    body_type: BodyType = "text",
-    location: Optional[str] = None,
-    attendees: Optional[Union[str, list[str]]] = None,
-    is_all_day: Optional[bool] = None,
-    profile: str | None = None,
+    params: UpdateEventInput,
 ) -> UpdateEventResponse:
     """
     Update an existing calendar event. Only provided fields are changed.
@@ -512,39 +549,39 @@ async def update_event(
     Returns:
         Structured event update confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     patch: dict = {}
 
-    if subject is not None:
-        patch["subject"] = subject
-    if start_datetime is not None:
-        patch["start"] = _build_datetime(start_datetime, timezone)
-    if end_datetime is not None:
-        patch["end"] = _build_datetime(end_datetime, timezone)
-    if body is not None:
+    if params.subject is not None:
+        patch["subject"] = params.subject
+    if params.start_datetime is not None:
+        patch["start"] = _build_datetime(params.start_datetime, params.timezone)
+    if params.end_datetime is not None:
+        patch["end"] = _build_datetime(params.end_datetime, params.timezone)
+    if params.body is not None:
         patch["body"] = {
-            "contentType": "HTML" if body_type.lower() == "html" else "Text",
-            "content": body,
+            "contentType": "HTML" if params.body_type.lower() == "html" else "Text",
+            "content": params.body,
         }
-    if location is not None:
-        patch["location"] = {"displayName": location}
-    if attendees is not None:
-        patch["attendees"] = _parse_attendees(attendees, "required")
-    if is_all_day is not None:
-        patch["isAllDay"] = is_all_day
+    if params.location is not None:
+        patch["location"] = {"displayName": params.location}
+    if params.attendees is not None:
+        patch["attendees"] = _parse_attendees(params.attendees, "required")
+    if params.is_all_day is not None:
+        patch["isAllDay"] = params.is_all_day
 
     if not patch:
         return UpdateEventResponse(
             success=False,
             action="update_event",
-            event_id=event_id,
+            event_id=params.event_id,
             updated_fields=[],
             error="No fields to update.",
         )
 
-    result = await g.patch(f"/me/events/{event_id}", json=patch)
+    result = await g.patch(f"/me/events/{params.event_id}", json=patch)
 
-    updated_id = (result or {}).get("id", event_id)
+    updated_id = (result or {}).get("id", params.event_id)
     updated_fields = ", ".join(patch.keys())
     return UpdateEventResponse(
         success=True,
@@ -560,7 +597,7 @@ async def update_event(
 # ---------------------------------------------------------------------------
 
 
-async def delete_event(event_id: str, profile: str | None = None) -> DeleteEventResponse:
+async def delete_event(params: DeleteEventInput) -> DeleteEventResponse:
     """
     Delete a calendar event.
 
@@ -571,9 +608,9 @@ async def delete_event(event_id: str, profile: str | None = None) -> DeleteEvent
     Returns:
         Structured event deletion confirmation.
     """
-    g = get_graph(profile)
-    await g.delete(f"/me/events/{event_id}")
-    return DeleteEventResponse(success=True, action="delete_event", event_id=event_id)
+    g = get_graph(params.profile)
+    await g.delete(f"/me/events/{params.event_id}")
+    return DeleteEventResponse(success=True, action="delete_event", event_id=params.event_id)
 
 
 # ---------------------------------------------------------------------------
@@ -582,11 +619,7 @@ async def delete_event(event_id: str, profile: str | None = None) -> DeleteEvent
 
 
 async def rsvp_event(
-    event_id: str,
-    response: RsvpResponse,
-    comment: Optional[str] = None,
-    send_response: bool = True,
-    profile: str | None = None,
+    params: RsvpEventInput,
 ) -> RsvpEventResponse:
     """
     Respond to a calendar event invitation (accept, decline, or tentatively accept).
@@ -601,19 +634,19 @@ async def rsvp_event(
     Returns:
         Structured RSVP confirmation.
     """
-    g = get_graph(profile)
-    payload: dict = {"sendResponse": send_response}
-    if comment:
-        payload["comment"] = comment
+    g = get_graph(params.profile)
+    payload: dict = {"sendResponse": params.send_response}
+    if params.comment:
+        payload["comment"] = params.comment
 
-    await g.post(f"/me/events/{event_id}/{response}", json=payload)
+    await g.post(f"/me/events/{params.event_id}/{params.response}", json=payload)
     return RsvpEventResponse(
         success=True,
         action="rsvp_event",
-        event_id=event_id,
-        response=response,
-        comment=comment,
-        send_response=send_response,
+        event_id=params.event_id,
+        response=params.response,
+        comment=params.comment,
+        send_response=params.send_response,
     )
 
 
@@ -623,11 +656,7 @@ async def rsvp_event(
 
 
 async def get_free_busy(
-    email_addresses: Union[str, list[str]],
-    start_datetime: str,
-    end_datetime: str,
-    timezone: str = "UTC",
-    profile: str | None = None,
+    params: GetFreeBusyInput,
 ) -> FreeBusyResponse:
     """
     Check free/busy availability for one or more people.
@@ -642,16 +671,16 @@ async def get_free_busy(
     Returns:
         Structured free/busy data for each requested person.
     """
-    g = get_graph(profile)
-    if isinstance(email_addresses, str):
-        schedules = [addr.strip() for addr in email_addresses.split(",") if addr.strip()]
+    g = get_graph(params.profile)
+    if isinstance(params.email_addresses, str):
+        schedules = [addr.strip() for addr in params.email_addresses.split(",") if addr.strip()]
     else:
-        schedules = [addr.strip() for addr in email_addresses if addr.strip()]
+        schedules = [addr.strip() for addr in params.email_addresses if addr.strip()]
 
     payload = {
         "schedules": schedules,
-        "startTime": _build_datetime(start_datetime, timezone),
-        "endTime": _build_datetime(end_datetime, timezone),
+        "startTime": _build_datetime(params.start_datetime, params.timezone),
+        "endTime": _build_datetime(params.end_datetime, params.timezone),
         "availabilityViewInterval": 30,  # 30-minute slots
     }
 
@@ -678,9 +707,9 @@ async def get_free_busy(
                     ScheduleItemInfo(
                         status=item.get("status", ""),
                         start=item.get("start", {}).get("dateTime"),
-                        start_display=_fmt_dt(item.get("start", {}).get("dateTime")),
+                        start_display=format_datetime_display(item.get("start", {}).get("dateTime")),
                         end=item.get("end", {}).get("dateTime"),
-                        end_display=_fmt_dt(item.get("end", {}).get("dateTime")),
+                        end_display=format_datetime_display(item.get("end", {}).get("dateTime")),
                         subject=item.get("subject") or "",
                     )
                     for item in items
@@ -689,9 +718,9 @@ async def get_free_busy(
         )
 
     return FreeBusyResponse(
-        start_datetime=start_datetime,
-        end_datetime=end_datetime,
-        timezone=timezone,
+        start_datetime=params.start_datetime,
+        end_datetime=params.end_datetime,
+        timezone=params.timezone,
         people=people,
     )
 
@@ -702,14 +731,7 @@ async def get_free_busy(
 
 
 async def find_meeting_times(
-    attendees: Union[str, list[str]],
-    duration_minutes: int = 60,
-    start_datetime: Optional[str] = None,
-    end_datetime: Optional[str] = None,
-    timezone: str = "UTC",
-    max_candidates: int = 5,
-    is_organizer_optional: bool = False,
-    profile: str | None = None,
+    params: FindMeetingTimesInput,
 ) -> MeetingSuggestionsResponse:
     """
     Find available meeting time suggestions for a set of attendees.
@@ -730,23 +752,23 @@ async def find_meeting_times(
     Returns:
         Structured meeting-time suggestions.
     """
-    g = get_graph(profile)
-    attendee_list = _parse_attendees(attendees, "required")
+    g = get_graph(params.profile)
+    attendee_list = _parse_attendees(params.attendees, "required")
 
     payload: dict = {
         "attendees": attendee_list,
-        "meetingDuration": f"PT{duration_minutes}M",
-        "maxCandidates": max_candidates,
-        "isOrganizerOptional": is_organizer_optional,
+        "meetingDuration": f"PT{params.duration_minutes}M",
+        "maxCandidates": params.max_candidates,
+        "isOrganizerOptional": params.is_organizer_optional,
     }
 
-    if start_datetime and end_datetime:
+    if params.start_datetime and params.end_datetime:
         payload["timeConstraint"] = {
             "activityDomain": "work",
             "timeSlots": [
                 {
-                    "start": _build_datetime(start_datetime, timezone),
-                    "end": _build_datetime(end_datetime, timezone),
+                    "start": _build_datetime(params.start_datetime, params.timezone),
+                    "end": _build_datetime(params.end_datetime, params.timezone),
                 }
             ],
         }
@@ -764,9 +786,9 @@ async def find_meeting_times(
             MeetingSuggestion(
                 confidence=confidence,
                 start=meeting_ts.get("start", {}).get("dateTime"),
-                start_display=_fmt_dt(meeting_ts.get("start", {}).get("dateTime")),
+                start_display=format_datetime_display(meeting_ts.get("start", {}).get("dateTime")),
                 end=meeting_ts.get("end", {}).get("dateTime"),
-                end_display=_fmt_dt(meeting_ts.get("end", {}).get("dateTime")),
+                end_display=format_datetime_display(meeting_ts.get("end", {}).get("dateTime")),
                 attendee_availability=[
                     AttendeeAvailabilityInfo(
                         email=aa.get("attendee", {}).get("emailAddress", {}).get("address", ""),
@@ -781,24 +803,19 @@ async def find_meeting_times(
         count=len(normalized),
         suggestions=normalized,
         empty_suggestions_reason=emptiness or None,
-        timezone=timezone,
+        timezone=params.timezone,
     )
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
 
 
 def register(server) -> None:
     """Register all calendar tools with the given FastMCP server instance."""
-    server.tool(annotations=_READ_ONLY)(list_calendars)
-    server.tool(annotations=_READ_ONLY)(list_events)
-    server.tool(annotations=_READ_ONLY)(list_upcoming_events)
-    server.tool(annotations=_READ_ONLY)(get_event)
-    server.tool(annotations=_WRITE)(create_event)
-    server.tool(annotations=_WRITE)(update_event)
-    server.tool(annotations=_DESTRUCTIVE)(delete_event)
-    server.tool(annotations=_WRITE)(rsvp_event)
-    server.tool(annotations=_READ_ONLY)(get_free_busy)
-    server.tool(annotations=_READ_ONLY)(find_meeting_times)
+    register_tool(server, list_calendars, annotations=READ_ONLY_TOOL)
+    register_tool(server, list_events, annotations=READ_ONLY_TOOL)
+    register_tool(server, list_upcoming_events, annotations=READ_ONLY_TOOL)
+    register_tool(server, get_event, annotations=READ_ONLY_TOOL)
+    register_tool(server, create_event, annotations=WRITE_TOOL)
+    register_tool(server, update_event, annotations=WRITE_TOOL)
+    register_tool(server, delete_event, annotations=DESTRUCTIVE_TOOL)
+    register_tool(server, rsvp_event, annotations=WRITE_TOOL)
+    register_tool(server, get_free_busy, annotations=READ_ONLY_TOOL)
+    register_tool(server, find_meeting_times, annotations=READ_ONLY_TOOL)

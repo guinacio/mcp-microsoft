@@ -52,21 +52,51 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 
-from mcp.types import ToolAnnotations
-
+from mcp_microsoft.common.formatting import format_datetime_display
+from mcp_microsoft.common.request_model import ToolRequestModel
+from mcp_microsoft.common.tooling import READ_ONLY_TOOL, WRITE_TOOL, register_tool
 from mcp_microsoft.graph import get_graph
-
-# ---------------------------------------------------------------------------
-# Tool annotation constants
-# ---------------------------------------------------------------------------
-
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
-_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
-_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
-
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
+from mcp_microsoft.graph_types import (
+    GraphChannel,
+    GraphChat,
+    GraphChatMember,
+    GraphChatMessage,
+    GraphOnlineMeetingDetail,
+    GraphTeam,
+    parse_graph_collection,
+)
+from mcp_microsoft.models import (
+    ChannelDetailResponse,
+    ChannelInfo,
+    ChannelMessageDetailResponse,
+    ChatDetailResponse,
+    ChatInfo,
+    ChatMemberInfo,
+    CreateChannelResponse,
+    CreateTeamsChatResponse,
+    CreateTeamsMeetingResponse,
+    MeetingDetailResponse,
+    OnlineMeetingInfo,
+    SendTeamsMessageResponse,
+    TeamDetailResponse,
+    TeamFunSettingsInfo,
+    TeamGuestSettingsInfo,
+    TeamMemberSettingsInfo,
+    TeamInfo,
+    TeamsMeetingParticipantInfo,
+    TeamsMeetingParticipantsInfo,
+    TeamsMentionInfo,
+    TeamsMessageAttachmentInfo,
+    TeamsReactionInfo,
+    TeamsListChannelMessagesResponse,
+    TeamsListChannelsResponse,
+    TeamsListChatsResponse,
+    TeamsListChatMessagesResponse,
+    TeamsListJoinedResponse,
+    TeamsListMeetingsResponse,
+    TeamsListRepliesResponse,
+    TeamsMessageInfo,
+)
 
 ContentType = Literal["text", "html"]
 
@@ -97,26 +127,294 @@ def _build_member(upn_or_id: str, roles: list[str]) -> dict:
     }
 
 
-def _fmt_dt(iso: Optional[str]) -> str:
-    """Format an ISO 8601 datetime to a human-readable form."""
-    if not iso:
-        return ""
+def _normalize_filter_datetime(value: str | None, fallback: datetime) -> str:
+    """Normalize a caller-supplied datetime into a safe ISO 8601 UTC filter value."""
+    if not value:
+        return fallback.strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return iso
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "Datetime filters must be valid ISO 8601 values like 2026-04-10T14:00:00Z."
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _extract_sender(msg: dict[str, Any]) -> str:
-    """Return 'Name <email>' or display name for a Graph chatMessage sender."""
-    from_obj = msg.get("from") or {}
-    user = from_obj.get("user") or {}
-    app = from_obj.get("application") or {}
-    device = from_obj.get("device") or {}
-    # Prefer user, fall back to application/device
-    name = user.get("displayName") or app.get("displayName") or device.get("displayName") or ""
+def _extract_sender(from_obj: Any | None) -> str:
+    """Return sender display name from Graph identity-like payloads."""
+    user = getattr(from_obj, "user", None) if from_obj else None
+    app = getattr(from_obj, "application", None) if from_obj else None
+    device = getattr(from_obj, "device", None) if from_obj else None
+    conversation = getattr(from_obj, "conversation", None) if from_obj else None
+    tag = getattr(from_obj, "tag", None) if from_obj else None
+    name = (
+        (user.display_name if user else "")
+        or (app.display_name if app else "")
+        or (device.display_name if device else "")
+        or (conversation.display_name if conversation else "")
+        or (tag.display_name if tag else "")
+    )
     return name or "(unknown)"
+
+
+def _team_info(team: GraphTeam) -> TeamInfo:
+    return TeamInfo(
+        id=team.id,
+        display_name=team.display_name,
+        description=team.description,
+        visibility=team.visibility,
+        web_url=team.web_url,
+        is_archived=team.is_archived,
+    )
+
+
+def _channel_info(channel: GraphChannel) -> ChannelInfo:
+    return ChannelInfo(
+        id=channel.id,
+        display_name=channel.display_name,
+        description=channel.description,
+        channel_type=channel.channel_type,
+        web_url=channel.web_url,
+        is_favorite_by_default=channel.is_favorite_by_default,
+    )
+
+
+def _message_info(msg: GraphChatMessage) -> TeamsMessageInfo:
+    content = msg.body.content
+    if len(content) > 500:
+        content = content[:500] + "…"
+    return TeamsMessageInfo(
+        id=msg.id,
+        created_at=msg.created_date_time,
+        created_at_display=format_datetime_display(msg.created_date_time),
+        last_modified_at=msg.last_modified_date_time,
+        from_display=_extract_sender(msg.from_),
+        body=content,
+        body_content_type=msg.body.content_type,
+        subject=msg.subject,
+        web_url=msg.web_url,
+        reply_to_id=msg.reply_to_id,
+        importance=msg.importance,
+    )
+
+
+def _chat_info(chat: GraphChat) -> ChatInfo:
+    return ChatInfo(
+        id=chat.id,
+        chat_type=chat.chat_type,
+        topic=chat.topic,
+        created_at=chat.created_date_time,
+        created_at_display=format_datetime_display(chat.created_date_time),
+        last_updated_at=chat.last_updated_date_time,
+        last_updated_at_display=format_datetime_display(chat.last_updated_date_time),
+        web_url=chat.web_url,
+    )
+
+
+def _chat_member_info(member: GraphChatMember) -> ChatMemberInfo:
+    email = member.email or member.user_id or member.tenant_id
+    return ChatMemberInfo(
+        id=member.id,
+        display_name=member.display_name,
+        email=email,
+        roles=member.roles,
+    )
+
+
+def _meeting_info(meeting: GraphOnlineMeetingDetail) -> OnlineMeetingInfo:
+    return OnlineMeetingInfo(
+        id=meeting.id,
+        subject=meeting.subject,
+        join_web_url=meeting.join_web_url,
+        join_meeting_id=meeting.join_meeting_id_settings.join_meeting_id if meeting.join_meeting_id_settings else "",
+        start=meeting.start_date_time,
+        end=meeting.end_date_time,
+        start_display=format_datetime_display(meeting.start_date_time),
+        end_display=format_datetime_display(meeting.end_date_time),
+        created_at=meeting.created_date_time,
+    )
+
+
+def _team_member_settings_info(settings) -> TeamMemberSettingsInfo:
+    return TeamMemberSettingsInfo.model_validate(settings.model_dump(by_alias=False))
+
+
+def _team_guest_settings_info(settings) -> TeamGuestSettingsInfo:
+    return TeamGuestSettingsInfo.model_validate(settings.model_dump(by_alias=False))
+
+
+def _team_fun_settings_info(settings) -> TeamFunSettingsInfo:
+    return TeamFunSettingsInfo.model_validate(settings.model_dump(by_alias=False))
+
+
+def _reaction_info(reaction) -> TeamsReactionInfo:
+    user_display = _extract_sender(reaction.user)
+    return TeamsReactionInfo.model_validate(
+        {
+            **reaction.model_dump(by_alias=False),
+            "created_at": reaction.created_date_time,
+            "user_display": user_display,
+        }
+    )
+
+
+def _message_attachment_info(attachment) -> TeamsMessageAttachmentInfo:
+    return TeamsMessageAttachmentInfo.model_validate(attachment.model_dump(by_alias=False))
+
+
+def _mention_info(mention) -> TeamsMentionInfo:
+    mentioned = mention.mentioned
+    mentioned_display = _extract_sender(mentioned) if mentioned else ""
+    return TeamsMentionInfo.model_validate(
+        {
+            **mention.model_dump(by_alias=False),
+            "mentioned_display": mentioned_display,
+        }
+    )
+
+
+def _meeting_participant_info(participant) -> TeamsMeetingParticipantInfo:
+    identity_display = _extract_sender(participant.identity)
+    return TeamsMeetingParticipantInfo.model_validate(
+        {
+            **participant.model_dump(by_alias=False),
+            "identity_display": identity_display,
+        }
+    )
+
+
+def _meeting_participants_info(participants) -> TeamsMeetingParticipantsInfo:
+    return TeamsMeetingParticipantsInfo(
+        organizer=_meeting_participant_info(participants.organizer) if participants.organizer else None,
+        attendees=[_meeting_participant_info(item) for item in participants.attendees],
+        producers=[_meeting_participant_info(item) for item in participants.producers],
+        contributors=[_meeting_participant_info(item) for item in participants.contributors],
+    )
+
+
+class TeamsListJoinedInput(ToolRequestModel):
+    top: int = 50
+    profile: str | None = None
+
+
+class TeamsGetInput(ToolRequestModel):
+    team_id: str
+    profile: str | None = None
+
+
+class TeamsListChannelsInput(ToolRequestModel):
+    team_id: str
+    top: int = 50
+    profile: str | None = None
+
+
+class TeamsGetChannelInput(ToolRequestModel):
+    team_id: str
+    channel_id: str
+    profile: str | None = None
+
+
+class TeamsCreateChannelInput(ToolRequestModel):
+    team_id: str
+    display_name: str
+    description: str = ""
+    confirm: bool = False
+    profile: str | None = None
+
+
+class TeamsListChannelMessagesInput(ToolRequestModel):
+    team_id: str
+    channel_id: str
+    top: int = 20
+    profile: str | None = None
+
+
+class TeamsGetChannelMessageInput(ToolRequestModel):
+    team_id: str
+    channel_id: str
+    message_id: str
+    profile: str | None = None
+
+
+class TeamsSendChannelMessageInput(ToolRequestModel):
+    team_id: str
+    channel_id: str
+    content: str
+    content_type: ContentType = "text"
+    subject: str | None = None
+    profile: str | None = None
+
+
+class TeamsReplyToChannelMessageInput(ToolRequestModel):
+    team_id: str
+    channel_id: str
+    message_id: str
+    content: str
+    content_type: ContentType = "text"
+    profile: str | None = None
+
+
+class TeamsListMessageRepliesInput(ToolRequestModel):
+    team_id: str
+    channel_id: str
+    message_id: str
+    top: int = 20
+    profile: str | None = None
+
+
+class TeamsListChatsInput(ToolRequestModel):
+    top: int = 20
+    chat_type: Literal["", "oneOnOne", "group", "meeting"] = ""
+    profile: str | None = None
+
+
+class TeamsGetChatInput(ToolRequestModel):
+    chat_id: str
+    profile: str | None = None
+
+
+class TeamsListChatMessagesInput(ToolRequestModel):
+    chat_id: str
+    top: int = 20
+    profile: str | None = None
+
+
+class TeamsSendChatMessageInput(ToolRequestModel):
+    chat_id: str
+    content: str
+    content_type: ContentType = "text"
+    profile: str | None = None
+
+
+class TeamsCreateChatInput(ToolRequestModel):
+    members: list[str]
+    topic: str = ""
+    chat_type: Literal["oneOnOne", "group"] = "group"
+    profile: str | None = None
+
+
+class TeamsCreateMeetingInput(ToolRequestModel):
+    subject: str
+    start_datetime: str
+    end_datetime: str
+    attendees: list[str] | None = None
+    profile: str | None = None
+
+
+class TeamsGetMeetingInput(ToolRequestModel):
+    meeting_id: str
+    profile: str | None = None
+
+
+class TeamsListMeetingsInput(ToolRequestModel):
+    start_after: str | None = None
+    start_before: str | None = None
+    top: int = 10
+    profile: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -125,9 +423,8 @@ def _extract_sender(msg: dict[str, Any]) -> str:
 
 
 async def teams_list_joined(
-    top: int = 50,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsListJoinedInput,
+) -> TeamsListJoinedResponse:
     """
     List all Microsoft Teams the signed-in user has joined.
 
@@ -139,25 +436,25 @@ async def teams_list_joined(
         dict with 'value' (list of team objects) and optional 'next_link'.
         Each team has id, displayName, description, visibility, webUrl.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     result = await g.get(
         "/me/joinedTeams",
         params={
-            "$top": top,
+            "$top": params.top,
             "$select": "id,displayName,description,visibility,webUrl",
         },
     )
-    return {
-        "count": len(result.get("value", [])),
-        "value": result.get("value", []),
-        "next_link": result.get("@odata.nextLink"),
-    }
+    teams = parse_graph_collection(result, GraphTeam)
+    return TeamsListJoinedResponse(
+        count=len(teams),
+        teams=[_team_info(team) for team in teams],
+        next_link=result.get("@odata.nextLink"),
+    )
 
 
 async def teams_get(
-    team_id: str,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsGetInput,
+) -> TeamDetailResponse:
     """
     Get details for a specific Microsoft Team.
 
@@ -169,15 +466,19 @@ async def teams_get(
         Team object with id, displayName, description, visibility,
         isArchived, webUrl, memberSettings, guestSettings, funSettings.
     """
-    g = get_graph(profile)
-    return await g.get(f"/teams/{team_id}")
+    g = get_graph(params.profile)
+    team = GraphTeam.model_validate(await g.get(f"/teams/{params.team_id}"))
+    return TeamDetailResponse(
+        **_team_info(team).model_dump(),
+        member_settings=_team_member_settings_info(team.member_settings),
+        guest_settings=_team_guest_settings_info(team.guest_settings),
+        fun_settings=_team_fun_settings_info(team.fun_settings),
+    )
 
 
 async def teams_list_channels(
-    team_id: str,
-    top: int = 50,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsListChannelsInput,
+) -> TeamsListChannelsResponse:
     """
     List all channels in a Microsoft Team.
 
@@ -190,27 +491,26 @@ async def teams_list_channels(
         dict with 'value' (list of channel objects).
         Each channel has id, displayName, description, channelType, webUrl.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     result = await g.get(
-        f"/teams/{team_id}/channels",
+        f"/teams/{params.team_id}/channels",
         params={
-            "$top": top,
+            "$top": params.top,
             "$select": "id,displayName,description,channelType,webUrl,isFavoriteByDefault",
         },
     )
-    return {
-        "team_id": team_id,
-        "count": len(result.get("value", [])),
-        "value": result.get("value", []),
-        "next_link": result.get("@odata.nextLink"),
-    }
+    channels = parse_graph_collection(result, GraphChannel)
+    return TeamsListChannelsResponse(
+        team_id=params.team_id,
+        count=len(channels),
+        channels=[_channel_info(channel) for channel in channels],
+        next_link=result.get("@odata.nextLink"),
+    )
 
 
 async def teams_get_channel(
-    team_id: str,
-    channel_id: str,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsGetChannelInput,
+) -> ChannelDetailResponse:
     """
     Get details for a specific channel in a Microsoft Team.
 
@@ -222,17 +522,16 @@ async def teams_get_channel(
     Returns:
         Channel object with id, displayName, description, channelType, webUrl.
     """
-    g = get_graph(profile)
-    return await g.get(f"/teams/{team_id}/channels/{channel_id}")
+    g = get_graph(params.profile)
+    channel = GraphChannel.model_validate(
+        await g.get(f"/teams/{params.team_id}/channels/{params.channel_id}")
+    )
+    return ChannelDetailResponse(**_channel_info(channel).model_dump())
 
 
 async def teams_create_channel(
-    team_id: str,
-    display_name: str,
-    description: str = "",
-    confirm: bool = False,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsCreateChannelInput,
+) -> CreateChannelResponse:
     """
     Create a new standard channel in a Microsoft Team.
 
@@ -251,25 +550,37 @@ async def teams_create_channel(
         Created channel object (id, displayName, description, webUrl) on success,
         or a dry-run preview dict when confirm=False.
     """
-    if not confirm:
-        return {
-            "dry_run": True,
-            "message": "Set confirm=True to create the channel.",
-            "team_id": team_id,
-            "display_name": display_name,
-            "description": description,
-        }
+    if not params.confirm:
+        return CreateChannelResponse(
+            success=True,
+            action="create_channel",
+            team_id=params.team_id,
+            display_name=params.display_name,
+            description=params.description,
+            dry_run=True,
+            requires_confirmation=True,
+        )
 
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     payload: dict = {
-        "displayName": display_name,
+        "displayName": params.display_name,
         "channelType": "standard",
     }
-    if description:
-        payload["description"] = description
+    if params.description:
+        payload["description"] = params.description
 
-    result = await g.post(f"/teams/{team_id}/channels", json=payload)
-    return result or {}
+    channel = GraphChannel.model_validate(
+        await g.post(f"/teams/{params.team_id}/channels", json=payload) or {}
+    )
+    return CreateChannelResponse(
+        success=True,
+        action="create_channel",
+        team_id=params.team_id,
+        channel_id=channel.id,
+        display_name=channel.display_name or params.display_name,
+        description=channel.description or params.description,
+        web_url=channel.web_url,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,11 +589,8 @@ async def teams_create_channel(
 
 
 async def teams_list_channel_messages(
-    team_id: str,
-    channel_id: str,
-    top: int = 20,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsListChannelMessagesInput,
+) -> TeamsListChannelMessagesResponse:
     """
     List recent root (non-reply) messages in a Teams channel.
 
@@ -296,36 +604,27 @@ async def teams_list_channel_messages(
         dict with 'value' (list of message objects) and optional 'next_link'.
         Messages include id, createdDateTime, from, body (preview), subject, webUrl.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     result = await g.get(
-        f"/teams/{team_id}/channels/{channel_id}/messages",
+        f"/teams/{params.team_id}/channels/{params.channel_id}/messages",
         params={
-            "$top": top,
+            "$top": params.top,
             "$select": "id,createdDateTime,lastModifiedDateTime,from,body,subject,webUrl,replyToId,importance",
         },
     )
-    messages = result.get("value", [])
-    # Trim body content to avoid bloating LLM context
-    for msg in messages:
-        body = msg.get("body", {})
-        content = body.get("content", "")
-        if len(content) > 500:
-            body["content"] = content[:500] + "…"
-    return {
-        "team_id": team_id,
-        "channel_id": channel_id,
-        "count": len(messages),
-        "value": messages,
-        "next_link": result.get("@odata.nextLink"),
-    }
+    messages = parse_graph_collection(result, GraphChatMessage)
+    return TeamsListChannelMessagesResponse(
+        team_id=params.team_id,
+        channel_id=params.channel_id,
+        count=len(messages),
+        messages=[_message_info(msg) for msg in messages],
+        next_link=result.get("@odata.nextLink"),
+    )
 
 
 async def teams_get_channel_message(
-    team_id: str,
-    channel_id: str,
-    message_id: str,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsGetChannelMessageInput,
+) -> ChannelMessageDetailResponse:
     """
     Get a single channel message by ID (full content).
 
@@ -339,18 +638,21 @@ async def teams_get_channel_message(
         Full message object with id, createdDateTime, from, body, subject,
         webUrl, reactions, attachments, mentions.
     """
-    g = get_graph(profile)
-    return await g.get(f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}")
+    g = get_graph(params.profile)
+    message = GraphChatMessage.model_validate(await g.get(
+        f"/teams/{params.team_id}/channels/{params.channel_id}/messages/{params.message_id}"
+    ))
+    return ChannelMessageDetailResponse(
+        **_message_info(message).model_dump(),
+        reactions=[_reaction_info(item) for item in message.reactions],
+        attachments=[_message_attachment_info(item) for item in message.attachments],
+        mentions=[_mention_info(item) for item in message.mentions],
+    )
 
 
 async def teams_send_channel_message(
-    team_id: str,
-    channel_id: str,
-    content: str,
-    content_type: ContentType = "text",
-    subject: Optional[str] = None,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsSendChannelMessageInput,
+) -> SendTeamsMessageResponse:
     """
     Send a new message to a Teams channel.
 
@@ -365,33 +667,28 @@ async def teams_send_channel_message(
     Returns:
         dict with success flag and the created message id, webUrl, createdDateTime.
     """
-    g = get_graph(profile)
-    payload = _body_payload(content, content_type)
-    if subject:
-        payload["subject"] = subject
+    g = get_graph(params.profile)
+    payload = _body_payload(params.content, params.content_type)
+    if params.subject:
+        payload["subject"] = params.subject
 
-    result = await g.post(
-        f"/teams/{team_id}/channels/{channel_id}/messages",
+    message = GraphChatMessage.model_validate(await g.post(
+        f"/teams/{params.team_id}/channels/{params.channel_id}/messages",
         json=payload,
+    ) or {})
+    return SendTeamsMessageResponse(
+        success=True,
+        action="teams_send_channel_message",
+        id=message.id,
+        web_url=message.web_url,
+        created_at=message.created_date_time,
+        created_at_display=format_datetime_display(message.created_date_time),
     )
-    result = result or {}
-    return {
-        "success": True,
-        "id": result.get("id", ""),
-        "web_url": result.get("webUrl", ""),
-        "created_at": result.get("createdDateTime", ""),
-        "created_at_display": _fmt_dt(result.get("createdDateTime")),
-    }
 
 
 async def teams_reply_to_channel_message(
-    team_id: str,
-    channel_id: str,
-    message_id: str,
-    content: str,
-    content_type: ContentType = "text",
-    profile: str | None = None,
-) -> dict:
+    params: TeamsReplyToChannelMessageInput,
+) -> SendTeamsMessageResponse:
     """
     Reply to an existing root message in a Teams channel thread.
 
@@ -406,30 +703,26 @@ async def teams_reply_to_channel_message(
     Returns:
         dict with success flag and the created reply id, webUrl, createdDateTime.
     """
-    g = get_graph(profile)
-    payload = _body_payload(content, content_type)
-    result = await g.post(
-        f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies",
+    g = get_graph(params.profile)
+    payload = _body_payload(params.content, params.content_type)
+    message = GraphChatMessage.model_validate(await g.post(
+        f"/teams/{params.team_id}/channels/{params.channel_id}/messages/{params.message_id}/replies",
         json=payload,
+    ) or {})
+    return SendTeamsMessageResponse(
+        success=True,
+        action="teams_reply_to_channel_message",
+        id=message.id,
+        parent_message_id=params.message_id,
+        web_url=message.web_url,
+        created_at=message.created_date_time,
+        created_at_display=format_datetime_display(message.created_date_time),
     )
-    result = result or {}
-    return {
-        "success": True,
-        "id": result.get("id", ""),
-        "parent_message_id": message_id,
-        "web_url": result.get("webUrl", ""),
-        "created_at": result.get("createdDateTime", ""),
-        "created_at_display": _fmt_dt(result.get("createdDateTime")),
-    }
 
 
 async def teams_list_message_replies(
-    team_id: str,
-    channel_id: str,
-    message_id: str,
-    top: int = 20,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsListMessageRepliesInput,
+) -> TeamsListRepliesResponse:
     """
     List all replies to a root message in a Teams channel thread.
 
@@ -443,28 +736,23 @@ async def teams_list_message_replies(
     Returns:
         dict with 'value' (list of reply message objects) and optional 'next_link'.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     result = await g.get(
-        f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies",
+        f"/teams/{params.team_id}/channels/{params.channel_id}/messages/{params.message_id}/replies",
         params={
-            "$top": top,
+            "$top": params.top,
             "$select": "id,createdDateTime,from,body,webUrl,importance",
         },
     )
-    replies = result.get("value", [])
-    for msg in replies:
-        body = msg.get("body", {})
-        content = body.get("content", "")
-        if len(content) > 500:
-            body["content"] = content[:500] + "…"
-    return {
-        "team_id": team_id,
-        "channel_id": channel_id,
-        "parent_message_id": message_id,
-        "count": len(replies),
-        "value": replies,
-        "next_link": result.get("@odata.nextLink"),
-    }
+    replies = parse_graph_collection(result, GraphChatMessage)
+    return TeamsListRepliesResponse(
+        team_id=params.team_id,
+        channel_id=params.channel_id,
+        parent_message_id=params.message_id,
+        count=len(replies),
+        replies=[_message_info(reply) for reply in replies],
+        next_link=result.get("@odata.nextLink"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -473,10 +761,8 @@ async def teams_list_message_replies(
 
 
 async def teams_list_chats(
-    top: int = 20,
-    chat_type: str = "",
-    profile: str | None = None,
-) -> dict:
+    params: TeamsListChatsInput,
+) -> TeamsListChatsResponse:
     """
     List all chats the signed-in user is part of.
 
@@ -490,27 +776,27 @@ async def teams_list_chats(
         dict with 'value' (list of chat objects) and optional 'next_link'.
         Each chat has id, chatType, topic, createdDateTime, lastUpdatedDateTime, webUrl.
     """
-    g = get_graph(profile)
-    params: dict = {
-        "$top": top,
+    g = get_graph(params.profile)
+    query: dict[str, Any] = {
+        "$top": params.top,
         "$select": "id,chatType,topic,createdDateTime,lastUpdatedDateTime,webUrl",
         "$orderby": "lastUpdatedDateTime desc",
     }
-    if chat_type:
-        params["$filter"] = f"chatType eq '{chat_type}'"
+    if params.chat_type:
+        query["$filter"] = f"chatType eq '{params.chat_type}'"
 
-    result = await g.get("/me/chats", params=params)
-    return {
-        "count": len(result.get("value", [])),
-        "value": result.get("value", []),
-        "next_link": result.get("@odata.nextLink"),
-    }
+    result = await g.get("/me/chats", params=query)
+    chats = parse_graph_collection(result, GraphChat)
+    return TeamsListChatsResponse(
+        count=len(chats),
+        chats=[_chat_info(chat) for chat in chats],
+        next_link=result.get("@odata.nextLink"),
+    )
 
 
 async def teams_get_chat(
-    chat_id: str,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsGetChatInput,
+) -> ChatDetailResponse:
     """
     Get details and members for a specific chat.
 
@@ -522,15 +808,18 @@ async def teams_get_chat(
         Chat object with id, chatType, topic, createdDateTime, webUrl,
         and expanded 'members' list (each member has displayName, email, roles).
     """
-    g = get_graph(profile)
-    return await g.get(f"/me/chats/{chat_id}", params={"$expand": "members"})
+    g = get_graph(params.profile)
+    result = await g.get(f"/me/chats/{params.chat_id}", params={"$expand": "members"})
+    chat = GraphChat.model_validate(result)
+    return ChatDetailResponse(
+        **_chat_info(chat).model_dump(),
+        members=[_chat_member_info(GraphChatMember.model_validate(member)) for member in result.get("members") or []],
+    )
 
 
 async def teams_list_chat_messages(
-    chat_id: str,
-    top: int = 20,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsListChatMessagesInput,
+) -> TeamsListChatMessagesResponse:
     """
     List recent messages in a Teams chat (1:1 or group).
 
@@ -543,34 +832,26 @@ async def teams_list_chat_messages(
         dict with 'value' (list of message objects) and optional 'next_link'.
         Messages include id, createdDateTime, from (displayName), body (preview), webUrl.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     result = await g.get(
-        f"/me/chats/{chat_id}/messages",
+        f"/me/chats/{params.chat_id}/messages",
         params={
-            "$top": top,
+            "$top": params.top,
             "$select": "id,createdDateTime,lastModifiedDateTime,from,body,webUrl,importance",
         },
     )
-    messages = result.get("value", [])
-    for msg in messages:
-        body = msg.get("body", {})
-        content = body.get("content", "")
-        if len(content) > 500:
-            body["content"] = content[:500] + "…"
-    return {
-        "chat_id": chat_id,
-        "count": len(messages),
-        "value": messages,
-        "next_link": result.get("@odata.nextLink"),
-    }
+    messages = parse_graph_collection(result, GraphChatMessage)
+    return TeamsListChatMessagesResponse(
+        chat_id=params.chat_id,
+        count=len(messages),
+        messages=[_message_info(msg) for msg in messages],
+        next_link=result.get("@odata.nextLink"),
+    )
 
 
 async def teams_send_chat_message(
-    chat_id: str,
-    content: str,
-    content_type: ContentType = "text",
-    profile: str | None = None,
-) -> dict:
+    params: TeamsSendChatMessageInput,
+) -> SendTeamsMessageResponse:
     """
     Send a message to a Teams chat (1:1 or group).
 
@@ -583,26 +864,25 @@ async def teams_send_chat_message(
     Returns:
         dict with success flag and the created message id, webUrl, createdDateTime.
     """
-    g = get_graph(profile)
-    payload = _body_payload(content, content_type)
-    result = await g.post(f"/me/chats/{chat_id}/messages", json=payload)
-    result = result or {}
-    return {
-        "success": True,
-        "chat_id": chat_id,
-        "id": result.get("id", ""),
-        "web_url": result.get("webUrl", ""),
-        "created_at": result.get("createdDateTime", ""),
-        "created_at_display": _fmt_dt(result.get("createdDateTime")),
-    }
+    g = get_graph(params.profile)
+    payload = _body_payload(params.content, params.content_type)
+    message = GraphChatMessage.model_validate(
+        await g.post(f"/me/chats/{params.chat_id}/messages", json=payload) or {}
+    )
+    return SendTeamsMessageResponse(
+        success=True,
+        action="teams_send_chat_message",
+        chat_id=params.chat_id,
+        id=message.id,
+        web_url=message.web_url,
+        created_at=message.created_date_time,
+        created_at_display=format_datetime_display(message.created_date_time),
+    )
 
 
 async def teams_create_chat(
-    members: list[str],
-    topic: str = "",
-    chat_type: str = "group",
-    profile: str | None = None,
-) -> dict:
+    params: TeamsCreateChatInput,
+) -> CreateTeamsChatResponse:
     """
     Create a new Teams chat (1:1 or group).
 
@@ -620,7 +900,7 @@ async def teams_create_chat(
     Returns:
         Created chat object with id, chatType, topic, webUrl.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
 
     # The signed-in user must be included as owner; the others as members.
     # We don't know the user's ID here, so we rely on Graph to inject the
@@ -634,27 +914,27 @@ async def teams_create_chat(
     if my_id:
         member_objs.append(_build_member(my_id, ["owner"]))
 
-    for upn in members:
+    for upn in params.members:
         member_objs.append(_build_member(upn.strip(), []))
 
     payload: dict = {
-        "chatType": chat_type,
+        "chatType": params.chat_type,
         "members": member_objs,
     }
-    if topic and chat_type != "oneOnOne":
-        payload["topic"] = topic
+    if params.topic and params.chat_type != "oneOnOne":
+        payload["topic"] = params.topic
 
-    result = await g.post("/chats", json=payload)
-    result = result or {}
-    return {
-        "success": True,
-        "id": result.get("id", ""),
-        "chat_type": result.get("chatType", chat_type),
-        "topic": result.get("topic", topic),
-        "web_url": result.get("webUrl", ""),
-        "created_at": result.get("createdDateTime", ""),
-        "created_at_display": _fmt_dt(result.get("createdDateTime")),
-    }
+    chat = GraphChat.model_validate(await g.post("/chats", json=payload) or {})
+    return CreateTeamsChatResponse(
+        success=True,
+        action="teams_create_chat",
+        id=chat.id,
+        chat_type=chat.chat_type or params.chat_type,
+        topic=chat.topic or params.topic,
+        web_url=chat.web_url,
+        created_at=chat.created_date_time,
+        created_at_display=format_datetime_display(chat.created_date_time),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -663,12 +943,8 @@ async def teams_create_chat(
 
 
 async def teams_create_meeting(
-    subject: str,
-    start_datetime: str,
-    end_datetime: str,
-    attendees: list[str] | None = None,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsCreateMeetingInput,
+) -> CreateTeamsMeetingResponse:
     """
     Create a new Teams online meeting.
 
@@ -687,42 +963,41 @@ async def teams_create_meeting(
     Returns:
         dict with success flag, meeting id, joinWebUrl, subject, start, end.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     payload: dict = {
-        "subject": subject,
-        "startDateTime": start_datetime,
-        "endDateTime": end_datetime,
+        "subject": params.subject,
+        "startDateTime": params.start_datetime,
+        "endDateTime": params.end_datetime,
     }
 
-    if attendees:
+    if params.attendees:
         payload["participants"] = {
             "attendees": [
                 {"upn": upn.strip(), "role": "attendee"}
-                for upn in attendees
+                for upn in params.attendees
                 if upn.strip()
             ]
         }
 
-    result = await g.post("/me/onlineMeetings", json=payload)
-    result = result or {}
-    return {
-        "success": True,
-        "id": result.get("id", ""),
-        "subject": result.get("subject", subject),
-        "join_web_url": result.get("joinWebUrl") or "",
-        "join_meeting_id": (result.get("joinMeetingIdSettings") or {}).get("joinMeetingId", ""),
-        "start": result.get("startDateTime", start_datetime),
-        "end": result.get("endDateTime", end_datetime),
-        "start_display": _fmt_dt(result.get("startDateTime", start_datetime)),
-        "end_display": _fmt_dt(result.get("endDateTime", end_datetime)),
-        "created_at": result.get("createdDateTime", ""),
-    }
+    raw_meeting = (await g.post("/me/onlineMeetings", json=payload)) or {}
+    meeting = GraphOnlineMeetingDetail.model_validate(
+        {
+            **raw_meeting,
+            "subject": raw_meeting.get("subject", params.subject),
+            "startDateTime": raw_meeting.get("startDateTime", params.start_datetime),
+            "endDateTime": raw_meeting.get("endDateTime", params.end_datetime),
+        }
+    )
+    return CreateTeamsMeetingResponse(
+        success=True,
+        action="teams_create_meeting",
+        **_meeting_info(meeting).model_dump(),
+    )
 
 
 async def teams_get_meeting(
-    meeting_id: str,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsGetMeetingInput,
+) -> MeetingDetailResponse:
     """
     Get details and join URL for a Teams online meeting.
 
@@ -735,16 +1010,20 @@ async def teams_get_meeting(
         Meeting object with id, subject, joinWebUrl, startDateTime, endDateTime,
         participants, and videoTeleconferenceId.
     """
-    g = get_graph(profile)
-    return await g.get(f"/me/onlineMeetings/{meeting_id}")
+    g = get_graph(params.profile)
+    meeting = GraphOnlineMeetingDetail.model_validate(
+        await g.get(f"/me/onlineMeetings/{params.meeting_id}")
+    )
+    return MeetingDetailResponse(
+        **_meeting_info(meeting).model_dump(),
+        participants=_meeting_participants_info(meeting.participants),
+        video_teleconference_id=meeting.video_teleconference_id,
+    )
 
 
 async def teams_list_meetings(
-    start_after: Optional[str] = None,
-    start_before: Optional[str] = None,
-    top: int = 10,
-    profile: str | None = None,
-) -> dict:
+    params: TeamsListMeetingsInput,
+) -> TeamsListMeetingsResponse:
     """
     List Teams online meetings within a date range.
 
@@ -766,64 +1045,53 @@ async def teams_list_meetings(
     """
     now = datetime.now(tz=timezone.utc)
 
-    if start_after is None:
-        start_after = (now - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if start_before is None:
-        start_before = (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_after = _normalize_filter_datetime(params.start_after, now - timedelta(days=7))
+    start_before = _normalize_filter_datetime(params.start_before, now + timedelta(days=7))
 
     filter_str = (
         f"startDateTime ge '{start_after}' and startDateTime le '{start_before}'"
     )
 
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     result = await g.get(
         "/me/onlineMeetings",
         params={
             "$filter": filter_str,
-            "$top": top,
+            "$top": params.top,
             "$select": "id,subject,startDateTime,endDateTime,joinWebUrl,createdDateTime",
         },
     )
-    meetings = result.get("value", [])
-    # Augment with display-friendly timestamps
-    for m in meetings:
-        m["start_display"] = _fmt_dt(m.get("startDateTime"))
-        m["end_display"] = _fmt_dt(m.get("endDateTime"))
-
-    return {
-        "filter": {"start_after": start_after, "start_before": start_before},
-        "count": len(meetings),
-        "value": meetings,
-        "next_link": result.get("@odata.nextLink"),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
+    meetings = parse_graph_collection(result, GraphOnlineMeetingDetail)
+    return TeamsListMeetingsResponse(
+        start_after=start_after,
+        start_before=start_before,
+        count=len(meetings),
+        meetings=[_meeting_info(meeting) for meeting in meetings],
+        next_link=result.get("@odata.nextLink"),
+    )
 
 
 def register(server) -> None:
     """Register all Teams tools with the given FastMCP server instance."""
     # Teams & Channels
-    server.tool(annotations=_READ_ONLY)(teams_list_joined)
-    server.tool(annotations=_READ_ONLY)(teams_get)
-    server.tool(annotations=_READ_ONLY)(teams_list_channels)
-    server.tool(annotations=_READ_ONLY)(teams_get_channel)
-    server.tool(annotations=_WRITE)(teams_create_channel)
+    register_tool(server, teams_list_joined, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_get, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_list_channels, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_get_channel, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_create_channel, annotations=WRITE_TOOL)
     # Channel Messages
-    server.tool(annotations=_READ_ONLY)(teams_list_channel_messages)
-    server.tool(annotations=_READ_ONLY)(teams_get_channel_message)
-    server.tool(annotations=_WRITE)(teams_send_channel_message)
-    server.tool(annotations=_WRITE)(teams_reply_to_channel_message)
-    server.tool(annotations=_READ_ONLY)(teams_list_message_replies)
+    register_tool(server, teams_list_channel_messages, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_get_channel_message, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_send_channel_message, annotations=WRITE_TOOL)
+    register_tool(server, teams_reply_to_channel_message, annotations=WRITE_TOOL)
+    register_tool(server, teams_list_message_replies, annotations=READ_ONLY_TOOL)
     # Chats
-    server.tool(annotations=_READ_ONLY)(teams_list_chats)
-    server.tool(annotations=_READ_ONLY)(teams_get_chat)
-    server.tool(annotations=_READ_ONLY)(teams_list_chat_messages)
-    server.tool(annotations=_WRITE)(teams_send_chat_message)
-    server.tool(annotations=_WRITE)(teams_create_chat)
+    register_tool(server, teams_list_chats, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_get_chat, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_list_chat_messages, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_send_chat_message, annotations=WRITE_TOOL)
+    register_tool(server, teams_create_chat, annotations=WRITE_TOOL)
     # Online Meetings
-    server.tool(annotations=_WRITE)(teams_create_meeting)
-    server.tool(annotations=_READ_ONLY)(teams_get_meeting)
-    server.tool(annotations=_READ_ONLY)(teams_list_meetings)
+    register_tool(server, teams_create_meeting, annotations=WRITE_TOOL)
+    register_tool(server, teams_get_meeting, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_list_meetings, annotations=READ_ONLY_TOOL)

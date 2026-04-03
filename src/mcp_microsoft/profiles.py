@@ -12,18 +12,18 @@ with zero profiles and the user must call add_ms_profile() to create the first o
 from __future__ import annotations
 
 import json
-import os
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import msal
-from dotenv import load_dotenv
 
+from mcp_microsoft.config import AppConfig, get_app_config
 from mcp_microsoft.feature_flags import resolve_optional_service_enabled
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Default scopes (importable by auth.py facade)
@@ -131,39 +131,20 @@ class ProfileManager:
     instances keyed by profile name.
     """
 
-    _instance: ClassVar[ProfileManager | None] = None
-
-    def __init__(self) -> None:
+    def __init__(self, config: AppConfig | None = None) -> None:
+        self._config = config or get_app_config()
         self._profiles: dict[str, ProfileConfig] = {}
         self._default_profile: str = ""
-        self._base_dir: Path = self._resolve_base_dir()
+        self._base_dir: Path = self._resolve_base_dir(self._config)
         self._msal_apps: dict[str, msal.PublicClientApplication] = {}
         self._graph_clients: dict[str, Any] = {}
         self._load()
 
-    # --- Singleton access ------------------------------------------------
-
-    @classmethod
-    def get(cls) -> ProfileManager:
-        """Return the singleton instance, creating it on first call."""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    @classmethod
-    def reset(cls) -> None:
-        """Reset the singleton (useful for testing)."""
-        cls._instance = None
-
     # --- Base directory ---------------------------------------------------
 
     @staticmethod
-    def _resolve_base_dir() -> Path:
-        creds_dir = os.environ.get("MS365_CREDENTIALS_DIR", "")
-        if creds_dir:
-            base = Path(creds_dir)
-        else:
-            base = Path.home() / ".microsoft-mcp"
+    def _resolve_base_dir(config: AppConfig) -> Path:
+        base = config.credentials_dir
         base.mkdir(parents=True, exist_ok=True)
         return base
 
@@ -191,9 +172,9 @@ class ProfileManager:
 
         raw_profiles = data.get("profiles", {})
         if not raw_profiles:
-            raise RuntimeError(
-                f"profiles.json at {self._config_path} has no profiles defined."
-            )
+            self._profiles = {}
+            self._default_profile = ""
+            return
 
         for name, cfg in raw_profiles.items():
             _validate_name(name)
@@ -217,10 +198,10 @@ class ProfileManager:
         user is ready to authenticate immediately. If not set, the server starts
         with zero profiles — the user must call add_ms_profile().
         """
-        client_id = os.environ.get("MS365_CLIENT_ID", "").strip()
+        client_id = self._config.bootstrap_client_id
         if not client_id:
             return
-        tenant_id = os.environ.get("MS365_TENANT_ID", "common").strip() or "common"
+        tenant_id = self._config.bootstrap_tenant_id
         self._profiles["default"] = ProfileConfig(
             name="default",
             client_id=client_id,
@@ -290,8 +271,13 @@ class ProfileManager:
         if cache.has_state_changed:
             try:
                 cfg.cache_path.write_text(cache.serialize(), encoding="utf-8")
-            except OSError:
-                pass  # non-fatal — token still works for this session
+            except OSError as exc:
+                logger.warning(
+                    "Failed to persist token cache for profile %s at %s: %s",
+                    cfg.name,
+                    cfg.cache_path,
+                    exc,
+                )
 
     def get_token(self, profile: str | None = None) -> str:
         """Acquire a valid access token for the given profile."""
@@ -495,3 +481,21 @@ def is_corporate_account(profile: ProfileConfig) -> bool:
     if not tid:
         return False
     return tid not in _PERSONAL_TENANT_IDS
+
+
+_profile_manager: ProfileManager | None = None
+
+
+def get_profile_manager(config: AppConfig | None = None) -> ProfileManager:
+    global _profile_manager
+    if (
+        _profile_manager is None
+        or (config is not None and _profile_manager._config != config)
+    ):
+        _profile_manager = ProfileManager(config=config)
+    return _profile_manager
+
+
+def reset_profile_manager() -> None:
+    global _profile_manager
+    _profile_manager = None

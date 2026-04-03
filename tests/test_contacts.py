@@ -75,7 +75,7 @@ async def test_list_contacts_returns_structured_response(monkeypatch: pytest.Mon
             }
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    result = await contacts.list_contacts(top=10)
+    result = await contacts.list_contacts(contacts.ListContactsInput(top=10))
 
     assert isinstance(result, ListContactsResponse)
     assert result.count == 1
@@ -94,7 +94,7 @@ async def test_list_contacts_with_folder_id(monkeypatch: pytest.MonkeyPatch) -> 
             return {"value": []}
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    await contacts.list_contacts(folder_id="folder-123")
+    await contacts.list_contacts(contacts.ListContactsInput(folder_id="folder-123"))
 
     assert captured_path["path"] == "/me/contactFolders/folder-123/contacts"
 
@@ -125,7 +125,7 @@ async def test_get_contact_returns_full_details(monkeypatch: pytest.MonkeyPatch)
             }
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    result = await contacts.get_contact("contact-1")
+    result = await contacts.get_contact(contacts.GetContactInput(contact_id="contact-1"))
 
     assert isinstance(result, GetContactResponse)
     assert result.id == "contact-1"
@@ -150,10 +150,12 @@ async def test_create_contact_posts_to_graph(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
     result = await contacts.create_contact(
-        display_name="Bob Johnson",
-        given_name="Bob",
-        surname="Johnson",
-        email_addresses=[{"address": "bob@example.com", "name": "Bob"}],
+        contacts.CreateContactInput(
+            display_name="Bob Johnson",
+            given_name="Bob",
+            surname="Johnson",
+            email_addresses=[{"address": "bob@example.com", "name": "Bob"}],
+        )
     )
 
     assert isinstance(result, CreateContactResponse)
@@ -182,9 +184,11 @@ async def test_update_contact_patches_fields(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
     result = await contacts.update_contact(
-        contact_id="contact-1",
-        job_title="Senior Engineer",
-        department="R&D",
+        contacts.UpdateContactInput(
+            contact_id="contact-1",
+            job_title="Senior Engineer",
+            department="R&D",
+        )
     )
 
     assert isinstance(result, UpdateContactResponse)
@@ -197,7 +201,9 @@ async def test_update_contact_patches_fields(monkeypatch: pytest.MonkeyPatch) ->
 async def test_update_contact_with_no_fields_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify update_contact returns error when no fields provided."""
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: None)
-    result = await contacts.update_contact(contact_id="contact-1")
+    result = await contacts.update_contact(
+        contacts.UpdateContactInput(contact_id="contact-1")
+    )
 
     assert result.success is False
     assert result.error == "No fields to update."
@@ -218,7 +224,9 @@ async def test_delete_contact_calls_delete(monkeypatch: pytest.MonkeyPatch) -> N
             captured_path["path"] = path
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    result = await contacts.delete_contact("contact-1")
+    result = await contacts.delete_contact(
+        contacts.DeleteContactInput(contact_id="contact-1")
+    )
 
     assert isinstance(result, DeleteContactResponse)
     assert result.success is True
@@ -248,7 +256,7 @@ async def test_list_contact_folders_returns_structured_response(monkeypatch: pyt
             }
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    result = await contacts.list_contact_folders()
+    result = await contacts.list_contact_folders(contacts.ListContactFoldersInput())
 
     assert isinstance(result, ListContactFoldersResponse)
     assert result.count == 1
@@ -272,7 +280,7 @@ async def test_search_contacts_uses_startswith_filter(monkeypatch: pytest.Monkey
             return {"value": []}
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    await contacts.search_contacts("Alice")
+    await contacts.search_contacts(contacts.SearchContactsInput(query="Alice"))
 
     assert "$filter" in captured["params"]
     assert "startswith(displayName,'Alice')" in captured["params"]["$filter"]
@@ -289,7 +297,7 @@ async def test_search_contacts_sanitizes_quotes(monkeypatch: pytest.MonkeyPatch)
             return {"value": []}
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    await contacts.search_contacts("O'Reilly")
+    await contacts.search_contacts(contacts.SearchContactsInput(query="O'Reilly"))
 
     # Single quotes must be stripped from the filter value
     assert "O'Reilly" not in captured["params"]["$filter"]
@@ -311,7 +319,9 @@ async def test_get_contact_photo_returns_base64(monkeypatch: pytest.MonkeyPatch)
             return photo_bytes
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    result = await contacts.get_contact_photo("contact-1")
+    result = await contacts.get_contact_photo(
+        contacts.GetContactPhotoInput(contact_id="contact-1")
+    )
 
     assert isinstance(result, GetContactPhotoResponse)
     assert result.success is True
@@ -331,7 +341,9 @@ async def test_get_contact_photo_saves_to_file(monkeypatch: pytest.MonkeyPatch, 
             return photo_bytes
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    result = await contacts.get_contact_photo("contact-1", save_path=save_path)
+    result = await contacts.get_contact_photo(
+        contacts.GetContactPhotoInput(contact_id="contact-1", save_path=save_path)
+    )
 
     assert result.success is True
     assert result.saved_path == save_path

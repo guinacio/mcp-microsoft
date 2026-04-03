@@ -22,16 +22,19 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
-import httpx
 from fastmcp.server.context import Context
-from mcp.types import ToolAnnotations
 
+from pydantic import Field
+
+from mcp_microsoft.common.formatting import drive_item_payload, format_datetime_display, format_size_display
+from mcp_microsoft.common.request_model import ToolRequestModel
+from mcp_microsoft.common.transfer import upload_large_file_via_session
+from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
 from mcp_microsoft.models import (
     CreateDriveFolderResponse,
     DeleteDriveItemResponse,
     DownloadFileResponse,
     DriveItemDetailResponse,
-    DriveItemInfo,
     ListDriveItemsResponse,
     MoveOrCopyItemResponse,
     SearchDriveResponse,
@@ -44,70 +47,58 @@ from mcp_microsoft.graph import get_graph, get_transfer_http_client
 # ---------------------------------------------------------------------------
 
 _4MB = 4 * 1024 * 1024  # Simple upload threshold
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
-_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
-_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
 
 
-def _fmt_size(size_bytes: int) -> str:
-    """Format a byte count as a human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    else:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
+class UploadFileInput(ToolRequestModel):
+    local_path: Path | None = None
+    parent_folder_id: str | None = None
+    filename: str | None = None
+    content_base64: str | None = None
+    profile: str | None = None
 
 
-def _fmt_dt(iso: Optional[str]) -> str:
-    """Format an ISO 8601 datetime to a human-readable form."""
-    if not iso:
-        return ""
-    try:
-        from datetime import datetime
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return iso
+class ListDriveItemsInput(ToolRequestModel):
+    folder_id: str | None = None
+    max_results: int = 25
+    profile: str | None = None
 
 
-def _fmt_item(item: dict) -> str:
-    """Format a DriveItem as a single markdown line."""
-    name = item.get("name", "(unnamed)")
-    item_id = item.get("id", "")
-    size = item.get("size", 0)
-    modified = _fmt_dt(item.get("lastModifiedDateTime"))
-    is_folder = "folder" in item
-
-    if is_folder:
-        child_count = item.get("folder", {}).get("childCount", 0)
-        return (
-            f"- **{name}/** ({child_count} items) | Modified: {modified}\n"
-            f"  ID: `{item_id}`"
-        )
-    else:
-        mime = item.get("file", {}).get("mimeType", "")
-        return (
-            f"- {name} ({_fmt_size(size)}, {mime}) | Modified: {modified}\n"
-            f"  ID: `{item_id}`"
-        )
+class GetDriveItemInput(ToolRequestModel):
+    item_id: str
+    profile: str | None = None
 
 
-def _drive_item_payload(item: dict[str, Any]) -> DriveItemInfo:
-    """Normalize a DriveItem into a structured payload."""
-    return DriveItemInfo(
-        id=item.get("id", ""),
-        name=item.get("name", "(unnamed)"),
-        size_bytes=item.get("size", 0),
-        size_display=_fmt_size(item.get("size", 0)),
-        last_modified_at=item.get("lastModifiedDateTime"),
-        last_modified_at_display=_fmt_dt(item.get("lastModifiedDateTime")),
-        web_url=item.get("webUrl", ""),
-        is_folder="folder" in item,
-        child_count=item.get("folder", {}).get("childCount", 0),
-        mime_type=item.get("file", {}).get("mimeType", ""),
-        parent_path=(item.get("parentReference") or {}).get("path", ""),
-    )
+class SearchDriveInput(ToolRequestModel):
+    query: str
+    max_results: int = 10
+    profile: str | None = None
+
+
+class CreateDriveFolderInput(ToolRequestModel):
+    name: str
+    parent_folder_id: str | None = None
+    profile: str | None = None
+
+
+class DownloadFileInput(ToolRequestModel):
+    item_id: str
+    destination_path: Path
+    profile: str | None = None
+
+
+class DeleteDriveItemInput(ToolRequestModel):
+    item_id: str
+    profile: str | None = None
+
+
+class MoveOrCopyItemInput(ToolRequestModel):
+    item_id: str
+    destination_folder_id: str
+    new_name: str | None = None
+    copy_value: bool = Field(False, alias="copy")
+    profile: str | None = None
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -116,9 +107,7 @@ def _drive_item_payload(item: dict[str, Any]) -> DriveItemInfo:
 
 
 async def list_drive_items(
-    folder_id: Optional[str] = None,
-    max_results: int = 25,
-    profile: str | None = None,
+    params: ListDriveItemsInput,
 ) -> ListDriveItemsResponse:
     """
     List files and folders in OneDrive.
@@ -132,25 +121,25 @@ async def list_drive_items(
     Returns:
         Structured OneDrive item data.
     """
-    g = get_graph(profile)
-    params: dict = {
-        "$top": max_results,
+    g = get_graph(params.profile)
+    query: dict[str, Any] = {
+        "$top": params.max_results,
         "$select": "id,name,size,file,folder,lastModifiedDateTime,webUrl",
         "$orderby": "name",
     }
 
-    if folder_id:
-        path = f"/me/drive/items/{folder_id}/children"
+    if params.folder_id:
+        path = f"/me/drive/items/{params.folder_id}/children"
     else:
         path = "/me/drive/root/children"
 
-    result = await g.get(path, params=params)
+    result = await g.get(path, params=query)
     items = result.get("value", [])
 
     return ListDriveItemsResponse(
-        folder_id=folder_id,
+        folder_id=params.folder_id,
         count=len(items),
-        items=[_drive_item_payload(item) for item in items],
+        items=[drive_item_payload(item) for item in items],
         has_more=result.get("@odata.nextLink") is not None,
     )
 
@@ -160,7 +149,7 @@ async def list_drive_items(
 # ---------------------------------------------------------------------------
 
 
-async def get_drive_item(item_id: str, profile: str | None = None) -> DriveItemDetailResponse:
+async def get_drive_item(params: GetDriveItemInput) -> DriveItemDetailResponse:
     """
     Get metadata for a specific OneDrive file or folder.
 
@@ -171,21 +160,21 @@ async def get_drive_item(item_id: str, profile: str | None = None) -> DriveItemD
     Returns:
         Structured item details.
     """
-    g = get_graph(profile)
-    params = {
+    g = get_graph(params.profile)
+    query = {
         "$select": (
             "id,name,size,file,folder,lastModifiedDateTime,createdDateTime,"
             "webUrl,parentReference,createdBy,lastModifiedBy"
         ),
     }
 
-    item = await g.get(f"/me/drive/items/{item_id}", params=params)
+    item = await g.get(f"/me/drive/items/{params.item_id}", params=query)
 
     name = item.get("name", "(unnamed)")
     item_type = "Folder" if "folder" in item else "File"
-    size = _fmt_size(item.get("size", 0))
-    created = _fmt_dt(item.get("createdDateTime"))
-    modified = _fmt_dt(item.get("lastModifiedDateTime"))
+    size = format_size_display(item.get("size", 0))
+    created = format_datetime_display(item.get("createdDateTime"))
+    modified = format_datetime_display(item.get("lastModifiedDateTime"))
     web_url = item.get("webUrl", "")
 
     # Parent path
@@ -197,7 +186,7 @@ async def get_drive_item(item_id: str, profile: str | None = None) -> DriveItemD
     modified_by = ((item.get("lastModifiedBy") or {}).get("user") or {}).get("displayName", "")
 
     return DriveItemDetailResponse(
-        id=item_id,
+        id=params.item_id,
         name=name,
         type=item_type,
         size_bytes=item.get("size", 0),
@@ -220,30 +209,32 @@ async def get_drive_item(item_id: str, profile: str | None = None) -> DriveItemD
 # ---------------------------------------------------------------------------
 
 
-async def search_drive(query: str, max_results: int = 10, profile: str | None = None) -> SearchDriveResponse:
+async def search_drive(params: SearchDriveInput) -> SearchDriveResponse:
     """
     Search for files and folders in OneDrive by name or content.
 
     Args:
-        query: Search query string.
-        max_results: Maximum number of results. Defaults to 10.
-        profile: Microsoft 365 profile to use. Omit to use the default profile.
+        params: Structured OneDrive search request.
 
     Returns:
         Structured search results.
     """
-    g = get_graph(profile)
-    params: dict = {
-        "$top": max_results,
+    g = get_graph(params.profile)
+    query_params: dict[str, Any] = {
+        "$top": params.max_results,
         "$select": "id,name,size,file,folder,lastModifiedDateTime,webUrl,parentReference",
     }
 
-    safe_query = quote(query.replace("'", "''"), safe="")  # escape OData + URL-encode
+    safe_query = quote(params.query.replace("'", "''"), safe="")  # escape OData + URL-encode
     path = f"/me/drive/root/search(q='{safe_query}')"
-    result = await g.get(path, params=params)
+    result = await g.get(path, params=query_params)
     items = result.get("value", [])
 
-    return SearchDriveResponse(query=query, count=len(items), items=[_drive_item_payload(item) for item in items])
+    return SearchDriveResponse(
+        query=params.query,
+        count=len(items),
+        items=[drive_item_payload(item) for item in items],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -252,9 +243,7 @@ async def search_drive(query: str, max_results: int = 10, profile: str | None = 
 
 
 async def create_drive_folder(
-    name: str,
-    parent_folder_id: Optional[str] = None,
-    profile: str | None = None,
+    params: CreateDriveFolderInput,
 ) -> CreateDriveFolderResponse:
     """
     Create a new folder in OneDrive.
@@ -268,22 +257,22 @@ async def create_drive_folder(
     Returns:
         Structured folder creation confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     payload = {
-        "name": name,
+        "name": params.name,
         "folder": {},
         "@microsoft.graph.conflictBehavior": "rename",
     }
 
-    if parent_folder_id:
-        path = f"/me/drive/items/{parent_folder_id}/children"
+    if params.parent_folder_id:
+        path = f"/me/drive/items/{params.parent_folder_id}/children"
     else:
         path = "/me/drive/root/children"
 
     result = await g.post(path, json=payload)
 
     folder_id = (result or {}).get("id", "unknown")
-    folder_name = (result or {}).get("name", name)
+    folder_name = (result or {}).get("name", params.name)
     web_url = (result or {}).get("webUrl", "")
 
     return CreateDriveFolderResponse(
@@ -291,7 +280,7 @@ async def create_drive_folder(
         action="create_drive_folder",
         folder_id=folder_id,
         name=folder_name,
-        parent_folder_id=parent_folder_id,
+        parent_folder_id=params.parent_folder_id,
         web_url=web_url,
     )
 
@@ -302,11 +291,7 @@ async def create_drive_folder(
 
 
 async def upload_file(
-    local_path: Optional[Path] = None,
-    parent_folder_id: Optional[str] = None,
-    filename: Optional[str] = None,
-    content_base64: Optional[str] = None,
-    profile: str | None = None,
+    params: UploadFileInput,
     ctx: Context | None = None,
 ) -> UploadFileResponse:
     """
@@ -320,14 +305,7 @@ async def upload_file(
        available (e.g. container/sandbox environments).
 
     Args:
-        local_path: Absolute path to the file on the host machine. Optional
-                    when content_base64 is provided instead.
-        parent_folder_id: Optional destination folder ID. Defaults to OneDrive root.
-        filename: Filename in OneDrive. Required when using content_base64.
-                  Defaults to the local file's name when using local_path.
-        content_base64: Base64-encoded file content. Use as an alternative to
-                        local_path when the file isn't on disk. Requires filename.
-        profile: Microsoft 365 profile to use. Omit to use the default profile.
+        params: Structured OneDrive upload request.
 
     Returns:
         Structured upload confirmation.
@@ -335,19 +313,20 @@ async def upload_file(
     import base64
     import tempfile
 
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     temp_local_path: Path | None = None
+    local_path = params.local_path
 
     try:
         # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
-        if (local_path is None or not local_path.is_file()) and content_base64:
-            if not filename:
+        if (local_path is None or not local_path.is_file()) and params.content_base64:
+            if not params.filename:
                 return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="filename is required when using content_base64.")
             try:
-                raw = base64.b64decode(content_base64, validate=True)
+                raw = base64.b64decode(params.content_base64, validate=True)
             except Exception as e:
                 return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error=f"Invalid base64: {e}")
-            suffix = Path(filename).suffix
+            suffix = Path(params.filename).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(raw)
                 temp_local_path = Path(tmp.name)
@@ -359,27 +338,27 @@ async def upload_file(
         if not local_path.is_file():
             return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="File not found.")
 
-        upload_name = filename or local_path.name
+        upload_name = params.filename or local_path.name
         encoded_name = quote(upload_name, safe="")  # percent-encode for URL path segment
         file_size = local_path.stat().st_size
 
         if file_size <= _4MB:
             # Simple PUT upload
             file_bytes = local_path.read_bytes()
-            if parent_folder_id:
-                path = f"/me/drive/items/{parent_folder_id}:/{encoded_name}:/content"
+            if params.parent_folder_id:
+                path = f"/me/drive/items/{params.parent_folder_id}:/{encoded_name}:/content"
             else:
                 path = f"/me/drive/root:/{encoded_name}:/content"
 
             if ctx:
-                await ctx.info(f"Uploading {upload_name} ({_fmt_size(file_size)})...")
+                await ctx.info(f"Uploading {upload_name} ({format_size_display(file_size)})...")
             result = await g.put(path, content=file_bytes)
             if ctx:
                 await ctx.info("Upload complete.")
         else:
             # Resumable upload session for large files
-            if parent_folder_id:
-                session_path = f"/me/drive/items/{parent_folder_id}:/{encoded_name}:/createUploadSession"
+            if params.parent_folder_id:
+                session_path = f"/me/drive/items/{params.parent_folder_id}:/{encoded_name}:/createUploadSession"
             else:
                 session_path = f"/me/drive/root:/{encoded_name}:/createUploadSession"
 
@@ -395,11 +374,11 @@ async def upload_file(
             if not upload_url:
                 return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="No upload URL returned.")
 
-            result = await _upload_large_file(upload_url, local_path, file_size, ctx)
+            result = await upload_large_file_via_session(upload_url, local_path, file_size, ctx)
 
         item_id = (result or {}).get("id", "unknown")
         web_url = (result or {}).get("webUrl", "")
-        size_str = _fmt_size(file_size)
+        size_str = format_size_display(file_size)
 
         return UploadFileResponse(
             success=True,
@@ -409,7 +388,7 @@ async def upload_file(
             size_display=size_str,
             file_id=item_id,
             web_url=web_url,
-            parent_folder_id=parent_folder_id,
+            parent_folder_id=params.parent_folder_id,
         )
     finally:
         if temp_local_path is not None:
@@ -419,75 +398,13 @@ async def upload_file(
                 pass
 
 
-async def _upload_large_file(
-    upload_url: str,
-    file_path: Path,
-    total_size: int,
-    ctx: Context | None = None,
-) -> dict:
-    """Upload a large file in chunks using a resumable upload session."""
-
-    chunk_size = 10 * 1024 * 1024  # 10 MB chunks (must be multiple of 320 KB)
-    result = {}
-    shared_client = get_transfer_http_client()
-
-    if ctx is not None:
-        await ctx.report_progress(progress=0, total=total_size)
-
-    async def _send_chunks(client: httpx.AsyncClient) -> dict:
-        offset = 0
-        with file_path.open("rb") as stream:
-            while offset < total_size:
-                chunk = stream.read(chunk_size)
-                if not chunk:
-                    break
-
-                end = offset + len(chunk)
-                content_range = f"bytes {offset}-{end - 1}/{total_size}"
-
-                response = await client.put(
-                    upload_url,
-                    content=chunk,
-                    headers={
-                        "Content-Range": content_range,
-                        "Content-Length": str(len(chunk)),
-                    },
-                )
-                response.raise_for_status()
-
-                if response.status_code in (200, 201):
-                    local_result = response.json()
-                else:
-                    local_result = {}
-
-                if ctx is not None:
-                    await ctx.report_progress(progress=end, total=total_size)
-
-                offset = end
-
-        return local_result
-
-    if shared_client is None:
-        async with httpx.AsyncClient(
-            timeout=120.0,
-            follow_redirects=True,
-        ) as ephemeral_client:
-            result = await _send_chunks(ephemeral_client)
-    else:
-        result = await _send_chunks(shared_client)
-
-    return result
-
-
 # ---------------------------------------------------------------------------
 # download_file
 # ---------------------------------------------------------------------------
 
 
 async def download_file(
-    item_id: str,
-    destination_path: Path,
-    profile: str | None = None,
+    params: DownloadFileInput,
 ) -> DownloadFileResponse:
     """
     Download a file from OneDrive to a local path.
@@ -505,17 +422,17 @@ async def download_file(
     Returns:
         Structured download confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     # Get item metadata first to know the filename
     item = await g.get(
-        f"/me/drive/items/{item_id}",
+        f"/me/drive/items/{params.item_id}",
         params={"$select": "id,name,size"},
     )
     filename = item.get("name", "download")
     expected_size = item.get("size", 0)
 
     # Resolve output path — sanitize remote filename to prevent traversal
-    dest = destination_path
+    dest = params.destination_path
     if dest.is_dir():
         safe_name = Path(filename).name  # strip directory components
         if not safe_name or safe_name.startswith("."):
@@ -523,16 +440,16 @@ async def download_file(
         dest = dest / safe_name
 
     # Download content
-    content = await g.get_raw(f"/me/drive/items/{item_id}/content")
+    content = await g.get_raw(f"/me/drive/items/{params.item_id}/content")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
 
-    size_str = _fmt_size(len(content))
+    size_str = format_size_display(len(content))
     return DownloadFileResponse(
         success=True,
         action="download_file",
-        item_id=item_id,
+        item_id=params.item_id,
         path=str(dest),
         filename=filename,
         size_bytes=len(content),
@@ -546,7 +463,7 @@ async def download_file(
 # ---------------------------------------------------------------------------
 
 
-async def delete_drive_item(item_id: str, profile: str | None = None) -> DeleteDriveItemResponse:
+async def delete_drive_item(params: DeleteDriveItemInput) -> DeleteDriveItemResponse:
     """
     Delete a file or folder from OneDrive.
 
@@ -560,9 +477,14 @@ async def delete_drive_item(item_id: str, profile: str | None = None) -> DeleteD
     Returns:
         Structured delete confirmation.
     """
-    g = get_graph(profile)
-    await g.delete(f"/me/drive/items/{item_id}")
-    return DeleteDriveItemResponse(success=True, action="delete_drive_item", item_id=item_id, soft_delete=True)
+    g = get_graph(params.profile)
+    await g.delete(f"/me/drive/items/{params.item_id}")
+    return DeleteDriveItemResponse(
+        success=True,
+        action="delete_drive_item",
+        item_id=params.item_id,
+        soft_delete=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -571,12 +493,8 @@ async def delete_drive_item(item_id: str, profile: str | None = None) -> DeleteD
 
 
 async def move_or_copy_item(
-    item_id: str,
-    destination_folder_id: str,
-    new_name: Optional[str] = None,
-    copy: bool = False,
-    profile: str | None = None,
-    ctx: Context = None,
+    params: MoveOrCopyItemInput,
+    ctx: Context | None = None,
 ) -> MoveOrCopyItemResponse:
     """
     Move or copy a OneDrive item to a different folder.
@@ -591,25 +509,25 @@ async def move_or_copy_item(
     Returns:
         Structured move/copy confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     # Get the destination folder's driveId for correct parentReference
     dest_meta = await g.get(
-        f"/me/drive/items/{destination_folder_id}",
+        f"/me/drive/items/{params.destination_folder_id}",
         params={"$select": "id,parentReference"},
     )
     drive_id = ((dest_meta or {}).get("parentReference") or {}).get("driveId", "")
 
-    parent_ref: dict = {"id": destination_folder_id}
+    parent_ref: dict[str, Any] = {"id": params.destination_folder_id}
     if drive_id:
         parent_ref["driveId"] = drive_id
 
-    if copy:
+    if params.copy_value:
         # Copy is a POST that returns 202 Accepted with a monitor URL
         payload: dict = {"parentReference": parent_ref}
-        if new_name:
-            payload["name"] = new_name
+        if params.new_name:
+            payload["name"] = params.new_name
 
-        result = await g.post(f"/me/drive/items/{item_id}/copy", json=payload)
+        result = await g.post(f"/me/drive/items/{params.item_id}/copy", json=payload)
 
         # Poll the monitor URL if available (injected by GraphClient as _monitor_url)
         monitor_url = ""
@@ -635,9 +553,9 @@ async def move_or_copy_item(
                             return MoveOrCopyItemResponse(
                                 success=True,
                                 action="copy_item",
-                                item_id=item_id,
+                                item_id=params.item_id,
                                 new_item_id=resource_id,
-                                destination_folder_id=destination_folder_id,
+                                destination_folder_id=params.destination_folder_id,
                             )
                         elif status == "failed":
                             if ctx is not None:
@@ -646,8 +564,8 @@ async def move_or_copy_item(
                             return MoveOrCopyItemResponse(
                                 success=False,
                                 action="copy_item",
-                                item_id=item_id,
-                                destination_folder_id=destination_folder_id,
+                                item_id=params.item_id,
+                                destination_folder_id=params.destination_folder_id,
                                 error=error_msg,
                             )
                     if ctx is not None:
@@ -670,43 +588,38 @@ async def move_or_copy_item(
         return MoveOrCopyItemResponse(
             success=True,
             action="copy_item",
-            item_id=item_id,
-            destination_folder_id=destination_folder_id,
+            item_id=params.item_id,
+            destination_folder_id=params.destination_folder_id,
             status="in_progress",
         )
 
     else:
         # Move is a PATCH with parentReference
         payload = {"parentReference": parent_ref}
-        if new_name:
-            payload["name"] = new_name
+        if params.new_name:
+            payload["name"] = params.new_name
 
-        result = await g.patch(f"/me/drive/items/{item_id}", json=payload)
+        result = await g.patch(f"/me/drive/items/{params.item_id}", json=payload)
 
-        new_id = (result or {}).get("id", item_id)
+        new_id = (result or {}).get("id", params.item_id)
         item_name = (result or {}).get("name", "")
         return MoveOrCopyItemResponse(
             success=True,
             action="move_item",
-            item_id=item_id,
+            item_id=params.item_id,
             new_item_id=new_id,
             name=item_name or None,
-            destination_folder_id=destination_folder_id,
+            destination_folder_id=params.destination_folder_id,
         )
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
 
 
 def register(server) -> None:
     """Register all OneDrive tools with the given FastMCP server instance."""
-    server.tool(annotations=_READ_ONLY)(list_drive_items)
-    server.tool(annotations=_READ_ONLY)(get_drive_item)
-    server.tool(annotations=_READ_ONLY)(search_drive)
-    server.tool(annotations=_WRITE)(create_drive_folder)
-    server.tool(annotations=_WRITE)(upload_file)
-    server.tool(annotations=_WRITE)(download_file)
-    server.tool(annotations=_DESTRUCTIVE)(delete_drive_item)
-    server.tool(annotations=_WRITE)(move_or_copy_item)
+    register_tool(server, list_drive_items, annotations=READ_ONLY_TOOL)
+    register_tool(server, get_drive_item, annotations=READ_ONLY_TOOL)
+    register_tool(server, search_drive, annotations=READ_ONLY_TOOL)
+    register_tool(server, create_drive_folder, annotations=WRITE_TOOL)
+    register_tool(server, upload_file, annotations=WRITE_TOOL)
+    register_tool(server, download_file, annotations=WRITE_TOOL)
+    register_tool(server, delete_drive_item, annotations=DESTRUCTIVE_TOOL)
+    register_tool(server, move_or_copy_item, annotations=WRITE_TOOL)

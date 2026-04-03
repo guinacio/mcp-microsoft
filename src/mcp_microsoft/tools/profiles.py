@@ -14,10 +14,15 @@ Implemented:
 
 from __future__ import annotations
 
-from typing import Optional
-
-from mcp.types import ToolAnnotations
-
+from mcp_microsoft.common.request_model import ToolRequestModel
+from mcp_microsoft.common.tooling import (
+    LOCAL_DESTRUCTIVE_TOOL,
+    LOCAL_IDEMPOTENT_TOOL,
+    LOCAL_READ_TOOL,
+    LOCAL_WRITE_TOOL,
+    WRITE_TOOL,
+    register_tool,
+)
 from mcp_microsoft.models import (
     AddProfileResponse,
     AddedProfileInfo,
@@ -27,21 +32,27 @@ from mcp_microsoft.models import (
     RemoveProfileResponse,
     SetDefaultProfileResponse,
 )
+from mcp_microsoft.profiles import get_profile_manager
 
 
 # ---------------------------------------------------------------------------
 # list_ms_profiles
 # ---------------------------------------------------------------------------
 
-_LOCAL_READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
-_LOCAL_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=False)
-_LOCAL_IDEMPOTENT = ToolAnnotations(
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,
-)
-_LOCAL_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=False)
-_AUTH_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
+class AddProfileInput(ToolRequestModel):
+    name: str
+    client_id: str
+    tenant_id: str = "common"
+    set_as_default: bool = False
+
+
+class ProfileNameInput(ToolRequestModel):
+    name: str
+
+
+class AuthenticateProfileInput(ToolRequestModel):
+    profile: str | None = None
+
 
 async def list_ms_profiles() -> ListProfilesResponse:
     """
@@ -53,9 +64,7 @@ async def list_ms_profiles() -> ListProfilesResponse:
     Returns:
         Structured profile configuration data.
     """
-    from mcp_microsoft.profiles import ProfileManager
-
-    pm = ProfileManager.get()
+    pm = get_profile_manager()
     profiles = pm.profiles
     default_name = pm.default_profile_name
 
@@ -87,10 +96,7 @@ async def list_ms_profiles() -> ListProfilesResponse:
 
 
 async def add_ms_profile(
-    name: str,
-    client_id: str,
-    tenant_id: str = "common",
-    set_as_default: bool = False,
+    params: AddProfileInput,
 ) -> AddProfileResponse:
     """
     Add a new Microsoft 365 profile.
@@ -109,15 +115,13 @@ async def add_ms_profile(
     Returns:
         Structured profile creation confirmation.
     """
-    from mcp_microsoft.profiles import ProfileManager
-
-    pm = ProfileManager.get()
+    pm = get_profile_manager()
     try:
         cfg = pm.add_profile(
-            name=name,
-            client_id=client_id,
-            tenant_id=tenant_id,
-            set_as_default=set_as_default,
+            name=params.name,
+            client_id=params.client_id,
+            tenant_id=params.tenant_id,
+            set_as_default=params.set_as_default,
         )
     except ValueError as exc:
         return AddProfileResponse(success=False, action="add_profile", error=str(exc))
@@ -130,7 +134,7 @@ async def add_ms_profile(
             client_id=cfg.client_id,
             tenant_id=cfg.tenant_id,
             cache_path=str(cfg.cache_path),
-            is_default=set_as_default or pm.default_profile_name == cfg.name,
+            is_default=params.set_as_default or pm.default_profile_name == cfg.name,
         ),
     )
 
@@ -140,7 +144,7 @@ async def add_ms_profile(
 # ---------------------------------------------------------------------------
 
 
-async def remove_ms_profile(name: str) -> RemoveProfileResponse:
+async def remove_ms_profile(params: ProfileNameInput) -> RemoveProfileResponse:
     """
     Remove a Microsoft 365 profile and its cached tokens.
 
@@ -152,15 +156,18 @@ async def remove_ms_profile(name: str) -> RemoveProfileResponse:
     Returns:
         Structured profile removal confirmation.
     """
-    from mcp_microsoft.profiles import ProfileManager
-
-    pm = ProfileManager.get()
+    pm = get_profile_manager()
     try:
-        pm.remove_profile(name)
+        pm.remove_profile(params.name)
     except ValueError as exc:
-        return RemoveProfileResponse(success=False, action="remove_profile", profile=name, error=str(exc))
+        return RemoveProfileResponse(
+            success=False,
+            action="remove_profile",
+            profile=params.name,
+            error=str(exc),
+        )
 
-    return RemoveProfileResponse(success=True, action="remove_profile", profile=name)
+    return RemoveProfileResponse(success=True, action="remove_profile", profile=params.name)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +175,7 @@ async def remove_ms_profile(name: str) -> RemoveProfileResponse:
 # ---------------------------------------------------------------------------
 
 
-async def authenticate_ms_profile(profile: Optional[str] = None) -> AuthenticateProfileResponse:
+async def authenticate_ms_profile(params: AuthenticateProfileInput) -> AuthenticateProfileResponse:
     """
     Trigger authentication for a profile.
 
@@ -183,18 +190,16 @@ async def authenticate_ms_profile(profile: Optional[str] = None) -> Authenticate
         Structured authentication result. Check device_code_message for
         sign-in instructions when running headless.
     """
-    from mcp_microsoft.profiles import ProfileManager
-
-    pm = ProfileManager.get()
+    pm = get_profile_manager()
     try:
-        cfg = pm.resolve_profile(profile)
+        cfg = pm.resolve_profile(params.profile)
         # Force token acquisition (will trigger interactive or device code)
         pm.get_token(cfg.name)
     except (ValueError, RuntimeError) as exc:
         return AuthenticateProfileResponse(
             success=False,
             action="authenticate_profile",
-            profile=profile,
+            profile=params.profile,
             error=str(exc),
             device_code_message=getattr(pm, "_last_device_code_message", None),
         )
@@ -214,7 +219,7 @@ async def authenticate_ms_profile(profile: Optional[str] = None) -> Authenticate
 # ---------------------------------------------------------------------------
 
 
-async def set_default_ms_profile(name: str) -> SetDefaultProfileResponse:
+async def set_default_ms_profile(params: ProfileNameInput) -> SetDefaultProfileResponse:
     """
     Change which profile is used by default when no profile is specified.
 
@@ -224,26 +229,28 @@ async def set_default_ms_profile(name: str) -> SetDefaultProfileResponse:
     Returns:
         Structured default-profile update confirmation.
     """
-    from mcp_microsoft.profiles import ProfileManager
-
-    pm = ProfileManager.get()
+    pm = get_profile_manager()
     try:
-        pm.set_default(name)
+        pm.set_default(params.name)
     except ValueError as exc:
-        return SetDefaultProfileResponse(success=False, action="set_default_profile", profile=name, error=str(exc))
+        return SetDefaultProfileResponse(
+            success=False,
+            action="set_default_profile",
+            profile=params.name,
+            error=str(exc),
+        )
 
-    return SetDefaultProfileResponse(success=True, action="set_default_profile", profile=name)
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
+    return SetDefaultProfileResponse(
+        success=True,
+        action="set_default_profile",
+        profile=params.name,
+    )
 
 
 def register(server) -> None:
     """Register all profile management tools with the given FastMCP server instance."""
-    server.tool(annotations=_LOCAL_READ)(list_ms_profiles)
-    server.tool(annotations=_LOCAL_WRITE)(add_ms_profile)
-    server.tool(annotations=_LOCAL_DESTRUCTIVE)(remove_ms_profile)
-    server.tool(annotations=_AUTH_WRITE)(authenticate_ms_profile)
-    server.tool(annotations=_LOCAL_IDEMPOTENT)(set_default_ms_profile)
+    register_tool(server, list_ms_profiles, annotations=LOCAL_READ_TOOL)
+    register_tool(server, add_ms_profile, annotations=LOCAL_WRITE_TOOL)
+    register_tool(server, remove_ms_profile, annotations=LOCAL_DESTRUCTIVE_TOOL)
+    register_tool(server, authenticate_ms_profile, annotations=WRITE_TOOL)
+    register_tool(server, set_default_ms_profile, annotations=LOCAL_IDEMPOTENT_TOOL)

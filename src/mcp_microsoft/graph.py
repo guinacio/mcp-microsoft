@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -89,9 +90,49 @@ class GraphClient:
 
     def _get_headers(self) -> dict[str, str]:
         """Fetch authenticated headers for this client's profile."""
-        from mcp_microsoft.profiles import ProfileManager
+        from mcp_microsoft.profiles import get_profile_manager
 
-        return ProfileManager.get().get_headers(self._profile)
+        return get_profile_manager().get_headers(self._profile)
+
+    async def _send_with_retry(
+        self,
+        send: Callable[[dict[str, str]], Awaitable[httpx.Response]],
+        *,
+        operation_name: str = "request",
+    ) -> httpx.Response:
+        """Execute an authenticated HTTP call with shared retry handling."""
+        for attempt in range(1, _MAX_RETRIES + 1):
+            response = await send(self._get_headers())
+
+            if response.status_code in _RETRY_STATUSES:
+                raw_retry_after = response.headers.get("Retry-After")
+                try:
+                    wait = min(int(raw_retry_after), _MAX_RETRY_AFTER) if raw_retry_after else _DEFAULT_RETRY_AFTER
+                except ValueError:
+                    wait = _DEFAULT_RETRY_AFTER
+
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "Graph API returned %s on %s (attempt %d/%d); retrying in %ds.",
+                        response.status_code,
+                        operation_name,
+                        attempt,
+                        _MAX_RETRIES,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+
+                raise httpx.HTTPStatusError(
+                    f"Graph API returned {response.status_code} after {_MAX_RETRIES} attempts."
+                    f" Last Retry-After: {raw_retry_after or 'not provided'}.",
+                    request=response.request,
+                    response=response,
+                )
+
+            return response
+
+        raise RuntimeError("Retry loop exited without returning or raising.")
 
     # ------------------------------------------------------------------
     # Internal request helper
@@ -127,84 +168,55 @@ class GraphClient:
 
         client = get_request_http_client()
 
-        for attempt in range(1, _MAX_RETRIES + 1):
-            headers = {**self._get_headers(), **extra_headers}
-
+        async def _send(headers_from_auth: dict[str, str]) -> httpx.Response:
+            headers = {**headers_from_auth, **extra_headers}
             if client is None:
                 async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as ephemeral_client:
-                    response = await ephemeral_client.request(
+                    return await ephemeral_client.request(
                         method=method,
                         url=url,
                         headers=headers,
                         **kwargs,
                     )
-            else:
-                response = await client.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    **kwargs,
-                )
+            return await client.request(
+                method=method,
+                url=url,
+                headers=headers,
+                **kwargs,
+            )
 
-            if response.status_code in _RETRY_STATUSES:
-                raw_retry_after = response.headers.get("Retry-After")
-                try:
-                    wait = min(int(raw_retry_after), _MAX_RETRY_AFTER) if raw_retry_after else _DEFAULT_RETRY_AFTER
-                except ValueError:
-                    wait = _DEFAULT_RETRY_AFTER
+        response = await self._send_with_retry(_send, operation_name=method.upper())
 
-                if attempt < _MAX_RETRIES:
-                    logger.warning(
-                        "Graph API returned %s (attempt %d/%d); retrying in %ds.",
-                        response.status_code,
-                        attempt,
-                        _MAX_RETRIES,
-                        wait,
-                    )
-                    await asyncio.sleep(wait)
-                    continue
-
-                # All retries exhausted — raise with helpful message.
-                raise httpx.HTTPStatusError(
-                    f"Graph API returned {response.status_code} after {_MAX_RETRIES} attempts."
-                    f" Last Retry-After: {raw_retry_after or 'not provided'}.",
-                    request=response.request,
-                    response=response,
-                )
-
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Append Graph error body for better diagnostics
             try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                # Append Graph error body for better diagnostics
-                try:
-                    body = response.json()
-                    error_info = body.get("error", {})
-                    msg = f"{exc} | Graph error: {error_info.get('code')} — {error_info.get('message')}"
-                except Exception:
-                    msg = str(exc)
-                raise httpx.HTTPStatusError(msg, request=exc.request, response=exc.response) from None
+                body = response.json()
+                error_info = body.get("error", {})
+                msg = f"{exc} | Graph error: {error_info.get('code')} — {error_info.get('message')}"
+            except Exception:
+                msg = str(exc)
+            raise httpx.HTTPStatusError(msg, request=exc.request, response=exc.response) from None
 
-            # 204 No Content — nothing to parse
-            if response.status_code == 204:
-                return None
+        # 204 No Content — nothing to parse
+        if response.status_code == 204:
+            return None
 
-            # 202 Accepted — used by copy operations. Return body + Location header.
-            if response.status_code == 202:
-                result: dict = {}
-                try:
-                    result = response.json()
-                except Exception:
-                    pass
-                # Preserve the Location header (monitor URL for async operations)
-                location = response.headers.get("Location", "")
-                if location:
-                    result["_monitor_url"] = location
-                return result or None
+        # 202 Accepted — used by copy operations. Return body + Location header.
+        if response.status_code == 202:
+            result: dict = {}
+            try:
+                result = response.json()
+            except Exception:
+                pass
+            # Preserve the Location header (monitor URL for async operations)
+            location = response.headers.get("Location", "")
+            if location:
+                result["_monitor_url"] = location
+            return result or None
 
-            return response.json()
-
-        # Unreachable, but satisfies type checkers.
-        raise RuntimeError("Retry loop exited without returning or raising.")
+        return response.json()
 
     # ------------------------------------------------------------------
     # Convenience methods
@@ -320,48 +332,18 @@ class GraphClient:
         url = f"{GRAPH_BASE}{path}"
         client = get_transfer_http_client()
 
-        for attempt in range(1, _MAX_RETRIES + 1):
-            headers = self._get_headers()
-
+        async def _send(headers_from_auth: dict[str, str]) -> httpx.Response:
             if client is None:
                 async with httpx.AsyncClient(
                     timeout=_TRANSFER_TIMEOUT,
                     follow_redirects=True,
                 ) as ephemeral_client:
-                    response = await ephemeral_client.get(url, headers=headers)
-            else:
-                response = await client.get(url, headers=headers)
+                    return await ephemeral_client.get(url, headers=headers_from_auth)
+            return await client.get(url, headers=headers_from_auth)
 
-            if response.status_code in _RETRY_STATUSES:
-                raw_retry_after = response.headers.get("Retry-After")
-                try:
-                    wait = min(int(raw_retry_after), _MAX_RETRY_AFTER) if raw_retry_after else _DEFAULT_RETRY_AFTER
-                except ValueError:
-                    wait = _DEFAULT_RETRY_AFTER
-
-                if attempt < _MAX_RETRIES:
-                    logger.warning(
-                        "Graph API returned %s on get_raw (attempt %d/%d); retrying in %ds.",
-                        response.status_code,
-                        attempt,
-                        _MAX_RETRIES,
-                        wait,
-                    )
-                    await asyncio.sleep(wait)
-                    continue
-
-                raise httpx.HTTPStatusError(
-                    f"Graph API returned {response.status_code} after {_MAX_RETRIES} attempts."
-                    f" Last Retry-After: {raw_retry_after or 'not provided'}.",
-                    request=response.request,
-                    response=response,
-                )
-
-            response.raise_for_status()
-            return response.content
-
-        # Unreachable, but satisfies type checkers.
-        raise RuntimeError("Retry loop exited without returning or raising.")
+        response = await self._send_with_retry(_send, operation_name="get_raw")
+        response.raise_for_status()
+        return response.content
 
 
 def get_graph(profile: str | None = None) -> GraphClient:
@@ -371,6 +353,6 @@ def get_graph(profile: str | None = None) -> GraphClient:
     Uses ProfileManager's cached instances so each profile
     gets a single reusable GraphClient.
     """
-    from mcp_microsoft.profiles import ProfileManager
+    from mcp_microsoft.profiles import get_profile_manager
 
-    return ProfileManager.get().get_graph(profile)
+    return get_profile_manager().get_graph(profile)

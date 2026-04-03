@@ -29,15 +29,17 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
-import httpx
 from fastmcp.server.context import Context
-from mcp.types import ToolAnnotations
 
+from mcp_microsoft.common.formatting import drive_item_payload, format_datetime_display, format_size_display
+from mcp_microsoft.common.request_model import ToolRequestModel
+from mcp_microsoft.common.text import strip_html
+from mcp_microsoft.common.transfer import upload_large_file_via_session
+from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
 from mcp_microsoft.models import (
     CreateListItemResponse,
     DeleteListItemResponse,
     DownloadSiteFileResponse,
-    DriveItemInfo,
     GetListItemsResponse,
     ListSiteFilesResponse,
     ListSiteLibrariesResponse,
@@ -55,76 +57,107 @@ from mcp_microsoft.models import (
     UpdateListItemResponse,
     UploadSiteFileResponse,
 )
-from mcp_microsoft.graph import get_graph, get_transfer_http_client
-from mcp_microsoft.profiles import ProfileManager
+from mcp_microsoft.graph import get_graph
+from mcp_microsoft.profiles import get_profile_manager
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
 _4MB = 4 * 1024 * 1024  # Simple upload threshold
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
-_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
-_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
 
 
-def _fmt_size(size_bytes: int) -> str:
-    """Format a byte count as a human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    else:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
+class UploadToSiteInput(ToolRequestModel):
+    site_id: str
+    drive_id: str
+    local_path: Path | None = None
+    folder_id: str | None = None
+    filename: str | None = None
+    content_base64: str | None = None
+    profile: str | None = None
 
 
-def _fmt_dt(iso: Optional[str]) -> str:
-    """Format an ISO 8601 datetime to a human-readable form."""
-    if not iso:
-        return ""
-    try:
-        from datetime import datetime
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return iso
+class CreateListItemInput(ToolRequestModel):
+    site_id: str
+    list_id: str
+    fields: SharePointFields
+    profile: str | None = None
 
 
-def _fmt_drive_item(item: dict) -> str:
-    """Format a DriveItem as a single markdown line."""
-    name = item.get("name", "(unnamed)")
-    item_id = item.get("id", "")
-    size = item.get("size", 0)
-    modified = _fmt_dt(item.get("lastModifiedDateTime"))
-    is_folder = "folder" in item
-
-    if is_folder:
-        child_count = item.get("folder", {}).get("childCount", 0)
-        return (
-            f"- **{name}/** ({child_count} items) | Modified: {modified}\n"
-            f"  ID: `{item_id}`"
-        )
-    else:
-        mime = item.get("file", {}).get("mimeType", "")
-        return (
-            f"- {name} ({_fmt_size(size)}, {mime}) | Modified: {modified}\n"
-            f"  ID: `{item_id}`"
-        )
+class UpdateListItemInput(ToolRequestModel):
+    site_id: str
+    list_id: str
+    item_id: str
+    fields: SharePointFields
+    profile: str | None = None
 
 
-def _fmt_site(site: dict) -> str:
-    """Format a SharePoint site as a markdown block."""
-    name = site.get("displayName", "(unnamed)")
-    site_id = site.get("id", "")
-    web_url = site.get("webUrl", "")
-    desc = site.get("description", "")
-    lines = [f"- **{name}**"]
-    if desc:
-        lines.append(f"  {desc}")
-    if web_url:
-        lines.append(f"  URL: {web_url}")
-    lines.append(f"  ID: `{site_id}`")
-    return "\n".join(lines)
+class SearchSharepointSitesInput(ToolRequestModel):
+    query: str = ""
+    max_results: int = 25
+    profile: str | None = None
+
+
+class GetSharepointSiteInput(ToolRequestModel):
+    site_id: str
+    profile: str | None = None
+
+
+class ListSiteLibrariesInput(ToolRequestModel):
+    site_id: str
+    profile: str | None = None
+
+
+class ListSiteFilesInput(ToolRequestModel):
+    site_id: str
+    drive_id: str
+    folder_id: str | None = None
+    max_results: int = 25
+    profile: str | None = None
+
+
+class GetSiteFileInput(ToolRequestModel):
+    site_id: str
+    drive_id: str
+    item_id: str
+    profile: str | None = None
+
+
+class DownloadFromSiteInput(ToolRequestModel):
+    site_id: str
+    drive_id: str
+    item_id: str
+    destination_path: Path
+    profile: str | None = None
+
+
+class ListSiteListsInput(ToolRequestModel):
+    site_id: str
+    max_results: int = 25
+    profile: str | None = None
+
+
+class GetListItemsInput(ToolRequestModel):
+    site_id: str
+    list_id: str
+    max_results: int = 25
+    profile: str | None = None
+
+
+class DeleteListItemInput(ToolRequestModel):
+    site_id: str
+    list_id: str
+    item_id: str
+    profile: str | None = None
+
+
+class SearchContentInput(ToolRequestModel):
+    query: str
+    entity_types: list[str] | None = None
+    site_id: str | None = None
+    max_results: int = 25
+    skip: int = 0
+    profile: str | None = None
 
 
 def _site_payload(site: dict[str, Any]) -> SharePointSiteInfo:
@@ -135,32 +168,16 @@ def _site_payload(site: dict[str, Any]) -> SharePointSiteInfo:
         description=site.get("description") or "",
         web_url=site.get("webUrl", ""),
         created_at=site.get("createdDateTime"),
-        created_at_display=_fmt_dt(site.get("createdDateTime")),
+        created_at_display=format_datetime_display(site.get("createdDateTime")),
         last_modified_at=site.get("lastModifiedDateTime"),
-        last_modified_at_display=_fmt_dt(site.get("lastModifiedDateTime")),
+        last_modified_at_display=format_datetime_display(site.get("lastModifiedDateTime")),
     )
 
-
-def _drive_item_payload(item: dict[str, Any]) -> DriveItemInfo:
-    """Normalize a SharePoint DriveItem into a structured payload."""
-    return DriveItemInfo(
-        id=item.get("id", ""),
-        name=item.get("name", "(unnamed)"),
-        size_bytes=item.get("size", 0),
-        size_display=_fmt_size(item.get("size", 0)),
-        last_modified_at=item.get("lastModifiedDateTime"),
-        last_modified_at_display=_fmt_dt(item.get("lastModifiedDateTime")),
-        web_url=item.get("webUrl", ""),
-        is_folder="folder" in item,
-        child_count=item.get("folder", {}).get("childCount", 0),
-        mime_type=item.get("file", {}).get("mimeType", ""),
-        parent_path=(item.get("parentReference") or {}).get("path", ""),
-    )
 
 
 def _get_sharepoint_graph(profile: str | None):
     """Resolve a profile and return a Graph client with a clearer consumer-tenant error."""
-    cfg = ProfileManager.get().resolve_profile(profile)
+    cfg = get_profile_manager().resolve_profile(profile)
     tenant_id = (cfg.tenant_id or "").strip().lower()
     if tenant_id in {"consumers", "9188040d-6c67-4c5b-b112-36a304b66dad"}:
         raise ValueError(
@@ -170,75 +187,13 @@ def _get_sharepoint_graph(profile: str | None):
     return get_graph(profile)
 
 
-async def _upload_large_file(
-    upload_url: str,
-    file_path: Path,
-    total_size: int,
-    ctx: Context | None = None,
-) -> dict:
-    """Upload a large file in chunks using a resumable upload session."""
-
-    chunk_size = 10 * 1024 * 1024  # 10 MB chunks (must be multiple of 320 KB)
-    result = {}
-    shared_client = get_transfer_http_client()
-
-    if ctx is not None:
-        await ctx.report_progress(progress=0, total=total_size)
-
-    async def _send_chunks(client: httpx.AsyncClient) -> dict:
-        offset = 0
-        with file_path.open("rb") as stream:
-            while offset < total_size:
-                chunk = stream.read(chunk_size)
-                if not chunk:
-                    break
-
-                end = offset + len(chunk)
-                content_range = f"bytes {offset}-{end - 1}/{total_size}"
-
-                response = await client.put(
-                    upload_url,
-                    content=chunk,
-                    headers={
-                        "Content-Range": content_range,
-                        "Content-Length": str(len(chunk)),
-                    },
-                )
-                response.raise_for_status()
-
-                if response.status_code in (200, 201):
-                    local_result = response.json()
-                else:
-                    local_result = {}
-
-                if ctx is not None:
-                    await ctx.report_progress(progress=end, total=total_size)
-
-                offset = end
-
-        return local_result
-
-    if shared_client is None:
-        async with httpx.AsyncClient(
-            timeout=120.0,
-            follow_redirects=True,
-        ) as ephemeral_client:
-            result = await _send_chunks(ephemeral_client)
-    else:
-        result = await _send_chunks(shared_client)
-
-    return result
-
-
 # ---------------------------------------------------------------------------
 # search_sharepoint_sites
 # ---------------------------------------------------------------------------
 
 
 async def search_sharepoint_sites(
-    query: str = "",
-    max_results: int = 25,
-    profile: str | None = None,
+    params: SearchSharepointSitesInput,
 ) -> SearchSharePointSitesResponse:
     """
     Search SharePoint sites the user has access to.
@@ -254,19 +209,19 @@ async def search_sharepoint_sites(
     Returns:
         Structured SharePoint site results.
     """
-    g = _get_sharepoint_graph(profile)
-    search_term = query if query else "*"
-    params: dict = {
+    g = _get_sharepoint_graph(params.profile)
+    search_term = params.query if params.query else "*"
+    query_params: dict[str, Any] = {
         "search": search_term,
-        "$top": max_results,
+        "$top": params.max_results,
         "$select": "id,displayName,description,webUrl",
     }
 
-    result = await g.get("/sites", params=params)
+    result = await g.get("/sites", params=query_params)
     sites = result.get("value", [])
 
     return SearchSharePointSitesResponse(
-        query=query,
+        query=params.query,
         count=len(sites),
         sites=[_site_payload(site) for site in sites],
         has_more=result.get("@odata.nextLink") is not None,
@@ -279,8 +234,7 @@ async def search_sharepoint_sites(
 
 
 async def get_sharepoint_site(
-    site_id: str,
-    profile: str | None = None,
+    params: GetSharepointSiteInput,
 ) -> SharePointSiteDetailResponse:
     """
     Get details of a specific SharePoint site.
@@ -294,21 +248,21 @@ async def get_sharepoint_site(
     Returns:
         Structured site details.
     """
-    g = _get_sharepoint_graph(profile)
-    params = {
+    g = _get_sharepoint_graph(params.profile)
+    query = {
         "$select": "id,displayName,description,webUrl,createdDateTime,lastModifiedDateTime",
     }
 
-    site = await g.get(f"/sites/{site_id}", params=params)
+    site = await g.get(f"/sites/{params.site_id}", params=query)
 
     name = site.get("displayName", "(unnamed)")
     desc = site.get("description") or ""
     web_url = site.get("webUrl", "")
-    created = _fmt_dt(site.get("createdDateTime"))
-    modified = _fmt_dt(site.get("lastModifiedDateTime"))
+    created = format_datetime_display(site.get("createdDateTime"))
+    modified = format_datetime_display(site.get("lastModifiedDateTime"))
 
     return SharePointSiteDetailResponse(
-        id=site_id,
+        id=params.site_id,
         display_name=name,
         description=desc,
         created_at=site.get("createdDateTime"),
@@ -325,8 +279,7 @@ async def get_sharepoint_site(
 
 
 async def list_site_libraries(
-    site_id: str,
-    profile: str | None = None,
+    params: ListSiteLibrariesInput,
 ) -> ListSiteLibrariesResponse:
     """
     List document libraries (drives) in a SharePoint site.
@@ -340,16 +293,16 @@ async def list_site_libraries(
     Returns:
         Structured document library metadata.
     """
-    g = _get_sharepoint_graph(profile)
-    params = {
+    g = _get_sharepoint_graph(params.profile)
+    query = {
         "$select": "id,name,description,driveType,webUrl",
     }
 
-    result = await g.get(f"/sites/{site_id}/drives", params=params)
+    result = await g.get(f"/sites/{params.site_id}/drives", params=query)
     drives = result.get("value", [])
 
     return ListSiteLibrariesResponse(
-        site_id=site_id,
+        site_id=params.site_id,
         count=len(drives),
         libraries=[
             SharePointLibraryInfo(
@@ -370,11 +323,7 @@ async def list_site_libraries(
 
 
 async def list_site_files(
-    site_id: str,
-    drive_id: str,
-    folder_id: Optional[str] = None,
-    max_results: int = 25,
-    profile: str | None = None,
+    params: ListSiteFilesInput,
 ) -> ListSiteFilesResponse:
     """
     List files and folders in a SharePoint document library.
@@ -392,27 +341,27 @@ async def list_site_files(
     Returns:
         Structured document-library item data.
     """
-    g = _get_sharepoint_graph(profile)
-    params: dict = {
-        "$top": max_results,
+    g = _get_sharepoint_graph(params.profile)
+    query: dict[str, Any] = {
+        "$top": params.max_results,
         "$select": "id,name,size,file,folder,lastModifiedDateTime,webUrl",
         "$orderby": "name",
     }
 
-    if folder_id:
-        path = f"/drives/{drive_id}/items/{folder_id}/children"
+    if params.folder_id:
+        path = f"/drives/{params.drive_id}/items/{params.folder_id}/children"
     else:
-        path = f"/drives/{drive_id}/root/children"
+        path = f"/drives/{params.drive_id}/root/children"
 
-    result = await g.get(path, params=params)
+    result = await g.get(path, params=query)
     items = result.get("value", [])
 
     return ListSiteFilesResponse(
-        site_id=site_id,
-        drive_id=drive_id,
-        folder_id=folder_id,
+        site_id=params.site_id,
+        drive_id=params.drive_id,
+        folder_id=params.folder_id,
         count=len(items),
-        items=[_drive_item_payload(item) for item in items],
+        items=[drive_item_payload(item) for item in items],
         has_more=result.get("@odata.nextLink") is not None,
     )
 
@@ -423,10 +372,7 @@ async def list_site_files(
 
 
 async def get_site_file(
-    site_id: str,
-    drive_id: str,
-    item_id: str,
-    profile: str | None = None,
+    params: GetSiteFileInput,
 ) -> SiteFileDetailResponse:
     """
     Get metadata for a file or folder in a SharePoint document library.
@@ -442,8 +388,8 @@ async def get_site_file(
     Returns:
         Structured file/folder details.
     """
-    g = _get_sharepoint_graph(profile)
-    params = {
+    g = _get_sharepoint_graph(params.profile)
+    query = {
         "$select": (
             "id,name,size,file,folder,lastModifiedDateTime,createdDateTime,"
             "webUrl,parentReference,createdBy,lastModifiedBy"
@@ -451,15 +397,15 @@ async def get_site_file(
     }
 
     item = await g.get(
-        f"/drives/{drive_id}/items/{item_id}",
-        params=params,
+        f"/drives/{params.drive_id}/items/{params.item_id}",
+        params=query,
     )
 
     name = item.get("name", "(unnamed)")
     item_type = "Folder" if "folder" in item else "File"
-    size = _fmt_size(item.get("size", 0))
-    created = _fmt_dt(item.get("createdDateTime"))
-    modified = _fmt_dt(item.get("lastModifiedDateTime"))
+    size = format_size_display(item.get("size", 0))
+    created = format_datetime_display(item.get("createdDateTime"))
+    modified = format_datetime_display(item.get("lastModifiedDateTime"))
     web_url = item.get("webUrl", "")
 
     parent_ref = item.get("parentReference") or {}
@@ -469,9 +415,9 @@ async def get_site_file(
     modified_by = ((item.get("lastModifiedBy") or {}).get("user") or {}).get("displayName", "")
 
     return SiteFileDetailResponse(
-        site_id=site_id,
-        drive_id=drive_id,
-        id=item_id,
+        site_id=params.site_id,
+        drive_id=params.drive_id,
+        id=params.item_id,
         name=name,
         type=item_type,
         size_bytes=item.get("size", 0),
@@ -495,14 +441,8 @@ async def get_site_file(
 
 
 async def upload_to_site(
-    site_id: str,
-    drive_id: str,
-    local_path: Path | None = None,
-    folder_id: Optional[str] = None,
-    filename: Optional[str] = None,
-    content_base64: Optional[str] = None,
-    profile: str | None = None,
-    ctx: Context = None,
+    params: UploadToSiteInput,
+    ctx: Context | None = None,
 ) -> UploadSiteFileResponse:
     """
     Upload a local file to a SharePoint document library.
@@ -523,15 +463,7 @@ async def upload_to_site(
     When using content_base64, filename is required.
 
     Args:
-        site_id: The SharePoint site ID.
-        drive_id: The document library (drive) ID.
-        local_path: Absolute path to the file on the user's local machine.
-        folder_id: Optional destination folder ID within the library.
-                   Defaults to the library root.
-        filename: Optional filename in SharePoint. Defaults to the local file's name.
-        content_base64: Optional base64-encoded file content. Use as a fallback
-                        when local_path is not accessible. Requires filename.
-        profile: Microsoft 365 profile to use. Omit to use the default profile.
+        params: Structured SharePoint upload request.
 
     Returns:
         Structured upload confirmation.
@@ -539,19 +471,20 @@ async def upload_to_site(
     import base64
     import tempfile
 
-    g = _get_sharepoint_graph(profile)
+    g = _get_sharepoint_graph(params.profile)
     temp_local_path: Path | None = None
+    local_path = params.local_path
 
     try:
         # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
-        if (local_path is None or not local_path.is_file()) and content_base64:
-            if not filename:
+        if (local_path is None or not local_path.is_file()) and params.content_base64:
+            if not params.filename:
                 return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="filename is required when using content_base64.")
             try:
-                raw = base64.b64decode(content_base64, validate=True)
+                raw = base64.b64decode(params.content_base64, validate=True)
             except Exception as e:
                 return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error=f"Invalid base64: {e}")
-            suffix = Path(filename).suffix
+            suffix = Path(params.filename).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(raw)
                 temp_local_path = Path(tmp.name)
@@ -563,23 +496,23 @@ async def upload_to_site(
         if not local_path.is_file():
             return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="File not found.")
 
-        upload_name = filename or local_path.name
+        upload_name = params.filename or local_path.name
         encoded_name = quote(upload_name, safe="")
         file_size = local_path.stat().st_size
 
-        base = f"/drives/{drive_id}"
+        base = f"/drives/{params.drive_id}"
 
         if file_size <= _4MB:
             file_bytes = local_path.read_bytes()
-            if folder_id:
-                path = f"{base}/items/{folder_id}:/{encoded_name}:/content"
+            if params.folder_id:
+                path = f"{base}/items/{params.folder_id}:/{encoded_name}:/content"
             else:
                 path = f"{base}/root:/{encoded_name}:/content"
 
             result = await g.put(path, content=file_bytes)
         else:
-            if folder_id:
-                session_path = f"{base}/items/{folder_id}:/{encoded_name}:/createUploadSession"
+            if params.folder_id:
+                session_path = f"{base}/items/{params.folder_id}:/{encoded_name}:/createUploadSession"
             else:
                 session_path = f"{base}/root:/{encoded_name}:/createUploadSession"
 
@@ -595,18 +528,18 @@ async def upload_to_site(
             if not upload_url:
                 return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="No upload URL returned.")
 
-            result = await _upload_large_file(upload_url, local_path, file_size, ctx)
+            result = await upload_large_file_via_session(upload_url, local_path, file_size, ctx)
 
         item_id = (result or {}).get("id", "unknown")
         web_url = (result or {}).get("webUrl", "")
-        size_str = _fmt_size(file_size)
+        size_str = format_size_display(file_size)
 
         return UploadSiteFileResponse(
             success=True,
             action="upload_to_site",
-            site_id=site_id,
-            drive_id=drive_id,
-            folder_id=folder_id,
+            site_id=params.site_id,
+            drive_id=params.drive_id,
+            folder_id=params.folder_id,
             filename=upload_name,
             size_bytes=file_size,
             size_display=size_str,
@@ -627,11 +560,7 @@ async def upload_to_site(
 
 
 async def download_from_site(
-    site_id: str,
-    drive_id: str,
-    item_id: str,
-    destination_path: Path,
-    profile: str | None = None,
+    params: DownloadFromSiteInput,
 ) -> DownloadSiteFileResponse:
     """
     Download a file from a SharePoint document library to a local path.
@@ -653,15 +582,15 @@ async def download_from_site(
     Returns:
         Structured download confirmation.
     """
-    g = _get_sharepoint_graph(profile)
-    base = f"/drives/{drive_id}/items/{item_id}"
+    g = _get_sharepoint_graph(params.profile)
+    base = f"/drives/{params.drive_id}/items/{params.item_id}"
 
     # Get item metadata for filename
     item = await g.get(base, params={"$select": "id,name,size"})
     filename = item.get("name", "download")
 
     # Resolve output path
-    dest = destination_path
+    dest = params.destination_path
     if dest.is_dir():
         safe_name = Path(filename).name
         if not safe_name or safe_name.startswith("."):
@@ -674,13 +603,13 @@ async def download_from_site(
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
 
-    size_str = _fmt_size(len(content))
+    size_str = format_size_display(len(content))
     return DownloadSiteFileResponse(
         success=True,
         action="download_from_site",
-        site_id=site_id,
-        drive_id=drive_id,
-        item_id=item_id,
+        site_id=params.site_id,
+        drive_id=params.drive_id,
+        item_id=params.item_id,
         path=str(dest),
         filename=filename,
         size_bytes=len(content),
@@ -694,9 +623,7 @@ async def download_from_site(
 
 
 async def list_site_lists(
-    site_id: str,
-    max_results: int = 25,
-    profile: str | None = None,
+    params: ListSiteListsInput,
 ) -> ListSiteListsResponse:
     """
     List all lists in a SharePoint site.
@@ -711,17 +638,17 @@ async def list_site_lists(
     Returns:
         Structured SharePoint list metadata.
     """
-    g = _get_sharepoint_graph(profile)
-    params: dict = {
-        "$top": max_results,
+    g = _get_sharepoint_graph(params.profile)
+    query: dict[str, Any] = {
+        "$top": params.max_results,
         "$select": "id,displayName,description,webUrl,list",
     }
 
-    result = await g.get(f"/sites/{site_id}/lists", params=params)
+    result = await g.get(f"/sites/{params.site_id}/lists", params=query)
     lists = result.get("value", [])
 
     return ListSiteListsResponse(
-        site_id=site_id,
+        site_id=params.site_id,
         count=len(lists),
         lists=[
             SharePointListInfo(
@@ -742,10 +669,7 @@ async def list_site_lists(
 
 
 async def get_list_items(
-    site_id: str,
-    list_id: str,
-    max_results: int = 25,
-    profile: str | None = None,
+    params: GetListItemsInput,
 ) -> GetListItemsResponse:
     """
     Get items from a SharePoint list.
@@ -761,24 +685,24 @@ async def get_list_items(
     Returns:
         Structured SharePoint list-item data.
     """
-    g = _get_sharepoint_graph(profile)
-    params: dict = {
-        "$top": max_results,
+    g = _get_sharepoint_graph(params.profile)
+    query: dict[str, Any] = {
+        "$top": params.max_results,
         "$expand": "fields",
         "$select": "id,createdDateTime,lastModifiedDateTime",
     }
 
     result = await g.get(
-        f"/sites/{site_id}/lists/{list_id}/items",
-        params=params,
+        f"/sites/{params.site_id}/lists/{params.list_id}/items",
+        params=query,
     )
     items = result.get("value", [])
 
     normalized: list[SharePointListItemInfo] = []
     for item in items:
         item_id = item.get("id", "")
-        created = _fmt_dt(item.get("createdDateTime"))
-        modified = _fmt_dt(item.get("lastModifiedDateTime"))
+        created = format_datetime_display(item.get("createdDateTime"))
+        modified = format_datetime_display(item.get("lastModifiedDateTime"))
         fields = item.get("fields", {})
 
         # Filter out internal/system fields
@@ -801,13 +725,13 @@ async def get_list_items(
                 created_at_display=created,
                 modified_at=item.get("lastModifiedDateTime"),
                 modified_at_display=modified,
-                fields=filtered_fields,
+                fields=SharePointFields(filtered_fields),
             )
         )
 
     return GetListItemsResponse(
-        site_id=site_id,
-        list_id=list_id,
+        site_id=params.site_id,
+        list_id=params.list_id,
         count=len(normalized),
         items=normalized,
         has_more=result.get("@odata.nextLink") is not None,
@@ -820,10 +744,7 @@ async def get_list_items(
 
 
 async def create_list_item(
-    site_id: str,
-    list_id: str,
-    fields: SharePointFields,
-    profile: str | None = None,
+    params: CreateListItemInput,
 ) -> CreateListItemResponse:
     """
     Add an item to a SharePoint list.
@@ -831,21 +752,16 @@ async def create_list_item(
     Requires a work/organizational Microsoft 365 account.
 
     Args:
-        site_id: The SharePoint site ID.
-        list_id: The SharePoint list ID.
-        fields: Field values for the new list item. Example:
-                {"Title": "New item", "Status": "Active", "Priority": "High"}
-                The available fields depend on the list's column definitions.
-        profile: Microsoft 365 profile to use. Omit to use the default profile.
+        params: Structured list-item create request.
 
     Returns:
         Structured list-item creation confirmation.
     """
-    g = _get_sharepoint_graph(profile)
+    g = _get_sharepoint_graph(params.profile)
 
-    payload = {"fields": fields.root}
+    payload = {"fields": params.fields.root}
     result = await g.post(
-        f"/sites/{site_id}/lists/{list_id}/items",
+        f"/sites/{params.site_id}/lists/{params.list_id}/items",
         json=payload,
     )
 
@@ -853,10 +769,10 @@ async def create_list_item(
     return CreateListItemResponse(
         success=True,
         action="create_list_item",
-        site_id=site_id,
-        list_id=list_id,
+        site_id=params.site_id,
+        list_id=params.list_id,
         item_id=item_id,
-        fields=fields.root,
+        fields=SharePointFields(params.fields.root),
     )
 
 
@@ -866,11 +782,7 @@ async def create_list_item(
 
 
 async def update_list_item(
-    site_id: str,
-    list_id: str,
-    item_id: str,
-    fields: SharePointFields,
-    profile: str | None = None,
+    params: UpdateListItemInput,
 ) -> UpdateListItemResponse:
     """
     Update a SharePoint list item.
@@ -878,31 +790,26 @@ async def update_list_item(
     Requires a work/organizational Microsoft 365 account.
 
     Args:
-        site_id: The SharePoint site ID.
-        list_id: The SharePoint list ID.
-        item_id: The list item ID to update.
-        fields: Field values to update. Example:
-                {"Status": "Completed", "Notes": "Done on time"}
-        profile: Microsoft 365 profile to use. Omit to use the default profile.
+        params: Structured list-item update request.
 
     Returns:
         Structured list-item update confirmation.
     """
-    g = _get_sharepoint_graph(profile)
+    g = _get_sharepoint_graph(params.profile)
 
     await g.patch(
-        f"/sites/{site_id}/lists/{list_id}/items/{item_id}/fields",
-        json=fields.root,
+        f"/sites/{params.site_id}/lists/{params.list_id}/items/{params.item_id}/fields",
+        json=params.fields.root,
     )
 
     return UpdateListItemResponse(
         success=True,
         action="update_list_item",
-        site_id=site_id,
-        list_id=list_id,
-        item_id=item_id,
-        updated_fields=list(fields.root.keys()),
-        fields=fields.root,
+        site_id=params.site_id,
+        list_id=params.list_id,
+        item_id=params.item_id,
+        updated_fields=list(params.fields.root.keys()),
+        fields=SharePointFields(params.fields.root),
     )
 
 
@@ -912,10 +819,7 @@ async def update_list_item(
 
 
 async def delete_list_item(
-    site_id: str,
-    list_id: str,
-    item_id: str,
-    profile: str | None = None,
+    params: DeleteListItemInput,
 ) -> DeleteListItemResponse:
     """
     Delete an item from a SharePoint list.
@@ -931,14 +835,14 @@ async def delete_list_item(
     Returns:
         Structured list-item deletion confirmation.
     """
-    g = _get_sharepoint_graph(profile)
-    await g.delete(f"/sites/{site_id}/lists/{list_id}/items/{item_id}")
+    g = _get_sharepoint_graph(params.profile)
+    await g.delete(f"/sites/{params.site_id}/lists/{params.list_id}/items/{params.item_id}")
     return DeleteListItemResponse(
         success=True,
         action="delete_list_item",
-        site_id=site_id,
-        list_id=list_id,
-        item_id=item_id,
+        site_id=params.site_id,
+        list_id=params.list_id,
+        item_id=params.item_id,
     )
 
 
@@ -964,12 +868,6 @@ _LIST_ITEM_FIELDS = [
 ]
 
 
-def _strip_html(text: str) -> str:
-    """Remove HTML tags from a search summary excerpt."""
-    import re
-    return re.sub(r"<[^>]+>", "", text or "").strip()
-
-
 def _parse_hit(hit: dict) -> SearchHit:
     resource = hit.get("resource") or {}
     odata_type = resource.get("@odata.type", "")
@@ -988,7 +886,7 @@ def _parse_hit(hit: dict) -> SearchHit:
     return SearchHit(
         hit_id=hit.get("hitId", ""),
         rank=hit.get("rank", 0),
-        summary=_strip_html(hit.get("summary", "")),
+        summary=strip_html(hit.get("summary", "")),
         resource_type=resource_type,
         name=resource.get("name") or resource.get("displayName") or resource.get("subject") or "",
         web_url=resource.get("webUrl", ""),
@@ -1003,12 +901,7 @@ def _parse_hit(hit: dict) -> SearchHit:
 
 
 async def search_content(
-    query: str,
-    entity_types: Optional[list[str]] = None,
-    site_id: Optional[str] = None,
-    max_results: int = 25,
-    skip: int = 0,
-    profile: str | None = None,
+    params: SearchContentInput,
 ) -> SearchContentResponse:
     """
     Full-text search across Microsoft 365 content using the Microsoft Search API.
@@ -1049,8 +942,7 @@ async def search_content(
         Ranked search hits with name, URL, summary excerpt, author, and
         file metadata. Use next_skip for subsequent pages.
     """
-    if entity_types is None:
-        entity_types = ["driveItem"]
+    entity_types = params.entity_types or ["driveItem"]
 
     unknown = [et for et in entity_types if et not in _SEARCH_ENTITY_TYPES]
     if unknown:
@@ -1059,13 +951,13 @@ async def search_content(
             f"Valid types: {sorted(_SEARCH_ENTITY_TYPES)}"
         )
 
-    max_results = max(1, min(500, max_results))
+    max_results = max(1, min(500, params.max_results))
 
     # Build the $search request object.
     search_request: dict = {
         "entityTypes": entity_types,
-        "query": {"queryString": query},
-        "from": skip,
+        "query": {"queryString": params.query},
+        "from": params.skip,
         "size": max_results,
     }
 
@@ -1075,13 +967,13 @@ async def search_content(
     elif "listItem" in entity_types:
         search_request["fields"] = _LIST_ITEM_FIELDS
 
-    g = _get_sharepoint_graph(profile)
+    g = _get_sharepoint_graph(params.profile)
 
     # Scope to a specific site when requested.
     # contentSources is for external connector items only — use a KQL
     # path: clause with the site's webUrl to restrict SharePoint search scope.
-    if site_id:
-        site_data = await g.get(f"/sites/{site_id}", params={"$select": "webUrl"})
+    if params.site_id:
+        site_data = await g.get(f"/sites/{params.site_id}", params={"$select": "webUrl"})
         site_url = site_data.get("webUrl", "")
         if site_url:
             current_query = search_request["query"].get("queryString", "")
@@ -1098,10 +990,10 @@ async def search_content(
     more: bool = container.get("moreResultsAvailable") or False
 
     hits = [_parse_hit(h) for h in raw_hits]
-    next_skip = skip + len(hits) if more else None
+    next_skip = params.skip + len(hits) if more else None
 
     return SearchContentResponse(
-        query=query,
+        query=params.query,
         entity_types=entity_types,
         total=total,
         count=len(hits),
@@ -1111,23 +1003,18 @@ async def search_content(
     )
 
 
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
-
-
 def register(server) -> None:
     """Register all SharePoint tools with the given FastMCP server instance."""
-    server.tool(annotations=_READ_ONLY)(search_content)
-    server.tool(annotations=_READ_ONLY)(search_sharepoint_sites)
-    server.tool(annotations=_READ_ONLY)(get_sharepoint_site)
-    server.tool(annotations=_READ_ONLY)(list_site_libraries)
-    server.tool(annotations=_READ_ONLY)(list_site_files)
-    server.tool(annotations=_READ_ONLY)(get_site_file)
-    server.tool(annotations=_WRITE)(upload_to_site)
-    server.tool(annotations=_WRITE)(download_from_site)
-    server.tool(annotations=_READ_ONLY)(list_site_lists)
-    server.tool(annotations=_READ_ONLY)(get_list_items)
-    server.tool(annotations=_WRITE)(create_list_item)
-    server.tool(annotations=_WRITE)(update_list_item)
-    server.tool(annotations=_DESTRUCTIVE)(delete_list_item)
+    register_tool(server, search_content, annotations=READ_ONLY_TOOL)
+    register_tool(server, search_sharepoint_sites, annotations=READ_ONLY_TOOL)
+    register_tool(server, get_sharepoint_site, annotations=READ_ONLY_TOOL)
+    register_tool(server, list_site_libraries, annotations=READ_ONLY_TOOL)
+    register_tool(server, list_site_files, annotations=READ_ONLY_TOOL)
+    register_tool(server, get_site_file, annotations=READ_ONLY_TOOL)
+    register_tool(server, upload_to_site, annotations=WRITE_TOOL)
+    register_tool(server, download_from_site, annotations=WRITE_TOOL)
+    register_tool(server, list_site_lists, annotations=READ_ONLY_TOOL)
+    register_tool(server, get_list_items, annotations=READ_ONLY_TOOL)
+    register_tool(server, create_list_item, annotations=WRITE_TOOL)
+    register_tool(server, update_list_item, annotations=WRITE_TOOL)
+    register_tool(server, delete_list_item, annotations=DESTRUCTIVE_TOOL)

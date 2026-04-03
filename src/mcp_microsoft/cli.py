@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 
-from mcp_microsoft.profiles import ProfileManager
+from mcp_microsoft.profiles import ProfileManager, get_profile_manager
 
 
 def _input(prompt: str, default: str = "") -> str:
@@ -163,7 +163,7 @@ COMMANDS = {
 
 def main() -> None:
     """CLI entry point."""
-    pm = ProfileManager.get()
+    pm = get_profile_manager()
 
     # If a subcommand was passed directly
     if len(sys.argv) > 1:

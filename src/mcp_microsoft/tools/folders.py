@@ -11,28 +11,37 @@ Implemented:
 
 from __future__ import annotations
 
-from typing import Optional
-
-
-from mcp.types import ToolAnnotations
-
+from mcp_microsoft.common.request_model import ToolRequestModel
+from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.graph import get_graph
 from mcp_microsoft.models import (
     CreateFolderResponse,
     DeleteFolderResponse,
     ListFoldersResponse,
     MailFolderInfo,
 )
-from mcp_microsoft.graph import get_graph
 
 # ---------------------------------------------------------------------------
 # list_folders
 # ---------------------------------------------------------------------------
 
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
-_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
-_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, openWorldHint=True)
+class ListFoldersInput(ToolRequestModel):
+    include_child_folders: bool = False
+    profile: str | None = None
 
-async def list_folders(include_child_folders: bool = False, profile: str | None = None) -> ListFoldersResponse:
+
+class CreateFolderInput(ToolRequestModel):
+    display_name: str
+    parent_folder_id: str | None = None
+    profile: str | None = None
+
+
+class DeleteFolderInput(ToolRequestModel):
+    folder_id: str
+    profile: str | None = None
+
+
+async def list_folders(params: ListFoldersInput) -> ListFoldersResponse:
     """
     List mail folders in the mailbox.
 
@@ -50,20 +59,20 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
     Returns:
         Structured mail folder data.
     """
-    g = get_graph(profile)
-    params: dict = {
+    g = get_graph(params.profile)
+    query: dict = {
         "$top": 50,
         "$select": "id,displayName,totalItemCount,unreadItemCount,childFolderCount",
     }
 
-    result = await g.get("/me/mailFolders", params=params)
+    result = await g.get("/me/mailFolders", params=query)
     folders = result.get("value", [])
 
     all_folders = list(folders)
 
     for folder in folders:
         child_count = folder.get("childFolderCount", 0)
-        if include_child_folders and child_count > 0:
+        if params.include_child_folders and child_count > 0:
             folder_id = folder["id"]
             child_result = await g.get(
                 f"/me/mailFolders/{folder_id}/childFolders",
@@ -101,7 +110,11 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
             )
         )
 
-    return ListFoldersResponse(count=len(items), include_child_folders=include_child_folders, folders=items)
+    return ListFoldersResponse(
+        count=len(items),
+        include_child_folders=params.include_child_folders,
+        folders=items,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -110,9 +123,7 @@ async def list_folders(include_child_folders: bool = False, profile: str | None 
 
 
 async def create_folder(
-    display_name: str,
-    parent_folder_id: Optional[str] = None,
-    profile: str | None = None,
+    params: CreateFolderInput,
 ) -> CreateFolderResponse:
     """
     Create a new mail folder in the mailbox (not OneDrive — use create_drive_folder for files).
@@ -127,26 +138,26 @@ async def create_folder(
     Returns:
         Structured folder creation confirmation.
     """
-    g = get_graph(profile)
-    payload = {"displayName": display_name}
+    g = get_graph(params.profile)
+    payload = {"displayName": params.display_name}
 
-    if parent_folder_id:
+    if params.parent_folder_id:
         result = await g.post(
-            f"/me/mailFolders/{parent_folder_id}/childFolders",
+            f"/me/mailFolders/{params.parent_folder_id}/childFolders",
             json=payload,
         )
     else:
         result = await g.post("/me/mailFolders", json=payload)
 
     folder_id = (result or {}).get("id", "unknown")
-    folder_name = (result or {}).get("displayName", display_name)
+    folder_name = (result or {}).get("displayName", params.display_name)
 
     return CreateFolderResponse(
         success=True,
         action="create_folder",
         folder_id=folder_id,
         display_name=folder_name,
-        parent_folder_id=parent_folder_id,
+        parent_folder_id=params.parent_folder_id,
     )
 
 
@@ -155,7 +166,7 @@ async def create_folder(
 # ---------------------------------------------------------------------------
 
 
-async def delete_folder(folder_id: str, profile: str | None = None) -> DeleteFolderResponse:
+async def delete_folder(params: DeleteFolderInput) -> DeleteFolderResponse:
     """
     Delete a mail folder and all its contents.
 
@@ -174,18 +185,18 @@ async def delete_folder(folder_id: str, profile: str | None = None) -> DeleteFol
     Returns:
         Structured delete confirmation.
     """
-    g = get_graph(profile)
-    await g.delete(f"/me/mailFolders/{folder_id}")
-    return DeleteFolderResponse(success=True, action="delete_folder", folder_id=folder_id, irreversible=True)
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
+    g = get_graph(params.profile)
+    await g.delete(f"/me/mailFolders/{params.folder_id}")
+    return DeleteFolderResponse(
+        success=True,
+        action="delete_folder",
+        folder_id=params.folder_id,
+        irreversible=True,
+    )
 
 
 def register(server) -> None:
     """Register all folder tools with the given FastMCP server instance."""
-    server.tool(annotations=_READ_ONLY)(list_folders)
-    server.tool(annotations=_WRITE)(create_folder)
-    server.tool(annotations=_DESTRUCTIVE)(delete_folder)
+    register_tool(server, list_folders, annotations=READ_ONLY_TOOL)
+    register_tool(server, create_folder, annotations=WRITE_TOOL)
+    register_tool(server, delete_folder, annotations=DESTRUCTIVE_TOOL)

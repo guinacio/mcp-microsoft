@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 
 class MCPModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
+
+
+class FlexibleMCPModel(MCPModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
 
 class Address(MCPModel):
@@ -324,10 +328,28 @@ class EventDetailResponse(MCPModel):
     join_url: str = ""
     body: str = ""
     body_content_type: str = ""
-    recurrence: dict[str, Any] | None = None
+    recurrence: "EventRecurrenceInfo | None" = None
     recurrence_display: str = ""
     importance: str = ""
     sensitivity: str = ""
+
+
+class EventRecurrencePatternInfo(MCPModel):
+    type: str = ""
+    interval: int = 1
+
+
+class EventRecurrenceRangeInfo(FlexibleMCPModel):
+    type: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    recurrence_time_zone: str = ""
+    number_of_occurrences: int | None = None
+
+
+class EventRecurrenceInfo(MCPModel):
+    pattern: EventRecurrencePatternInfo | None = None
+    range_: EventRecurrenceRangeInfo | None = Field(default=None, alias="range")
 
 
 class CreateEventResponse(ActionResult):
@@ -497,7 +519,7 @@ class SharePointSiteInfo(MCPModel):
     last_modified_at_display: str = ""
 
 
-class SearchSharePointSitesResponse(BaseModel):
+class SearchSharePointSitesResponse(MCPModel):
     query: str = ""
     count: int = 0
     sites: list[SharePointSiteInfo] = Field(default_factory=list)
@@ -594,7 +616,7 @@ class SharePointListItemInfo(MCPModel):
     created_at_display: str = ""
     modified_at: str | None = None
     modified_at_display: str = ""
-    fields: dict[str, Any] = Field(default_factory=dict)
+    fields: "SharePointFields" = Field(default_factory=lambda: SharePointFields({}))
 
 
 class GetListItemsResponse(MCPModel):
@@ -613,7 +635,7 @@ class CreateListItemResponse(ActionResult):
     site_id: str = ""
     list_id: str = ""
     item_id: str = ""
-    fields: dict[str, Any] = Field(default_factory=dict)
+    fields: SharePointFields = Field(default_factory=lambda: SharePointFields({}))
 
 
 class UpdateListItemResponse(ActionResult):
@@ -621,7 +643,7 @@ class UpdateListItemResponse(ActionResult):
     list_id: str = ""
     item_id: str = ""
     updated_fields: list[str] = Field(default_factory=list)
-    fields: dict[str, Any] = Field(default_factory=dict)
+    fields: SharePointFields = Field(default_factory=lambda: SharePointFields({}))
 
 
 class SearchHit(MCPModel):
@@ -794,3 +816,238 @@ class GetContactPhotoResponse(ActionResult):
     photo_base64: str = ""
     saved_path: str = ""
     size_bytes: int = 0
+
+
+class ServiceFlagsResponse(MCPModel):
+    mail: bool = True
+    calendar: bool = True
+    contacts: bool = True
+    onedrive: bool = True
+    sharepoint: bool = False
+    teams: bool = False
+    drafts: bool = True
+    folders: bool = True
+    attachments: bool = True
+
+
+class TeamInfo(MCPModel):
+    id: str = ""
+    display_name: str = ""
+    description: str = ""
+    visibility: str = ""
+    web_url: str = ""
+    is_archived: bool | None = None
+
+
+class TeamsListJoinedResponse(MCPModel):
+    count: int = 0
+    teams: list[TeamInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class TeamMemberSettingsInfo(FlexibleMCPModel):
+    allow_create_update_channels: bool | None = None
+    allow_delete_channels: bool | None = None
+    allow_add_remove_apps: bool | None = None
+    allow_create_update_remove_tabs: bool | None = None
+    allow_create_update_remove_connectors: bool | None = None
+
+
+class TeamGuestSettingsInfo(FlexibleMCPModel):
+    allow_create_update_channels: bool | None = None
+    allow_delete_channels: bool | None = None
+
+
+class TeamFunSettingsInfo(FlexibleMCPModel):
+    allow_giphy: bool | None = None
+    giphy_content_rating: str = ""
+    allow_stickers_and_memes: bool | None = None
+    allow_custom_memes: bool | None = None
+
+
+class TeamDetailResponse(TeamInfo):
+    member_settings: TeamMemberSettingsInfo = Field(default_factory=TeamMemberSettingsInfo)
+    guest_settings: TeamGuestSettingsInfo = Field(default_factory=TeamGuestSettingsInfo)
+    fun_settings: TeamFunSettingsInfo = Field(default_factory=TeamFunSettingsInfo)
+
+
+class ChannelInfo(MCPModel):
+    id: str = ""
+    display_name: str = ""
+    description: str = ""
+    channel_type: str = ""
+    web_url: str = ""
+    is_favorite_by_default: bool = False
+
+
+class TeamsListChannelsResponse(MCPModel):
+    team_id: str = ""
+    count: int = 0
+    channels: list[ChannelInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class ChannelDetailResponse(ChannelInfo):
+    pass
+
+
+class CreateChannelResponse(ActionResult):
+    team_id: str = ""
+    channel_id: str = ""
+    display_name: str = ""
+    description: str = ""
+    web_url: str = ""
+    dry_run: bool = False
+    requires_confirmation: bool = False
+
+
+class TeamsMessageInfo(MCPModel):
+    id: str = ""
+    created_at: str = ""
+    created_at_display: str = ""
+    last_modified_at: str = ""
+    from_display: str = ""
+    body: str = ""
+    body_content_type: str = ""
+    subject: str = ""
+    web_url: str = ""
+    reply_to_id: str = ""
+    importance: str = ""
+
+
+class TeamsListChannelMessagesResponse(MCPModel):
+    team_id: str = ""
+    channel_id: str = ""
+    count: int = 0
+    messages: list[TeamsMessageInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class TeamsReactionInfo(FlexibleMCPModel):
+    reaction_type: str = ""
+    created_at: str = ""
+    user_display: str = ""
+
+
+class TeamsMessageAttachmentInfo(FlexibleMCPModel):
+    id: str = ""
+    name: str = ""
+    content_type: str = ""
+    content_url: str = ""
+    thumbnail_url: str = ""
+
+
+class TeamsMentionInfo(FlexibleMCPModel):
+    id: int | str | None = None
+    mention_text: str = ""
+    mentioned_display: str = ""
+
+
+class ChannelMessageDetailResponse(TeamsMessageInfo):
+    reactions: list[TeamsReactionInfo] = Field(default_factory=list)
+    attachments: list[TeamsMessageAttachmentInfo] = Field(default_factory=list)
+    mentions: list[TeamsMentionInfo] = Field(default_factory=list)
+
+
+class SendTeamsMessageResponse(ActionResult):
+    id: str = ""
+    parent_message_id: str = ""
+    chat_id: str = ""
+    web_url: str = ""
+    created_at: str = ""
+    created_at_display: str = ""
+
+
+class TeamsListRepliesResponse(MCPModel):
+    team_id: str = ""
+    channel_id: str = ""
+    parent_message_id: str = ""
+    count: int = 0
+    replies: list[TeamsMessageInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class ChatInfo(MCPModel):
+    id: str = ""
+    chat_type: str = ""
+    topic: str = ""
+    created_at: str = ""
+    created_at_display: str = ""
+    last_updated_at: str = ""
+    last_updated_at_display: str = ""
+    web_url: str = ""
+
+
+class TeamsListChatsResponse(MCPModel):
+    count: int = 0
+    chats: list[ChatInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class ChatMemberInfo(MCPModel):
+    id: str = ""
+    display_name: str = ""
+    email: str = ""
+    roles: list[str] = Field(default_factory=list)
+
+
+class ChatDetailResponse(ChatInfo):
+    members: list[ChatMemberInfo] = Field(default_factory=list)
+
+
+class TeamsListChatMessagesResponse(MCPModel):
+    chat_id: str = ""
+    count: int = 0
+    messages: list[TeamsMessageInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class CreateTeamsChatResponse(ActionResult):
+    id: str = ""
+    chat_type: str = ""
+    topic: str = ""
+    web_url: str = ""
+    created_at: str = ""
+    created_at_display: str = ""
+
+
+class OnlineMeetingInfo(MCPModel):
+    id: str = ""
+    subject: str = ""
+    join_web_url: str = ""
+    join_meeting_id: str = ""
+    start: str = ""
+    end: str = ""
+    start_display: str = ""
+    end_display: str = ""
+    created_at: str = ""
+
+
+class CreateTeamsMeetingResponse(ActionResult, OnlineMeetingInfo):
+    pass
+
+
+class TeamsMeetingParticipantInfo(FlexibleMCPModel):
+    upn: str = ""
+    role: str = ""
+    identity_display: str = ""
+
+
+class TeamsMeetingParticipantsInfo(FlexibleMCPModel):
+    organizer: TeamsMeetingParticipantInfo | None = None
+    attendees: list[TeamsMeetingParticipantInfo] = Field(default_factory=list)
+    producers: list[TeamsMeetingParticipantInfo] = Field(default_factory=list)
+    contributors: list[TeamsMeetingParticipantInfo] = Field(default_factory=list)
+
+
+class MeetingDetailResponse(OnlineMeetingInfo):
+    participants: TeamsMeetingParticipantsInfo = Field(default_factory=TeamsMeetingParticipantsInfo)
+    video_teleconference_id: str = ""
+
+
+class TeamsListMeetingsResponse(MCPModel):
+    start_after: str = ""
+    start_before: str = ""
+    count: int = 0
+    meetings: list[OnlineMeetingInfo] = Field(default_factory=list)
+    next_link: str | None = None

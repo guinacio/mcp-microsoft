@@ -16,9 +16,15 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, get_args, get_origin
+from typing import Any, Self, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +164,7 @@ class ToolRequestModel(BaseModel):
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_tool_params(cls, data: Any) -> "ToolRequestModel":
+    def from_tool_params(cls, data: Any) -> Self:
         """Validate and construct the model from raw tool parameters.
 
         Equivalent to ``cls.model_validate(data)`` but provides a stable,

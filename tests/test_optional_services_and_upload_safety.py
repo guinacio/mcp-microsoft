@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import base64
-import importlib
 from pathlib import Path
 
 import pytest
 from fastmcp import FastMCP
 
+from mcp_microsoft.config import reset_app_config
 import mcp_microsoft.feature_flags as feature_flags
 from mcp_microsoft.profiles import ProfileConfig, build_default_scopes, is_corporate_account
+from mcp_microsoft.runtime import reset_runtime_state
 from mcp_microsoft.tools import onedrive, sharepoint
+
+
+@pytest.fixture(autouse=True)
+def reset_cached_config() -> None:
+    reset_app_config()
+    yield
+    reset_app_config()
 
 
 def test_build_default_scopes_excludes_optional_services_without_flags_or_profile(
@@ -20,7 +28,7 @@ def test_build_default_scopes_excludes_optional_services_without_flags_or_profil
     monkeypatch.setattr(
         feature_flags,
         "_resolve_profile_for_detection",
-        lambda _profile_name: (_ for _ in ()).throw(ValueError("no profile")),
+        lambda _profile_name, config=None: (_ for _ in ()).throw(ValueError("no profile")),
     )
 
     scopes = build_default_scopes()
@@ -51,7 +59,11 @@ def test_build_default_scopes_auto_enable_optional_services_for_common_profile(
     monkeypatch.setattr(
         feature_flags,
         "_resolve_profile_for_detection",
-        lambda _profile_name: ProfileConfig(name="default", client_id="client", tenant_id="common"),
+        lambda _profile_name, config=None: ProfileConfig(
+            name="default",
+            client_id="client",
+            tenant_id="common",
+        ),
     )
 
     scopes = build_default_scopes("default")
@@ -69,7 +81,11 @@ def test_build_default_scopes_explicit_false_overrides_corporate_fallback(
     monkeypatch.setattr(
         feature_flags,
         "_resolve_profile_for_detection",
-        lambda _profile_name: ProfileConfig(name="default", client_id="client", tenant_id="common"),
+        lambda _profile_name, config=None: ProfileConfig(
+            name="default",
+            client_id="client",
+            tenant_id="common",
+        ),
     )
 
     scopes = build_default_scopes("default")
@@ -90,25 +106,28 @@ async def test_optional_services_auto_register_for_common_profile_without_flags(
     tmp_path: Path,
 ) -> None:
     import mcp_microsoft.server as server_mod
-    from mcp_microsoft.profiles import ProfileManager
 
     monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
     monkeypatch.setenv("MS365_CLIENT_ID", "client-id")
     monkeypatch.setenv("MS365_TENANT_ID", "common")
     monkeypatch.delenv("MCP_ENABLE_TEAMS", raising=False)
     monkeypatch.delenv("MCP_ENABLE_SHAREPOINT", raising=False)
-    ProfileManager.reset()
-    importlib.reload(server_mod)
-    tool_names = {tool.name for tool in await server_mod.mcp.list_tools(run_middleware=False)}
+    reset_runtime_state()
+    tool_names = {
+        tool.name
+        for tool in await server_mod.get_mcp_server(reset=True).list_tools(run_middleware=False)
+    }
 
     assert "search_sharepoint_sites" in tool_names
     assert "teams_list_joined" in tool_names
 
     monkeypatch.setenv("MCP_ENABLE_TEAMS", "false")
     monkeypatch.setenv("MCP_ENABLE_SHAREPOINT", "false")
-    ProfileManager.reset()
-    importlib.reload(server_mod)
-    tool_names = {tool.name for tool in await server_mod.mcp.list_tools(run_middleware=False)}
+    reset_runtime_state()
+    tool_names = {
+        tool.name
+        for tool in await server_mod.get_mcp_server(reset=True).list_tools(run_middleware=False)
+    }
 
     assert "search_sharepoint_sites" not in tool_names
     assert "teams_list_joined" not in tool_names
@@ -118,8 +137,7 @@ async def test_optional_services_auto_register_for_common_profile_without_flags(
     monkeypatch.delenv("MS365_CREDENTIALS_DIR", raising=False)
     monkeypatch.delenv("MCP_ENABLE_TEAMS", raising=False)
     monkeypatch.delenv("MCP_ENABLE_SHAREPOINT", raising=False)
-    ProfileManager.reset()
-    importlib.reload(server_mod)
+    reset_runtime_state()
 
 
 @pytest.mark.asyncio
@@ -140,9 +158,11 @@ async def test_onedrive_base64_upload_uses_generated_temp_file(
     monkeypatch.setattr(onedrive, "get_graph", lambda _profile: DummyGraph())
 
     result = await onedrive.upload_file(
-        local_path=None,
-        filename=str(dangerous_target),
-        content_base64=base64.b64encode(payload).decode("ascii"),
+        onedrive.UploadFileInput(
+            local_path=None,
+            filename=str(dangerous_target),
+            content_base64=base64.b64encode(payload).decode("ascii"),
+        )
     )
 
     assert result.success is True
@@ -169,11 +189,13 @@ async def test_sharepoint_base64_upload_uses_generated_temp_file(
     monkeypatch.setattr(sharepoint, "_get_sharepoint_graph", lambda _profile: DummyGraph())
 
     result = await sharepoint.upload_to_site(
-        "site-id",
-        "drive-id",
-        local_path=None,
-        filename=str(dangerous_target),
-        content_base64=base64.b64encode(payload).decode("ascii"),
+        sharepoint.UploadToSiteInput(
+            site_id="site-id",
+            drive_id="drive-id",
+            local_path=None,
+            filename=str(dangerous_target),
+            content_base64=base64.b64encode(payload).decode("ascii"),
+        )
     )
 
     assert result.success is True

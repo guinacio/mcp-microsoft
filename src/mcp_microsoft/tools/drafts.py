@@ -13,10 +13,12 @@ Implemented:
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Union
+from typing import Literal
 
-from mcp.types import ToolAnnotations
-
+from mcp_microsoft.common.mail_utils import format_mail_datetime, parse_recipients, recipient_values
+from mcp_microsoft.common.text import strip_html
+from mcp_microsoft.common.request_model import ToolRequestModel
+from mcp_microsoft.common.tooling import READ_ONLY_TOOL, WRITE_TOOL, register_tool
 from mcp_microsoft.models import (
     CreateDraftResponse,
     DraftDetailResponse,
@@ -26,23 +28,50 @@ from mcp_microsoft.models import (
     UpdateDraftResponse,
 )
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.tools.mail import _fmt_date, _parse_recipients, _recipient_values
 
 # ---------------------------------------------------------------------------
 # create_draft
 # ---------------------------------------------------------------------------
 
 BodyType = Literal["text", "html"]
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
-_WRITE = ToolAnnotations(destructiveHint=False, openWorldHint=True)
+
+
+class CreateDraftInput(ToolRequestModel):
+    to: str | list[str]
+    subject: str
+    body: str
+    cc: str | list[str] | None = None
+    body_type: BodyType = "text"
+    profile: str | None = None
+
+
+class ListDraftsInput(ToolRequestModel):
+    max_results: int = 10
+    profile: str | None = None
+
+
+class GetDraftInput(ToolRequestModel):
+    draft_id: str
+    profile: str | None = None
+
+
+class UpdateDraftInput(ToolRequestModel):
+    draft_id: str
+    subject: str | None = None
+    body: str | None = None
+    to: str | list[str] | None = None
+    cc: str | list[str] | None = None
+    body_type: BodyType = "text"
+    profile: str | None = None
+
+
+class SendDraftInput(ToolRequestModel):
+    draft_id: str
+    profile: str | None = None
+
 
 async def create_draft(
-    to: Union[str, list[str]],
-    subject: str,
-    body: str,
-    cc: Optional[Union[str, list[str]]] = None,
-    body_type: BodyType = "text",
-    profile: str | None = None,
+    params: CreateDraftInput,
 ) -> CreateDraftResponse:
     """
     Create a new draft message (without sending).
@@ -58,17 +87,17 @@ async def create_draft(
     Returns:
         Structured draft creation confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     message: dict = {
-        "subject": subject,
+        "subject": params.subject,
         "body": {
-            "contentType": "HTML" if body_type.lower() == "html" else "Text",
-            "content": body,
+            "contentType": "HTML" if params.body_type.lower() == "html" else "Text",
+            "content": params.body,
         },
-        "toRecipients": _parse_recipients(to),
+        "toRecipients": parse_recipients(params.to),
     }
-    if cc:
-        message["ccRecipients"] = _parse_recipients(cc)
+    if params.cc:
+        message["ccRecipients"] = parse_recipients(params.cc)
 
     result = await g.post("/me/messages", json=message)
 
@@ -79,8 +108,8 @@ async def create_draft(
         draft_id=draft_id,
         to=[addr.get("emailAddress", {}).get("address", "") for addr in message["toRecipients"]],
         cc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("ccRecipients", [])],
-        subject=subject,
-        body_type=body_type,
+        subject=params.subject,
+        body_type=params.body_type,
     )
 
 
@@ -89,7 +118,7 @@ async def create_draft(
 # ---------------------------------------------------------------------------
 
 
-async def list_drafts(max_results: int = 10, profile: str | None = None) -> ListDraftsResponse:
+async def list_drafts(params: ListDraftsInput) -> ListDraftsResponse:
     """
     List draft messages from the Drafts folder.
 
@@ -100,14 +129,14 @@ async def list_drafts(max_results: int = 10, profile: str | None = None) -> List
     Returns:
         Structured draft summaries.
     """
-    g = get_graph(profile)
-    params: dict = {
-        "$top": max_results,
+    g = get_graph(params.profile)
+    query: dict = {
+        "$top": params.max_results,
         "$select": "id,subject,toRecipients,lastModifiedDateTime,bodyPreview",
         "$orderby": "lastModifiedDateTime desc",
     }
 
-    result = await g.get("/me/mailFolders/drafts/messages", params=params)
+    result = await g.get("/me/mailFolders/drafts/messages", params=query)
     drafts = result.get("value", [])
 
     items: list[DraftSummary] = []
@@ -116,9 +145,9 @@ async def list_drafts(max_results: int = 10, profile: str | None = None) -> List
             DraftSummary(
                 id=draft.get("id", ""),
                 subject=draft.get("subject") or "(no subject)",
-                to=_recipient_values(draft.get("toRecipients", [])),
+                to=recipient_values(draft.get("toRecipients", [])),
                 last_modified_at=draft.get("lastModifiedDateTime"),
-                last_modified_at_display=_fmt_date(draft.get("lastModifiedDateTime")),
+                last_modified_at_display=format_mail_datetime(draft.get("lastModifiedDateTime")),
                 preview=(draft.get("bodyPreview") or "").replace("\n", " ")[:100],
             )
         )
@@ -131,7 +160,7 @@ async def list_drafts(max_results: int = 10, profile: str | None = None) -> List
 # ---------------------------------------------------------------------------
 
 
-async def get_draft(draft_id: str, profile: str | None = None) -> DraftDetailResponse:
+async def get_draft(params: GetDraftInput) -> DraftDetailResponse:
     """
     Fetch a draft message by ID.
 
@@ -142,37 +171,34 @@ async def get_draft(draft_id: str, profile: str | None = None) -> DraftDetailRes
     Returns:
         Structured draft details.
     """
-    g = get_graph(profile)
-    params = {
+    g = get_graph(params.profile)
+    query = {
         "$select": (
             "id,subject,from,toRecipients,ccRecipients,bccRecipients,"
             "lastModifiedDateTime,body,bodyPreview,isDraft"
         ),
     }
 
-    draft = await g.get(f"/me/messages/{draft_id}", params=params)
+    draft = await g.get(f"/me/messages/{params.draft_id}", params=query)
 
     subject = draft.get("subject") or "(no subject)"
-    modified = _fmt_date(draft.get("lastModifiedDateTime"))
+    modified = format_mail_datetime(draft.get("lastModifiedDateTime"))
 
     body_obj = draft.get("body") or {}
     content_type = (body_obj.get("contentType") or "text").lower()
     raw_body = body_obj.get("content", "")
 
-    # Import _strip_html locally to avoid circular import issues at module level
-    from mcp_microsoft.tools.mail import _strip_html
-
     if content_type == "html":
-        body_text = _strip_html(raw_body)
+        body_text = strip_html(raw_body)
     else:
         body_text = raw_body
 
     return DraftDetailResponse(
-        id=draft_id,
+        id=params.draft_id,
         subject=subject,
-        to=_recipient_values(draft.get("toRecipients", [])),
-        cc=_recipient_values(draft.get("ccRecipients", [])),
-        bcc=_recipient_values(draft.get("bccRecipients", [])),
+        to=recipient_values(draft.get("toRecipients", [])),
+        cc=recipient_values(draft.get("ccRecipients", [])),
+        bcc=recipient_values(draft.get("bccRecipients", [])),
         last_modified_at=draft.get("lastModifiedDateTime"),
         last_modified_at_display=modified,
         body=body_text,
@@ -187,13 +213,7 @@ async def get_draft(draft_id: str, profile: str | None = None) -> DraftDetailRes
 
 
 async def update_draft(
-    draft_id: str,
-    subject: Optional[str] = None,
-    body: Optional[str] = None,
-    to: Optional[Union[str, list[str]]] = None,
-    cc: Optional[Union[str, list[str]]] = None,
-    body_type: BodyType = "text",
-    profile: str | None = None,
+    params: UpdateDraftInput,
 ) -> UpdateDraftResponse:
     """
     Update an existing draft message. Only provided fields are changed.
@@ -210,33 +230,33 @@ async def update_draft(
     Returns:
         Structured update confirmation.
     """
-    g = get_graph(profile)
+    g = get_graph(params.profile)
     patch: dict = {}
 
-    if subject is not None:
-        patch["subject"] = subject
-    if body is not None:
+    if params.subject is not None:
+        patch["subject"] = params.subject
+    if params.body is not None:
         patch["body"] = {
-            "contentType": "HTML" if body_type.lower() == "html" else "Text",
-            "content": body,
+            "contentType": "HTML" if params.body_type.lower() == "html" else "Text",
+            "content": params.body,
         }
-    if to is not None:
-        patch["toRecipients"] = _parse_recipients(to)
-    if cc is not None:
-        patch["ccRecipients"] = _parse_recipients(cc)
+    if params.to is not None:
+        patch["toRecipients"] = parse_recipients(params.to)
+    if params.cc is not None:
+        patch["ccRecipients"] = parse_recipients(params.cc)
 
     if not patch:
         return UpdateDraftResponse(
             success=False,
             action="update_draft",
-            draft_id=draft_id,
+            draft_id=params.draft_id,
             updated_fields=[],
             error="No fields to update.",
         )
 
-    result = await g.patch(f"/me/messages/{draft_id}", json=patch)
+    result = await g.patch(f"/me/messages/{params.draft_id}", json=patch)
 
-    updated_id = (result or {}).get("id", draft_id)
+    updated_id = (result or {}).get("id", params.draft_id)
     updated_fields = ", ".join(patch.keys())
     return UpdateDraftResponse(
         success=True,
@@ -252,7 +272,7 @@ async def update_draft(
 # ---------------------------------------------------------------------------
 
 
-async def send_draft(draft_id: str, profile: str | None = None) -> SendDraftResponse:
+async def send_draft(params: SendDraftInput) -> SendDraftResponse:
     """
     Send an existing draft message.
 
@@ -263,20 +283,15 @@ async def send_draft(draft_id: str, profile: str | None = None) -> SendDraftResp
     Returns:
         Structured send confirmation.
     """
-    g = get_graph(profile)
-    await g.post(f"/me/messages/{draft_id}/send", json={})
-    return SendDraftResponse(success=True, action="send_draft", draft_id=draft_id)
-
-
-# ---------------------------------------------------------------------------
-# Tool registration
-# ---------------------------------------------------------------------------
+    g = get_graph(params.profile)
+    await g.post(f"/me/messages/{params.draft_id}/send", json={})
+    return SendDraftResponse(success=True, action="send_draft", draft_id=params.draft_id)
 
 
 def register(server) -> None:
     """Register all draft tools with the given FastMCP server instance."""
-    server.tool(annotations=_WRITE)(create_draft)
-    server.tool(annotations=_READ_ONLY)(list_drafts)
-    server.tool(annotations=_READ_ONLY)(get_draft)
-    server.tool(annotations=_WRITE)(update_draft)
-    server.tool(annotations=_WRITE)(send_draft)
+    register_tool(server, create_draft, annotations=WRITE_TOOL)
+    register_tool(server, list_drafts, annotations=READ_ONLY_TOOL)
+    register_tool(server, get_draft, annotations=READ_ONLY_TOOL)
+    register_tool(server, update_draft, annotations=WRITE_TOOL)
+    register_tool(server, send_draft, annotations=WRITE_TOOL)
