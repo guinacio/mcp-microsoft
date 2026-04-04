@@ -75,7 +75,11 @@ async def create_draft(
     params: CreateDraftInput,
 ) -> CreateDraftResponse:
     """
-    Create a new draft message (without sending).
+    Create a new unsent email draft message in the Drafts folder.
+
+    Use this when you want to compose an email now and send it later with
+    send_draft. The result includes the draft message ID, which can also be
+    used with get_draft or update_draft.
 
     Args:
         to: Recipient address(es). Comma-separated string or list.
@@ -119,7 +123,7 @@ async def create_draft(
 
 async def list_drafts(params: ListDraftsInput) -> ListDraftsResponse:
     """
-    List draft messages from the Drafts folder.
+    List unsent email drafts from the Drafts folder.
 
     Args:
         max_results: Maximum number of drafts to return (1-100). Defaults to 10.
@@ -161,7 +165,10 @@ async def list_drafts(params: ListDraftsInput) -> ListDraftsResponse:
 
 async def get_draft(params: GetDraftInput) -> DraftDetailResponse:
     """
-    Fetch a draft message by ID.
+    Get a draft email by ID, including its full body, recipients, and metadata.
+
+    Use this after list_drafts or create_draft when you need the complete draft
+    content instead of just a preview.
 
     Args:
         draft_id: The Graph message ID of the draft.
@@ -214,7 +221,7 @@ async def update_draft(
     params: UpdateDraftInput,
 ) -> UpdateDraftResponse:
     """
-    Update an existing draft message. Only provided fields are changed.
+    Update an existing email draft. Only provided fields are changed.
 
     Args:
         draft_id: The Graph message ID of the draft to update.
@@ -271,7 +278,7 @@ async def update_draft(
 
 async def send_draft(params: SendDraftInput) -> SendDraftResponse:
     """
-    Send an existing draft message.
+    Send an existing email draft from the Drafts folder.
 
     Args:
         draft_id: The Graph message ID of the draft to send.

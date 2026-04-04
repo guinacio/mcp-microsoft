@@ -439,11 +439,13 @@ async def list_contact_folders(
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Structured list of contact folders with id, displayName, and item count.
+        Structured list of contact folders with id and displayName.
+        Microsoft Graph contactFolder does not expose an item count field, so
+        total_item_count is returned as 0 for compatibility.
     """
     g = get_graph(params.profile)
     query = {
-        "$select": "id,displayName,parentFolderId,totalItemCount",
+        "$select": "id,displayName,parentFolderId",
         "$top": 100,
     }
 
@@ -457,7 +459,7 @@ async def list_contact_folders(
                 id=f.id,
                 display_name=f.display_name,
                 parent_folder_id=f.parent_folder_id or "",
-                total_item_count=f.total_item_count or 0,
+                total_item_count=0,
             )
             for f in folders
         ],

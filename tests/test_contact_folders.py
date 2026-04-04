@@ -48,13 +48,11 @@ async def test_list_contact_folders_returns_structured_response(monkeypatch: pyt
                         "id": "folder-1",
                         "displayName": "Family",
                         "parentFolderId": "root-folder",
-                        "totalItemCount": 5,
                     },
                     {
                         "id": "folder-2",
                         "displayName": "Work Contacts",
                         "parentFolderId": "root-folder",
-                        "totalItemCount": 42,
                     },
                 ]
             }
@@ -70,11 +68,11 @@ async def test_list_contact_folders_returns_structured_response(monkeypatch: pyt
     assert isinstance(family, ContactFolderInfo)
     assert family.display_name == "Family"
     assert family.parent_folder_id == "root-folder"
-    assert family.total_item_count == 5
+    assert family.total_item_count == 0
 
     work = next(f for f in result.folders if f.id == "folder-2")
     assert work.display_name == "Work Contacts"
-    assert work.total_item_count == 42
+    assert work.total_item_count == 0
 
 
 @pytest.mark.asyncio
@@ -125,7 +123,8 @@ async def test_list_contact_folders_selects_correct_fields(monkeypatch: pytest.M
     select = captured["params"].get("$select", "")
     assert "id" in select
     assert "displayName" in select
-    assert "totalItemCount" in select
+    assert "parentFolderId" in select
+    assert "totalItemCount" not in select
 
 
 @pytest.mark.asyncio
@@ -140,7 +139,6 @@ async def test_list_contact_folders_null_safe_fields(monkeypatch: pytest.MonkeyP
                         "id": "folder-sparse",
                         "displayName": "Sparse",
                         "parentFolderId": None,
-                        "totalItemCount": None,
                     }
                 ]
             }
@@ -165,7 +163,6 @@ async def test_list_contact_folders_single_folder(monkeypatch: pytest.MonkeyPatc
                         "id": "folder-only",
                         "displayName": "Favorites",
                         "parentFolderId": "parent-id",
-                        "totalItemCount": 3,
                     }
                 ]
             }

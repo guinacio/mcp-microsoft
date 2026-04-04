@@ -100,7 +100,6 @@ class GraphContactFolder(GraphModel):
     id: str = ""
     display_name: str = Field(default="", alias="displayName")
     parent_folder_id: str | None = Field(default=None, alias="parentFolderId")
-    total_item_count: int | None = Field(default=None, alias="totalItemCount")
 
 
 class GraphSender(GraphModel):

@@ -287,7 +287,6 @@ async def test_list_contact_folders_returns_structured_response(monkeypatch: pyt
                         "id": "folder-1",
                         "displayName": "Contacts",
                         "parentFolderId": "parent-1",
-                        "totalItemCount": 42,
                     }
                 ]
             }
@@ -298,7 +297,7 @@ async def test_list_contact_folders_returns_structured_response(monkeypatch: pyt
     assert isinstance(result, ListContactFoldersResponse)
     assert result.count == 1
     assert result.folders[0].display_name == "Contacts"
-    assert result.folders[0].total_item_count == 42
+    assert result.folders[0].total_item_count == 0
 
 
 # ---------------------------------------------------------------------------
