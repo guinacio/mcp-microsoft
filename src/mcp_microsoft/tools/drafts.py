@@ -19,6 +19,7 @@ from mcp_microsoft.common.mail_utils import format_mail_datetime, parse_recipien
 from mcp_microsoft.common.text import strip_html
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.tooling import READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.graph_types import GraphMessage, parse_graph_collection
 from mcp_microsoft.models import (
     CreateDraftResponse,
     DraftDetailResponse,
@@ -99,13 +100,11 @@ async def create_draft(
     if params.cc:
         message["ccRecipients"] = parse_recipients(params.cc)
 
-    result = await g.post("/me/messages", json=message)
-
-    draft_id = (result or {}).get("id", "unknown")
+    created = GraphMessage.model_validate(await g.post("/me/messages", json=message) or {})
     return CreateDraftResponse(
         success=True,
         action="create_draft",
-        draft_id=draft_id,
+        draft_id=created.id or "unknown",
         to=[addr.get("emailAddress", {}).get("address", "") for addr in message["toRecipients"]],
         cc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("ccRecipients", [])],
         subject=params.subject,
@@ -137,18 +136,18 @@ async def list_drafts(params: ListDraftsInput) -> ListDraftsResponse:
     }
 
     result = await g.get("/me/mailFolders/drafts/messages", params=query)
-    drafts = result.get("value", [])
+    drafts = parse_graph_collection(result, GraphMessage)
 
     items: list[DraftSummary] = []
     for draft in drafts:
         items.append(
             DraftSummary(
-                id=draft.get("id", ""),
-                subject=draft.get("subject") or "(no subject)",
-                to=recipient_values(draft.get("toRecipients", [])),
-                last_modified_at=draft.get("lastModifiedDateTime"),
-                last_modified_at_display=format_mail_datetime(draft.get("lastModifiedDateTime")),
-                preview=(draft.get("bodyPreview") or "").replace("\n", " ")[:100],
+                id=draft.id,
+                subject=draft.subject or "(no subject)",
+                to=recipient_values(draft.to_recipients),
+                last_modified_at=draft.last_modified_date_time,
+                last_modified_at_display=format_mail_datetime(draft.last_modified_date_time),
+                preview=(draft.body_preview or "").replace("\n", " ")[:100],
             )
         )
 
@@ -179,14 +178,13 @@ async def get_draft(params: GetDraftInput) -> DraftDetailResponse:
         ),
     }
 
-    draft = await g.get(f"/me/messages/{params.draft_id}", params=query)
+    draft = GraphMessage.model_validate(await g.get(f"/me/messages/{params.draft_id}", params=query))
 
-    subject = draft.get("subject") or "(no subject)"
-    modified = format_mail_datetime(draft.get("lastModifiedDateTime"))
+    subject = draft.subject or "(no subject)"
+    modified = format_mail_datetime(draft.last_modified_date_time)
 
-    body_obj = draft.get("body") or {}
-    content_type = (body_obj.get("contentType") or "text").lower()
-    raw_body = body_obj.get("content", "")
+    content_type = (draft.body.content_type or "text").lower()
+    raw_body = draft.body.content or ""
 
     if content_type == "html":
         body_text = strip_html(raw_body)
@@ -196,14 +194,14 @@ async def get_draft(params: GetDraftInput) -> DraftDetailResponse:
     return DraftDetailResponse(
         id=params.draft_id,
         subject=subject,
-        to=recipient_values(draft.get("toRecipients", [])),
-        cc=recipient_values(draft.get("ccRecipients", [])),
-        bcc=recipient_values(draft.get("bccRecipients", [])),
-        last_modified_at=draft.get("lastModifiedDateTime"),
+        to=recipient_values(draft.to_recipients),
+        cc=recipient_values(draft.cc_recipients),
+        bcc=recipient_values(draft.bcc_recipients),
+        last_modified_at=draft.last_modified_date_time,
         last_modified_at_display=modified,
         body=body_text,
         body_content_type=content_type,
-        is_draft=draft.get("isDraft", True),
+        is_draft=draft.is_draft,
     )
 
 
@@ -255,13 +253,12 @@ async def update_draft(
         )
 
     result = await g.patch(f"/me/messages/{params.draft_id}", json=patch)
-
-    updated_id = (result or {}).get("id", params.draft_id)
+    updated = GraphMessage.model_validate(result or {"id": params.draft_id})
     updated_fields = ", ".join(patch.keys())
     return UpdateDraftResponse(
         success=True,
         action="update_draft",
-        draft_id=updated_id,
+        draft_id=updated.id or params.draft_id,
         updated_fields=list(patch.keys()),
         updated_fields_display=updated_fields,
     )

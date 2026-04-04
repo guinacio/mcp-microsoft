@@ -20,6 +20,7 @@ Implemented:
 from __future__ import annotations
 
 from typing import Any, Literal, Optional, Union
+from pydantic import model_validator
 
 from mcp_microsoft.common.formatting import format_datetime_display
 from mcp_microsoft.common.request_model import ToolRequestModel
@@ -128,6 +129,12 @@ class RsvpEventInput(ToolRequestModel):
     comment: str | None = None
     send_response: bool = True
     profile: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_comment_requires_send_response(self):
+        if self.comment and not self.send_response:
+            raise ValueError("comment requires send_response=true for Graph RSVP actions.")
+        return self
 
 
 class GetFreeBusyInput(ToolRequestModel):
@@ -627,7 +634,7 @@ async def rsvp_event(
     Args:
         event_id: The Graph event ID to respond to.
         response: One of 'accept', 'decline', or 'tentativelyAccept'.
-        comment: Optional comment to include with the response.
+        comment: Optional comment to include with the response. Requires send_response=True.
         send_response: When True (default), send the response to the organizer.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 

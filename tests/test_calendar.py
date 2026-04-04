@@ -8,6 +8,7 @@ pattern established in test_contacts.py.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from mcp_microsoft.models import (
     CalendarInfo,
@@ -508,6 +509,49 @@ async def test_list_calendars_returns_structured_response(monkeypatch: pytest.Mo
     assert default_cal.color == "lightBlue"
     readonly_cal = next(c for c in result.calendars if not c.can_edit)
     assert readonly_cal.name == "Birthdays"
+
+
+# ---------------------------------------------------------------------------
+# rsvp_event
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rsvp_event_posts_comment_when_send_response_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def post(self, path: str, json: dict = None):
+            captured["path"] = path
+            captured["json"] = json
+            return {}
+
+    monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
+
+    result = await calendar.rsvp_event(
+        calendar.RsvpEventInput(
+            event_id="event-1",
+            response="accept",
+            comment="See you there",
+            send_response=True,
+        )
+    )
+
+    assert result.success is True
+    assert captured["path"] == "/me/events/event-1/accept"
+    assert captured["json"] == {"sendResponse": True, "comment": "See you there"}
+
+
+def test_rsvp_event_rejects_comment_when_send_response_false() -> None:
+    with pytest.raises(ValidationError, match="comment requires send_response=true"):
+        calendar.RsvpEventInput(
+            event_id="event-1",
+            response="accept",
+            comment="Do not send this",
+            send_response=False,
+        )
 
 
 # ---------------------------------------------------------------------------

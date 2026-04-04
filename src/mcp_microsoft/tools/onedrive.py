@@ -18,8 +18,9 @@ Implemented:
 from __future__ import annotations
 
 import asyncio
+import httpx
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import quote
 
 from fastmcp.server.context import Context
@@ -30,6 +31,7 @@ from mcp_microsoft.common.formatting import drive_item_payload, format_datetime_
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.transfer import upload_large_file_via_session
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.graph_types import GraphDriveItem, graph_identity_display, parse_graph_collection
 from mcp_microsoft.models import (
     CreateDriveFolderResponse,
     DeleteDriveItemResponse,
@@ -134,7 +136,7 @@ async def list_drive_items(
         path = "/me/drive/root/children"
 
     result = await g.get(path, params=query)
-    items = result.get("value", [])
+    items = parse_graph_collection(result, GraphDriveItem)
 
     return ListDriveItemsResponse(
         folder_id=params.folder_id,
@@ -168,39 +170,24 @@ async def get_drive_item(params: GetDriveItemInput) -> DriveItemDetailResponse:
         ),
     }
 
-    item = await g.get(f"/me/drive/items/{params.item_id}", params=query)
-
-    name = item.get("name", "(unnamed)")
-    item_type = "Folder" if "folder" in item else "File"
-    size = format_size_display(item.get("size", 0))
-    created = format_datetime_display(item.get("createdDateTime"))
-    modified = format_datetime_display(item.get("lastModifiedDateTime"))
-    web_url = item.get("webUrl", "")
-
-    # Parent path
-    parent_ref = item.get("parentReference") or {}
-    parent_path = parent_ref.get("path", "")
-
-    # Creator / modifier
-    created_by = ((item.get("createdBy") or {}).get("user") or {}).get("displayName", "")
-    modified_by = ((item.get("lastModifiedBy") or {}).get("user") or {}).get("displayName", "")
+    item = GraphDriveItem.model_validate(await g.get(f"/me/drive/items/{params.item_id}", params=query))
 
     return DriveItemDetailResponse(
-        id=params.item_id,
-        name=name,
-        type=item_type,
-        size_bytes=item.get("size", 0),
-        size_display=size,
-        created_at=item.get("createdDateTime"),
-        created_at_display=created,
-        created_by=created_by,
-        modified_at=item.get("lastModifiedDateTime"),
-        modified_at_display=modified,
-        modified_by=modified_by,
-        path=parent_path,
-        web_url=web_url,
-        child_count=item.get("folder", {}).get("childCount", 0),
-        mime_type=item.get("file", {}).get("mimeType", ""),
+        id=item.id or params.item_id,
+        name=item.name or "(unnamed)",
+        type="Folder" if item.folder else "File",
+        size_bytes=item.size or 0,
+        size_display=format_size_display(item.size),
+        created_at=item.created_date_time,
+        created_at_display=format_datetime_display(item.created_date_time),
+        created_by=graph_identity_display(item.created_by),
+        modified_at=item.last_modified_date_time,
+        modified_at_display=format_datetime_display(item.last_modified_date_time),
+        modified_by=graph_identity_display(item.last_modified_by),
+        path=item.parent_reference.path if item.parent_reference else "",
+        web_url=item.web_url,
+        child_count=item.folder.child_count if item.folder else 0,
+        mime_type=item.file.mime_type if item.file else "",
     )
 
 
@@ -230,7 +217,7 @@ async def search_drive(params: SearchDriveInput) -> SearchDriveResponse:
     safe_query = quote(params.query.replace("'", "''"), safe="")  # escape OData + URL-encode
     path = f"/me/drive/root/search(q='{safe_query}')"
     result = await g.get(path, params=query_params)
-    items = result.get("value", [])
+    items = parse_graph_collection(result, GraphDriveItem)
 
     return SearchDriveResponse(
         query=params.query,
@@ -271,19 +258,15 @@ async def create_drive_folder(
     else:
         path = "/me/drive/root/children"
 
-    result = await g.post(path, json=payload)
-
-    folder_id = (result or {}).get("id", "unknown")
-    folder_name = (result or {}).get("name", params.name)
-    web_url = (result or {}).get("webUrl", "")
+    created = GraphDriveItem.model_validate(await g.post(path, json=payload) or {})
 
     return CreateDriveFolderResponse(
         success=True,
         action="create_drive_folder",
-        folder_id=folder_id,
-        name=folder_name,
+        folder_id=created.id or "unknown",
+        name=created.name or params.name,
         parent_folder_id=params.parent_folder_id,
-        web_url=web_url,
+        web_url=created.web_url,
     )
 
 
@@ -358,7 +341,7 @@ async def upload_file(
 
             if ctx:
                 await ctx.info(f"Uploading {upload_name} ({format_size_display(file_size)})...")
-            result = await g.put(path, content=file_bytes)
+            result = GraphDriveItem.model_validate(await g.put(path, content=file_bytes) or {})
             if ctx:
                 await ctx.info("Upload complete.")
         else:
@@ -380,10 +363,10 @@ async def upload_file(
             if not upload_url:
                 return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="No upload URL returned.")
 
-            result = await upload_large_file_via_session(upload_url, local_path, file_size, ctx)
+            result = GraphDriveItem.model_validate(
+                await upload_large_file_via_session(upload_url, local_path, file_size, ctx) or {}
+            )
 
-        item_id = (result or {}).get("id", "unknown")
-        web_url = (result or {}).get("webUrl", "")
         size_str = format_size_display(file_size)
 
         return UploadFileResponse(
@@ -392,8 +375,8 @@ async def upload_file(
             filename=upload_name,
             size_bytes=file_size,
             size_display=size_str,
-            file_id=item_id,
-            web_url=web_url,
+            file_id=result.id or "unknown",
+            web_url=result.web_url,
             parent_folder_id=params.parent_folder_id,
         )
     finally:
@@ -430,12 +413,12 @@ async def download_file(
     """
     g = get_graph(params.profile)
     # Get item metadata first to know the filename
-    item = await g.get(
+    item = GraphDriveItem.model_validate(await g.get(
         f"/me/drive/items/{params.item_id}",
         params={"$select": "id,name,size"},
-    )
-    filename = item.get("name", "download")
-    expected_size = item.get("size", 0)
+    ) or {})
+    filename = item.name or "download"
+    expected_size = item.size or 0
 
     # Resolve output path — sanitize remote filename to prevent traversal
     dest = params.destination_path
@@ -517,11 +500,11 @@ async def move_or_copy_item(
     """
     g = get_graph(params.profile)
     # Get the destination folder's driveId for correct parentReference
-    dest_meta = await g.get(
+    dest_meta = GraphDriveItem.model_validate(await g.get(
         f"/me/drive/items/{params.destination_folder_id}",
         params={"$select": "id,parentReference"},
-    )
-    drive_id = ((dest_meta or {}).get("parentReference") or {}).get("driveId", "")
+    ) or {})
+    drive_id = dest_meta.parent_reference.drive_id if dest_meta.parent_reference else ""
 
     parent_ref: dict[str, Any] = {"id": params.destination_folder_id}
     if drive_id:
@@ -605,16 +588,15 @@ async def move_or_copy_item(
         if params.new_name:
             payload["name"] = params.new_name
 
-        result = await g.patch(f"/me/drive/items/{params.item_id}", json=payload)
-
-        new_id = (result or {}).get("id", params.item_id)
-        item_name = (result or {}).get("name", "")
+        result = GraphDriveItem.model_validate(
+            await g.patch(f"/me/drive/items/{params.item_id}", json=payload) or {"id": params.item_id}
+        )
         return MoveOrCopyItemResponse(
             success=True,
             action="move_item",
             item_id=params.item_id,
-            new_item_id=new_id,
-            name=item_name or None,
+            new_item_id=result.id or params.item_id,
+            name=result.name or None,
             destination_folder_id=params.destination_folder_id,
         )
 

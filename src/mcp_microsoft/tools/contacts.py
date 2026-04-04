@@ -23,6 +23,11 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.graph_types import (
+    GraphContact,
+    GraphContactFolder,
+    parse_graph_collection,
+)
 from mcp_microsoft.models import (
     ContactEmailAddress,
     ContactFolderInfo,
@@ -121,25 +126,27 @@ class GetContactPhotoInput(ToolRequestModel):
 # ---------------------------------------------------------------------------
 
 
-def _normalize_contact(c: dict[str, Any]) -> ContactInfo:
-    """Normalize a Graph contact object into a ContactInfo summary."""
+def _normalize_contact(c: GraphContact | dict[str, Any]) -> ContactInfo:
+    """Normalize a typed Graph contact object into a ContactInfo summary."""
+    if not isinstance(c, GraphContact):
+        c = GraphContact.model_validate(c)
     return ContactInfo(
-        id=c.get("id", ""),
-        display_name=c.get("displayName") or "",
-        given_name=c.get("givenName") or "",
-        surname=c.get("surname") or "",
+        id=c.id,
+        display_name=c.display_name or "",
+        given_name=c.given_name or "",
+        surname=c.surname or "",
         email_addresses=[
             ContactEmailAddress(
-                address=ea.get("address", ""),
-                name=ea.get("name", ""),
+                address=ea.address,
+                name=ea.name,
             )
-            for ea in (c.get("emailAddresses") or [])
+            for ea in (c.email_addresses or [])
         ],
-        mobile_phone=c.get("mobilePhone", "") or "",
-        business_phones=c.get("businessPhones") or [],
-        job_title=c.get("jobTitle", "") or "",
-        company_name=c.get("companyName", "") or "",
-        department=c.get("department", "") or "",
+        mobile_phone=c.mobile_phone or "",
+        business_phones=c.business_phones or [],
+        job_title=c.job_title or "",
+        company_name=c.company_name or "",
+        department=c.department or "",
     )
 
 
@@ -187,7 +194,7 @@ async def list_contacts(params: ListContactsInput) -> ListContactsResponse:
         path = "/me/contacts"
 
     result = await g.get(path, params=query, headers=extra_headers)
-    contacts = (result or {}).get("value", [])
+    contacts = parse_graph_collection(result or {}, GraphContact)
 
     next_link = (result or {}).get("@odata.nextLink", "")
     next_page_token: str | None = None
@@ -223,26 +230,26 @@ async def get_contact(params: GetContactInput) -> GetContactResponse:
     g = get_graph(params.profile)
     query = {"$select": _CONTACT_DETAIL_SELECT}
 
-    c = await g.get(f"/me/contacts/{params.contact_id}", params=query)
+    c = GraphContact.model_validate(await g.get(f"/me/contacts/{params.contact_id}", params=query))
 
     return GetContactResponse(
-        id=params.contact_id,
-        display_name=c.get("displayName") or "",
-        given_name=c.get("givenName") or "",
-        surname=c.get("surname") or "",
+        id=c.id or params.contact_id,
+        display_name=c.display_name or "",
+        given_name=c.given_name or "",
+        surname=c.surname or "",
         email_addresses=[
             ContactEmailAddress(
-                address=ea.get("address", ""),
-                name=ea.get("name", ""),
+                address=ea.address,
+                name=ea.name,
             )
-            for ea in (c.get("emailAddresses") or [])
+            for ea in (c.email_addresses or [])
         ],
-        mobile_phone=c.get("mobilePhone", "") or "",
-        business_phones=c.get("businessPhones") or [],
-        job_title=c.get("jobTitle", "") or "",
-        company_name=c.get("companyName", "") or "",
-        department=c.get("department", "") or "",
-        notes=c.get("personalNotes", "") or "",
+        mobile_phone=c.mobile_phone or "",
+        business_phones=c.business_phones or [],
+        job_title=c.job_title or "",
+        company_name=c.company_name or "",
+        department=c.department or "",
+        notes=c.personal_notes or "",
     )
 
 
@@ -303,16 +310,13 @@ async def create_contact(params: CreateContactInput) -> CreateContactResponse:
     else:
         path = "/me/contacts"
 
-    result = await g.post(path, json=body)
-
-    contact_id = (result or {}).get("id", "unknown")
-    created_name = (result or {}).get("displayName", params.display_name)
+    created = GraphContact.model_validate(await g.post(path, json=body) or {})
 
     return CreateContactResponse(
         success=True,
         action="create_contact",
-        contact_id=contact_id,
-        display_name=created_name,
+        contact_id=created.id or "unknown",
+        display_name=created.display_name or params.display_name,
         folder_id=params.folder_id,
     )
 
@@ -380,13 +384,13 @@ async def update_contact(params: UpdateContactInput) -> UpdateContactResponse:
         )
 
     result = await g.patch(f"/me/contacts/{params.contact_id}", json=patch)
-    updated_id = (result or {}).get("id", params.contact_id)
+    updated = GraphContact.model_validate(result or {"id": params.contact_id})
     updated_fields = list(patch.keys())
 
     return UpdateContactResponse(
         success=True,
         action="update_contact",
-        contact_id=updated_id,
+        contact_id=updated.id or params.contact_id,
         updated_fields=updated_fields,
         updated_fields_display=", ".join(updated_fields),
     )
@@ -444,16 +448,16 @@ async def list_contact_folders(
     }
 
     result = await g.get("/me/contactFolders", params=query)
-    folders = (result or {}).get("value", [])
+    folders = parse_graph_collection(result or {}, GraphContactFolder)
 
     return ListContactFoldersResponse(
         count=len(folders),
         folders=[
             ContactFolderInfo(
-                id=f.get("id", ""),
-                display_name=f.get("displayName", ""),
-                parent_folder_id=f.get("parentFolderId", "") or "",
-                total_item_count=f.get("totalItemCount", 0) or 0,
+                id=f.id,
+                display_name=f.display_name,
+                parent_folder_id=f.parent_folder_id or "",
+                total_item_count=f.total_item_count or 0,
             )
             for f in folders
         ],
@@ -494,7 +498,7 @@ async def search_contacts(params: SearchContactsInput) -> SearchContactsResponse
     }
 
     result = await g.get("/me/contacts", params=query_params)
-    contacts = (result or {}).get("value", [])
+    contacts = parse_graph_collection(result or {}, GraphContact)
 
     return SearchContactsResponse(
         query=params.query,

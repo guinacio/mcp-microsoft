@@ -19,6 +19,7 @@ from fastmcp.utilities.types import File
 from mcp_microsoft.common.formatting import format_size_display
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.tooling import READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.graph_types import GraphAttachment, parse_graph_collection
 from mcp_microsoft.models import AttachmentInfo, DownloadAttachmentResponse, ListAttachmentsResponse
 from mcp_microsoft.graph import get_graph
 
@@ -54,19 +55,19 @@ async def list_attachments(params: ListAttachmentsInput) -> ListAttachmentsRespo
     }
 
     result = await g.get(f"/me/messages/{params.message_id}/attachments", params=query)
-    attachments = result.get("value", [])
+    attachments = parse_graph_collection(result, GraphAttachment)
 
     items: list[AttachmentInfo] = []
     for att in attachments:
-        size_bytes = att.get("size", 0)
+        size_bytes = att.size
         items.append(
             AttachmentInfo(
-                id=att.get("id", ""),
-                name=att.get("name", "(unnamed)"),
+                id=att.id,
+                name=att.name,
                 size_bytes=size_bytes,
                 size_display=format_size_display(size_bytes),
-                content_type=att.get("contentType", "unknown"),
-                is_inline=att.get("isInline", False),
+                content_type=att.content_type or "unknown",
+                is_inline=att.is_inline,
             )
         )
 
@@ -102,13 +103,13 @@ async def download_attachment(
         A FastMCP file when no save path is given, or structured file-save metadata.
     """
     g = get_graph(params.profile)
-    result = await g.get(
+    result = GraphAttachment.model_validate(await g.get(
         f"/me/messages/{params.message_id}/attachments/{params.attachment_id}"
-    )
+    ) or {})
 
-    att_name = result.get("name", "attachment")
-    content_type = result.get("contentType", "application/octet-stream")
-    content_bytes_b64: Optional[str] = result.get("contentBytes")
+    att_name = result.name or "attachment"
+    content_type = result.content_type or "application/octet-stream"
+    content_bytes_b64: Optional[str] = result.content_bytes
 
     if content_bytes_b64 is None:
         return DownloadAttachmentResponse(

@@ -26,7 +26,7 @@ Implemented:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import quote
 
 from fastmcp.server.context import Context
@@ -36,6 +36,15 @@ from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.text import strip_html
 from mcp_microsoft.common.transfer import upload_large_file_via_session
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.graph_types import (
+    GraphDrive,
+    GraphDriveItem,
+    GraphSharePointList,
+    GraphSharePointListItem,
+    GraphSite,
+    graph_identity_display,
+    parse_graph_collection,
+)
 from mcp_microsoft.models import (
     CreateListItemResponse,
     DeleteListItemResponse,
@@ -160,17 +169,17 @@ class SearchContentInput(ToolRequestModel):
     profile: str | None = None
 
 
-def _site_payload(site: dict[str, Any]) -> SharePointSiteInfo:
-    """Normalize a SharePoint site into a structured payload."""
+def _site_payload(site: GraphSite) -> SharePointSiteInfo:
+    """Normalize a typed SharePoint site into a structured payload."""
     return SharePointSiteInfo(
-        id=site.get("id", ""),
-        display_name=site.get("displayName", "(unnamed)"),
-        description=site.get("description") or "",
-        web_url=site.get("webUrl", ""),
-        created_at=site.get("createdDateTime"),
-        created_at_display=format_datetime_display(site.get("createdDateTime")),
-        last_modified_at=site.get("lastModifiedDateTime"),
-        last_modified_at_display=format_datetime_display(site.get("lastModifiedDateTime")),
+        id=site.id,
+        display_name=site.display_name or "(unnamed)",
+        description=site.description or "",
+        web_url=site.web_url,
+        created_at=site.created_date_time,
+        created_at_display=format_datetime_display(site.created_date_time),
+        last_modified_at=site.last_modified_date_time,
+        last_modified_at_display=format_datetime_display(site.last_modified_date_time),
     )
 
 
@@ -218,7 +227,7 @@ async def search_sharepoint_sites(
     }
 
     result = await g.get("/sites", params=query_params)
-    sites = result.get("value", [])
+    sites = parse_graph_collection(result, GraphSite)
 
     return SearchSharePointSitesResponse(
         query=params.query,
@@ -253,23 +262,17 @@ async def get_sharepoint_site(
         "$select": "id,displayName,description,webUrl,createdDateTime,lastModifiedDateTime",
     }
 
-    site = await g.get(f"/sites/{params.site_id}", params=query)
-
-    name = site.get("displayName", "(unnamed)")
-    desc = site.get("description") or ""
-    web_url = site.get("webUrl", "")
-    created = format_datetime_display(site.get("createdDateTime"))
-    modified = format_datetime_display(site.get("lastModifiedDateTime"))
+    site = GraphSite.model_validate(await g.get(f"/sites/{params.site_id}", params=query))
 
     return SharePointSiteDetailResponse(
-        id=params.site_id,
-        display_name=name,
-        description=desc,
-        created_at=site.get("createdDateTime"),
-        created_at_display=created,
-        last_modified_at=site.get("lastModifiedDateTime"),
-        last_modified_at_display=modified,
-        web_url=web_url,
+        id=site.id or params.site_id,
+        display_name=site.display_name or "(unnamed)",
+        description=site.description or "",
+        created_at=site.created_date_time,
+        created_at_display=format_datetime_display(site.created_date_time),
+        last_modified_at=site.last_modified_date_time,
+        last_modified_at_display=format_datetime_display(site.last_modified_date_time),
+        web_url=site.web_url,
     )
 
 
@@ -299,18 +302,18 @@ async def list_site_libraries(
     }
 
     result = await g.get(f"/sites/{params.site_id}/drives", params=query)
-    drives = result.get("value", [])
+    drives = parse_graph_collection(result, GraphDrive)
 
     return ListSiteLibrariesResponse(
         site_id=params.site_id,
         count=len(drives),
         libraries=[
             SharePointLibraryInfo(
-                id=drive.get("id", ""),
-                name=drive.get("name", "(unnamed)"),
-                description=drive.get("description") or "",
-                drive_type=drive.get("driveType", ""),
-                web_url=drive.get("webUrl", ""),
+                id=drive.id,
+                name=drive.name or "(unnamed)",
+                description=drive.description or "",
+                drive_type=drive.drive_type,
+                web_url=drive.web_url,
             )
             for drive in drives
         ],
@@ -354,7 +357,7 @@ async def list_site_files(
         path = f"/drives/{params.drive_id}/root/children"
 
     result = await g.get(path, params=query)
-    items = result.get("value", [])
+    items = parse_graph_collection(result, GraphDriveItem)
 
     return ListSiteFilesResponse(
         site_id=params.site_id,
@@ -396,42 +399,29 @@ async def get_site_file(
         ),
     }
 
-    item = await g.get(
+    item = GraphDriveItem.model_validate(await g.get(
         f"/drives/{params.drive_id}/items/{params.item_id}",
         params=query,
-    )
-
-    name = item.get("name", "(unnamed)")
-    item_type = "Folder" if "folder" in item else "File"
-    size = format_size_display(item.get("size", 0))
-    created = format_datetime_display(item.get("createdDateTime"))
-    modified = format_datetime_display(item.get("lastModifiedDateTime"))
-    web_url = item.get("webUrl", "")
-
-    parent_ref = item.get("parentReference") or {}
-    parent_path = parent_ref.get("path", "")
-
-    created_by = ((item.get("createdBy") or {}).get("user") or {}).get("displayName", "")
-    modified_by = ((item.get("lastModifiedBy") or {}).get("user") or {}).get("displayName", "")
+    ))
 
     return SiteFileDetailResponse(
         site_id=params.site_id,
         drive_id=params.drive_id,
-        id=params.item_id,
-        name=name,
-        type=item_type,
-        size_bytes=item.get("size", 0),
-        size_display=size,
-        created_at=item.get("createdDateTime"),
-        created_at_display=created,
-        created_by=created_by,
-        modified_at=item.get("lastModifiedDateTime"),
-        modified_at_display=modified,
-        modified_by=modified_by,
-        path=parent_path,
-        child_count=item.get("folder", {}).get("childCount", 0),
-        mime_type=item.get("file", {}).get("mimeType", ""),
-        web_url=web_url,
+        id=item.id or params.item_id,
+        name=item.name or "(unnamed)",
+        type="Folder" if item.folder else "File",
+        size_bytes=item.size or 0,
+        size_display=format_size_display(item.size),
+        created_at=item.created_date_time,
+        created_at_display=format_datetime_display(item.created_date_time),
+        created_by=graph_identity_display(item.created_by),
+        modified_at=item.last_modified_date_time,
+        modified_at_display=format_datetime_display(item.last_modified_date_time),
+        modified_by=graph_identity_display(item.last_modified_by),
+        path=item.parent_reference.path if item.parent_reference else "",
+        child_count=item.folder.child_count if item.folder else 0,
+        mime_type=item.file.mime_type if item.file else "",
+        web_url=item.web_url,
     )
 
 
@@ -515,7 +505,7 @@ async def upload_to_site(
             else:
                 path = f"{base}/root:/{encoded_name}:/content"
 
-            result = await g.put(path, content=file_bytes)
+            result = GraphDriveItem.model_validate(await g.put(path, content=file_bytes) or {})
         else:
             if params.folder_id:
                 session_path = f"{base}/items/{params.folder_id}:/{encoded_name}:/createUploadSession"
@@ -534,10 +524,9 @@ async def upload_to_site(
             if not upload_url:
                 return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="No upload URL returned.")
 
-            result = await upload_large_file_via_session(upload_url, local_path, file_size, ctx)
-
-        item_id = (result or {}).get("id", "unknown")
-        web_url = (result or {}).get("webUrl", "")
+            result = GraphDriveItem.model_validate(
+                await upload_large_file_via_session(upload_url, local_path, file_size, ctx) or {}
+            )
         size_str = format_size_display(file_size)
 
         return UploadSiteFileResponse(
@@ -549,8 +538,8 @@ async def upload_to_site(
             filename=upload_name,
             size_bytes=file_size,
             size_display=size_str,
-            file_id=item_id,
-            web_url=web_url,
+            file_id=result.id or "unknown",
+            web_url=result.web_url,
         )
     finally:
         if temp_local_path is not None:
@@ -592,8 +581,8 @@ async def download_from_site(
     base = f"/drives/{params.drive_id}/items/{params.item_id}"
 
     # Get item metadata for filename
-    item = await g.get(base, params={"$select": "id,name,size"})
-    filename = item.get("name", "download")
+    item = GraphDriveItem.model_validate(await g.get(base, params={"$select": "id,name,size"}) or {})
+    filename = item.name or "download"
 
     # Resolve output path
     dest = params.destination_path
@@ -651,18 +640,18 @@ async def list_site_lists(
     }
 
     result = await g.get(f"/sites/{params.site_id}/lists", params=query)
-    lists = result.get("value", [])
+    lists = parse_graph_collection(result, GraphSharePointList)
 
     return ListSiteListsResponse(
         site_id=params.site_id,
         count=len(lists),
         lists=[
             SharePointListInfo(
-                id=lst.get("id", ""),
-                display_name=lst.get("displayName", "(unnamed)"),
-                description=lst.get("description") or "",
-                web_url=lst.get("webUrl", ""),
-                template=lst.get("list", {}).get("template", ""),
+                id=lst.id,
+                display_name=lst.display_name or "(unnamed)",
+                description=lst.description or "",
+                web_url=lst.web_url,
+                template=lst.list_.template if lst.list_ else "",
             )
             for lst in lists
         ],
@@ -702,14 +691,14 @@ async def get_list_items(
         f"/sites/{params.site_id}/lists/{params.list_id}/items",
         params=query,
     )
-    items = result.get("value", [])
+    items = parse_graph_collection(result, GraphSharePointListItem)
 
     normalized: list[SharePointListItemInfo] = []
     for item in items:
-        item_id = item.get("id", "")
-        created = format_datetime_display(item.get("createdDateTime"))
-        modified = format_datetime_display(item.get("lastModifiedDateTime"))
-        fields = item.get("fields", {})
+        item_id = item.id
+        created = format_datetime_display(item.created_date_time)
+        modified = format_datetime_display(item.last_modified_date_time)
+        fields = item.fields
 
         # Filter out internal/system fields
         user_fields = {
@@ -727,9 +716,9 @@ async def get_list_items(
             SharePointListItemInfo(
                 id=item_id,
                 title=title,
-                created_at=item.get("createdDateTime"),
+                created_at=item.created_date_time,
                 created_at_display=created,
-                modified_at=item.get("lastModifiedDateTime"),
+                modified_at=item.last_modified_date_time,
                 modified_at_display=modified,
                 fields=SharePointFields(filtered_fields),
             )
@@ -769,18 +758,16 @@ async def create_list_item(
     g = _get_sharepoint_graph(params.profile)
 
     payload = {"fields": params.fields.root}
-    result = await g.post(
+    result = GraphSharePointListItem.model_validate(await g.post(
         f"/sites/{params.site_id}/lists/{params.list_id}/items",
         json=payload,
-    )
-
-    item_id = (result or {}).get("id", "unknown")
+    ) or {})
     return CreateListItemResponse(
         success=True,
         action="create_list_item",
         site_id=params.site_id,
         list_id=params.list_id,
-        item_id=item_id,
+        item_id=result.id or "unknown",
         fields=SharePointFields(params.fields.root),
     )
 
@@ -986,8 +973,10 @@ async def search_content(
     # contentSources is for external connector items only — use a KQL
     # path: clause with the site's webUrl to restrict SharePoint search scope.
     if params.site_id:
-        site_data = await g.get(f"/sites/{params.site_id}", params={"$select": "webUrl"})
-        site_url = site_data.get("webUrl", "")
+        site_data = GraphSite.model_validate(
+            await g.get(f"/sites/{params.site_id}", params={"$select": "webUrl"}) or {}
+        )
+        site_url = site_data.web_url
         if site_url:
             current_query = search_request["query"].get("queryString", "")
             search_request["query"]["queryString"] = f'{current_query} path:"{site_url}"'.strip()

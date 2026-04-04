@@ -132,6 +132,43 @@ async def test_get_contact_returns_full_details(monkeypatch: pytest.MonkeyPatch)
     assert result.notes == "Known since 2020"
 
 
+@pytest.mark.asyncio
+async def test_get_contact_normalizes_nullable_graph_string_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify nullable Graph contact fields are accepted and normalized."""
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None):
+            return {
+                "id": "contact-null",
+                "displayName": "Null Test",
+                "givenName": None,
+                "surname": None,
+                "emailAddresses": None,
+                "mobilePhone": None,
+                "businessPhones": None,
+                "jobTitle": None,
+                "companyName": None,
+                "department": None,
+                "personalNotes": None,
+            }
+
+    monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
+    result = await contacts.get_contact(contacts.GetContactInput(contact_id="contact-null"))
+
+    assert result.id == "contact-null"
+    assert result.given_name == ""
+    assert result.surname == ""
+    assert result.email_addresses == []
+    assert result.mobile_phone == ""
+    assert result.business_phones == []
+    assert result.job_title == ""
+    assert result.company_name == ""
+    assert result.department == ""
+    assert result.notes == ""
+
+
 # ---------------------------------------------------------------------------
 # create_contact
 # ---------------------------------------------------------------------------

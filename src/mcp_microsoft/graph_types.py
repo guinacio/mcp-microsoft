@@ -1,12 +1,46 @@
 from __future__ import annotations
 
-from typing import Any, TypeVar
+from typing import Any, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_core import PydanticUndefined
+from pydantic import model_validator
+
+
+def _annotation_allows_none(annotation: Any) -> bool:
+    origin = get_origin(annotation)
+    if origin is None:
+        return annotation is type(None)
+    return any(arg is type(None) for arg in get_args(annotation))
 
 
 class GraphModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls_to_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        normalized = dict(data)
+        for field_name, field in cls.model_fields.items():
+            candidate_keys = [field_name]
+            if field.alias and field.alias not in candidate_keys:
+                candidate_keys.append(field.alias)
+
+            for key in candidate_keys:
+                if key not in normalized or normalized[key] is not None:
+                    continue
+                if _annotation_allows_none(field.annotation):
+                    break
+                if field.default_factory is not None:
+                    normalized[key] = field.default_factory()
+                    break
+                if field.default is not PydanticUndefined:
+                    normalized[key] = field.default
+                    break
+        return normalized
 
 
 class FlexibleGraphModel(GraphModel):
@@ -43,6 +77,32 @@ class GraphAttachment(GraphModel):
     content_bytes: str | None = Field(default=None, alias="contentBytes")
 
 
+class GraphContactEmailAddress(GraphModel):
+    address: str = ""
+    name: str = ""
+
+
+class GraphContact(GraphModel):
+    id: str = ""
+    display_name: str | None = Field(default=None, alias="displayName")
+    given_name: str | None = Field(default=None, alias="givenName")
+    surname: str | None = None
+    email_addresses: list[GraphContactEmailAddress] | None = Field(default=None, alias="emailAddresses")
+    mobile_phone: str | None = Field(default=None, alias="mobilePhone")
+    business_phones: list[str] | None = Field(default=None, alias="businessPhones")
+    job_title: str | None = Field(default=None, alias="jobTitle")
+    company_name: str | None = Field(default=None, alias="companyName")
+    department: str | None = None
+    personal_notes: str | None = Field(default=None, alias="personalNotes")
+
+
+class GraphContactFolder(GraphModel):
+    id: str = ""
+    display_name: str = Field(default="", alias="displayName")
+    parent_folder_id: str | None = Field(default=None, alias="parentFolderId")
+    total_item_count: int | None = Field(default=None, alias="totalItemCount")
+
+
 class GraphSender(GraphModel):
     email_address: GraphEmailAddress = Field(
         default_factory=GraphEmailAddress,
@@ -52,7 +112,7 @@ class GraphSender(GraphModel):
 
 class GraphMessage(GraphModel):
     id: str = ""
-    subject: str = ""
+    subject: str | None = None
     from_: GraphSender | None = Field(default=None, alias="from")
     to_recipients: list[GraphRecipient] = Field(default_factory=list, alias="toRecipients")
     cc_recipients: list[GraphRecipient] = Field(default_factory=list, alias="ccRecipients")
@@ -66,6 +126,7 @@ class GraphMessage(GraphModel):
     importance: str = ""
     attachments: list[GraphAttachment] = Field(default_factory=list)
     last_modified_date_time: str | None = Field(default=None, alias="lastModifiedDateTime")
+    is_draft: bool = Field(default=False, alias="isDraft")
 
 
 class GraphCalendar(GraphModel):
@@ -161,6 +222,79 @@ class GraphIdentitySet(GraphModel):
     user: GraphIdentity | None = None
     application: GraphIdentity | None = None
     device: GraphIdentity | None = None
+
+
+class GraphMailFolder(GraphModel):
+    id: str = ""
+    display_name: str = Field(default="", alias="displayName")
+    total_item_count: int | None = Field(default=None, alias="totalItemCount")
+    unread_item_count: int | None = Field(default=None, alias="unreadItemCount")
+    child_folder_count: int | None = Field(default=None, alias="childFolderCount")
+
+
+class GraphFileFacet(FlexibleGraphModel):
+    mime_type: str = Field(default="", alias="mimeType")
+
+
+class GraphFolderFacet(FlexibleGraphModel):
+    child_count: int = Field(default=0, alias="childCount")
+
+
+class GraphParentReference(FlexibleGraphModel):
+    drive_id: str = Field(default="", alias="driveId")
+    site_id: str = Field(default="", alias="siteId")
+    path: str = ""
+    id: str = ""
+
+
+class GraphDriveItem(GraphModel):
+    id: str = ""
+    name: str = ""
+    size: int | None = None  # null on folders, notebooks, and shortcuts
+    created_date_time: str | None = Field(default=None, alias="createdDateTime")
+    last_modified_date_time: str | None = Field(default=None, alias="lastModifiedDateTime")
+    web_url: str = Field(default="", alias="webUrl")
+    file: GraphFileFacet | None = None
+    folder: GraphFolderFacet | None = None
+    parent_reference: GraphParentReference | None = Field(default=None, alias="parentReference")
+    created_by: GraphIdentitySet | None = Field(default=None, alias="createdBy")
+    last_modified_by: GraphIdentitySet | None = Field(default=None, alias="lastModifiedBy")
+
+
+class GraphSite(GraphModel):
+    id: str = ""
+    display_name: str = Field(default="", alias="displayName")
+    description: str = ""
+    web_url: str = Field(default="", alias="webUrl")
+    created_date_time: str | None = Field(default=None, alias="createdDateTime")
+    last_modified_date_time: str | None = Field(default=None, alias="lastModifiedDateTime")
+
+
+class GraphDrive(GraphModel):
+    id: str = ""
+    name: str = ""
+    description: str = ""
+    drive_type: str = Field(default="", alias="driveType")
+    web_url: str = Field(default="", alias="webUrl")
+
+
+class GraphSharePointListFacet(FlexibleGraphModel):
+    template: str = ""
+
+
+class GraphSharePointList(GraphModel):
+    id: str = ""
+    display_name: str = Field(default="", alias="displayName")
+    description: str = ""
+    web_url: str = Field(default="", alias="webUrl")
+    list_: GraphSharePointListFacet | None = Field(default=None, alias="list")
+
+
+class GraphSharePointListItem(FlexibleGraphModel):
+    id: str = ""
+    created_date_time: str | None = Field(default=None, alias="createdDateTime")
+    last_modified_date_time: str | None = Field(default=None, alias="lastModifiedDateTime")
+    fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class GraphTeamMemberSettings(FlexibleGraphModel):
@@ -302,3 +436,15 @@ GraphModelT = TypeVar("GraphModelT", bound=GraphModel)
 
 def parse_graph_collection(payload: dict[str, Any], model: type[GraphModelT]) -> list[GraphModelT]:
     return [model.model_validate(item) for item in payload.get("value") or []]
+
+
+def graph_identity_display(identity_set: GraphIdentitySet | None) -> str:
+    if identity_set is None:
+        return ""
+    if identity_set.user and identity_set.user.display_name:
+        return identity_set.user.display_name
+    if identity_set.application and identity_set.application.display_name:
+        return identity_set.application.display_name
+    if identity_set.device and identity_set.device.display_name:
+        return identity_set.device.display_name
+    return ""

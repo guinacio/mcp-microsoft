@@ -14,6 +14,7 @@ from __future__ import annotations
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
 from mcp_microsoft.graph import get_graph
+from mcp_microsoft.graph_types import GraphMailFolder, parse_graph_collection
 from mcp_microsoft.models import (
     CreateFolderResponse,
     DeleteFolderResponse,
@@ -66,14 +67,17 @@ async def list_folders(params: ListFoldersInput) -> ListFoldersResponse:
     }
 
     result = await g.get("/me/mailFolders", params=query)
-    folders = result.get("value", [])
+    folders = parse_graph_collection(result, GraphMailFolder)
 
-    all_folders = list(folders)
+    all_folders: list[tuple[GraphMailFolder, bool, str]] = [
+        (folder, False, folder.display_name)
+        for folder in folders
+    ]
 
     for folder in folders:
-        child_count = folder.get("childFolderCount", 0)
+        child_count = folder.child_folder_count or 0
         if params.include_child_folders and child_count > 0:
-            folder_id = folder["id"]
+            folder_id = folder.id
             child_result = await g.get(
                 f"/me/mailFolders/{folder_id}/childFolders",
                 params={
@@ -81,32 +85,28 @@ async def list_folders(params: ListFoldersInput) -> ListFoldersResponse:
                     "$select": "id,displayName,totalItemCount,unreadItemCount,childFolderCount",
                 },
             )
-            child_folders = child_result.get("value", [])
-            # Annotate child folders with indentation marker
-            for cf in child_folders:
-                cf["_display_name"] = f"  \u2514 {cf.get('displayName', '')}"
-            all_folders.extend(child_folders)
+            child_folders = parse_graph_collection(child_result, GraphMailFolder)
+            all_folders.extend(
+                (child_folder, True, f"  \u2514 {child_folder.display_name}")
+                for child_folder in child_folders
+            )
 
     seen_ids: set = set()
     items: list[MailFolderInfo] = []
-    for folder in all_folders:
-        fid = folder.get("id", "")
+    for folder, is_child, display_label in all_folders:
+        fid = folder.id
         if fid in seen_ids:
             continue
         seen_ids.add(fid)
-        name = folder.get("_display_name") or folder.get("displayName", "")
-        unread = folder.get("unreadItemCount", 0)
-        total = folder.get("totalItemCount", 0)
-        children = folder.get("childFolderCount", 0)
         items.append(
             MailFolderInfo(
                 id=fid,
-                display_name=folder.get("displayName", ""),
-                display_label=name,
-                unread_count=unread,
-                total_count=total,
-                child_folder_count=children,
-                is_child="_display_name" in folder,
+                display_name=folder.display_name,
+                display_label=display_label,
+                unread_count=folder.unread_item_count or 0,
+                total_count=folder.total_item_count or 0,
+                child_folder_count=folder.child_folder_count or 0,
+                is_child=is_child,
             )
         )
 
@@ -142,21 +142,19 @@ async def create_folder(
     payload = {"displayName": params.display_name}
 
     if params.parent_folder_id:
-        result = await g.post(
+        raw_result = await g.post(
             f"/me/mailFolders/{params.parent_folder_id}/childFolders",
             json=payload,
         )
     else:
-        result = await g.post("/me/mailFolders", json=payload)
-
-    folder_id = (result or {}).get("id", "unknown")
-    folder_name = (result or {}).get("displayName", params.display_name)
+        raw_result = await g.post("/me/mailFolders", json=payload)
+    result = GraphMailFolder.model_validate(raw_result or {})
 
     return CreateFolderResponse(
         success=True,
         action="create_folder",
-        folder_id=folder_id,
-        display_name=folder_name,
+        folder_id=result.id or "unknown",
+        display_name=result.display_name or params.display_name,
         parent_folder_id=params.parent_folder_id,
     )
 
