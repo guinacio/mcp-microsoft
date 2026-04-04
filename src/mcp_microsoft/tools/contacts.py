@@ -153,7 +153,11 @@ async def list_contacts(params: ListContactsInput) -> ListContactsResponse:
     List contacts from the user's default contacts folder or a specific folder.
 
     Args:
-        params: Structured contact-list request.
+        top: Maximum number of contacts to return (1-100). Defaults to 25.
+        folder_id: Optional contact folder ID. Omit to use the default contacts folder.
+        search: Optional Graph `$search` expression for server-side search.
+        skip_token: Pagination cursor returned by a previous call.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured list of contacts with id, name, email, phone, and job info.
@@ -210,7 +214,8 @@ async def get_contact(params: GetContactInput) -> GetContactResponse:
     Fetch a single contact by ID with full details including notes.
 
     Args:
-        params: Structured contact-detail request.
+        contact_id: The Graph contact ID to fetch.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Full contact details including personal notes.
@@ -251,7 +256,18 @@ async def create_contact(params: CreateContactInput) -> CreateContactResponse:
     Create a new contact in the user's contacts folder.
 
     Args:
-        params: Structured contact-create request.
+        display_name: Contact display name shown in address books.
+        given_name: Optional first name.
+        surname: Optional last name.
+        email_addresses: Optional list of `{address, name}` email objects.
+        mobile_phone: Optional mobile phone number.
+        business_phones: Optional list of business phone numbers.
+        job_title: Optional job title.
+        company_name: Optional company name.
+        department: Optional department name.
+        notes: Optional personal notes.
+        folder_id: Optional contact folder ID. Omit to create in the default folder.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Created contact ID and display name.
@@ -311,7 +327,18 @@ async def update_contact(params: UpdateContactInput) -> UpdateContactResponse:
     Update an existing contact. Only provided fields are changed (PATCH semantics).
 
     Args:
-        params: Structured contact-update request.
+        contact_id: The Graph contact ID to update.
+        display_name: Replace the display name.
+        given_name: Replace the first name.
+        surname: Replace the last name.
+        email_addresses: Replace the full email-address list.
+        mobile_phone: Replace the mobile phone number.
+        business_phones: Replace the business phone list.
+        job_title: Replace the job title.
+        company_name: Replace the company name.
+        department: Replace the department.
+        notes: Replace the personal notes.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Updated contact ID and list of changed fields.
@@ -375,7 +402,8 @@ async def delete_contact(params: DeleteContactInput) -> DeleteContactResponse:
     Permanently delete a contact by ID.
 
     Args:
-        params: Structured contact-delete request.
+        contact_id: The Graph contact ID to delete.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Deletion confirmation.
@@ -404,7 +432,7 @@ async def list_contact_folders(
     to scope operations to a specific folder.
 
     Args:
-        params: Structured folder-list request.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured list of contact folders with id, displayName, and item count.
@@ -445,7 +473,9 @@ async def search_contacts(params: SearchContactsInput) -> SearchContactsResponse
     For full-text search, use list_contacts with the search parameter instead.
 
     Args:
-        params: Structured contact-search request.
+        query: Prefix to match against `displayName`.
+        top: Maximum number of contacts to return (1-100). Defaults to 25.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Contacts whose displayName starts with the given query.
@@ -483,7 +513,9 @@ async def get_contact_photo(params: GetContactPhotoInput) -> GetContactPhotoResp
     Retrieve the profile photo for a contact.
 
     Args:
-        params: Structured contact-photo request.
+        contact_id: The Graph contact ID.
+        save_path: Optional filesystem path to write the photo to. Omit to return base64 only.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Base64-encoded photo bytes and/or saved file path confirmation.

@@ -463,7 +463,13 @@ async def upload_to_site(
     When using content_base64, filename is required.
 
     Args:
-        params: Structured SharePoint upload request.
+        site_id: The SharePoint site ID.
+        drive_id: The document library (drive) ID.
+        local_path: Optional local file path on the MCP host machine.
+        folder_id: Optional destination folder ID inside the document library.
+        filename: Optional upload filename override. Required when using `content_base64`.
+        content_base64: Optional base64-encoded file content when no local path is available.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured upload confirmation.
@@ -752,7 +758,10 @@ async def create_list_item(
     Requires a work/organizational Microsoft 365 account.
 
     Args:
-        params: Structured list-item create request.
+        site_id: The SharePoint site ID.
+        list_id: The SharePoint list ID.
+        fields: Field values for the new item as a JSON object.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured list-item creation confirmation.
@@ -790,7 +799,11 @@ async def update_list_item(
     Requires a work/organizational Microsoft 365 account.
 
     Args:
-        params: Structured list-item update request.
+        site_id: The SharePoint site ID.
+        list_id: The SharePoint list ID.
+        item_id: The list item ID to update.
+        fields: Field values to patch as a JSON object.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured list-item update confirmation.

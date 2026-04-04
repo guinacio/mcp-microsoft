@@ -42,7 +42,8 @@ async def list_attachments(params: ListAttachmentsInput) -> ListAttachmentsRespo
     List all attachments on an email message.
 
     Args:
-        params: Structured attachment-list request.
+        message_id: The Graph message ID.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured attachment metadata.
@@ -92,7 +93,10 @@ async def download_attachment(
     a FastMCP file object, which is only useful for programmatic embedding.
 
     Args:
-        params: Structured attachment-download request.
+        message_id: The Graph message ID.
+        attachment_id: The Graph attachment ID.
+        save_path: Optional filesystem path to save the file. Omit to return a FastMCP file payload.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         A FastMCP file when no save path is given, or structured file-save metadata.

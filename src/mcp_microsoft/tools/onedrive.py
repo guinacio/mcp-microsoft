@@ -214,7 +214,9 @@ async def search_drive(params: SearchDriveInput) -> SearchDriveResponse:
     Search for files and folders in OneDrive by name or content.
 
     Args:
-        params: Structured OneDrive search request.
+        query: Search string used by Graph search.
+        max_results: Maximum number of results to return. Defaults to 10.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured search results.
@@ -305,7 +307,11 @@ async def upload_file(
        available (e.g. container/sandbox environments).
 
     Args:
-        params: Structured OneDrive upload request.
+        local_path: Optional local file path on the MCP host machine.
+        parent_folder_id: Optional destination folder ID. Omit to upload to the OneDrive root.
+        filename: Optional override for the uploaded filename. Required when using `content_base64`.
+        content_base64: Optional base64-encoded file content when no local path is available.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured upload confirmation.
