@@ -3,14 +3,15 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 ![MCP](https://img.shields.io/badge/MCP-compatible-purple)
+[![Tests](https://github.com/guilhermeinacio/mcp-microsoft/actions/workflows/ci.yml/badge.svg)](https://github.com/guilhermeinacio/mcp-microsoft/actions/workflows/ci.yml)
 
-Microsoft 365 MCP server — Mail, Calendar, OneDrive, and SharePoint via the Microsoft Graph API, with multi-account support.
+Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, Contacts, and Teams via the Microsoft Graph API, with multi-account support.
 
 ## Overview
 
-`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers the four most-used surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, and SharePoint — 56 tools in total.
+`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers six surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, SharePoint, contacts, and Teams — **86 tools** in total.
 
-The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. On manual installs, Teams and SharePoint auto-enable for corporate-oriented profiles such as `common`, `organizations`, or a specific tenant. In Claude Desktop / MCPB, the installer toggles remain authoritative. In any environment, you can override the default with `MCP_ENABLE_TEAMS` / `MCP_ENABLE_SHAREPOINT` to force either service on or off.
+The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. Teams and SharePoint require a work or school account and are gated behind feature flags (`MCP_ENABLE_TEAMS` / `MCP_ENABLE_SHAREPOINT`). On manual installs, they auto-enable for corporate-oriented tenant values (`common`, `organizations`, or a specific tenant ID). In Claude Desktop / MCPB, the installer toggles remain authoritative. You can always override the default with the environment flags to force either service on or off.
 
 Multi-account support is a first-class feature. Named profiles let you configure separate client IDs for each account and switch between them on any tool call by passing `profile="work"`. Profiles and MSAL token caches are stored in `~/.microsoft-mcp/` and survive server restarts without re-authentication.
 
@@ -18,13 +19,14 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 
 ## Features
 
-### Tools (56 total)
+### Tools (86 total)
 
-#### Mail (21 tools)
+#### Mail (25 tools)
 
 - `list_emails` — list messages from any folder with pagination and unread filter
 - `read_email` — fetch the full body of a message by ID (supports summary mode)
-- `search_emails` — search using Microsoft Graph KQL `$search` syntax
+- `search_emails` — search using Microsoft Graph KQL `$search` syntax (max 25 results)
+- `filter_emails` — find emails by sender, recipient, subject, date range, or attachments with full pagination
 - `send_email` — compose and send a new message (to/cc/bcc, HTML or plain text)
 - `reply_email` — reply or reply-all to an existing message
 - `forward_email` — forward a message to one or more recipients
@@ -32,6 +34,9 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `move_email` — move to any folder by well-known name or folder ID
 - `trash_email` — soft-delete to Deleted Items (recoverable)
 - `delete_email` — permanently delete a message (irreversible)
+- `bulk_move_emails` — move multiple messages to a folder in one operation
+- `bulk_trash_emails` — move multiple messages to Deleted Items
+- `bulk_delete_emails` — permanently delete multiple messages (irreversible)
 - `create_draft` / `get_draft` / `list_drafts` / `update_draft` / `send_draft` — full draft lifecycle
 - `list_folders` / `create_folder` / `delete_folder` — manage mailbox folders
 - `list_attachments` / `download_attachment` — inspect and save attachments
@@ -71,6 +76,28 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `list_site_lists` — list all SharePoint lists in a site
 - `get_list_items` / `create_list_item` / `update_list_item` / `delete_list_item` — manage list records
 
+#### Contacts (8 tools)
+
+- `list_contacts` — list contacts with optional folder scope and field selection
+- `get_contact` — retrieve a single contact by ID
+- `create_contact` — create a new contact with name, email, phone, org, and notes
+- `update_contact` — update any subset of contact fields
+- `delete_contact` — delete a contact by ID (irreversible)
+- `list_contact_folders` — enumerate contact folders in the mailbox
+- `search_contacts` — search contacts by display name or email
+- `get_contact_photo` — fetch a contact's profile photo as base64 or save to disk
+
+#### Teams (18 tools)
+
+> Teams tools require a work or school account (Azure AD / Entra ID) with a specific tenant ID. They are not available for personal Outlook.com / Live accounts.
+
+- `teams_list_joined` / `teams_get` — list and inspect teams
+- `teams_list_channels` / `teams_get_channel` / `teams_create_channel` — manage channels
+- `teams_list_channel_messages` / `teams_get_channel_message` / `teams_send_channel_message` — read and post channel messages
+- `teams_reply_to_channel_message` / `teams_list_message_replies` — manage channel threads
+- `teams_list_chats` / `teams_get_chat` / `teams_list_chat_messages` / `teams_send_chat_message` / `teams_create_chat` — 1:1 and group chats
+- `teams_create_meeting` / `teams_get_meeting` / `teams_list_meetings` — online meetings with join URLs
+
 #### Profile Management (5 tools)
 
 - `list_ms_profiles` — list all configured profiles and which is the default
@@ -84,7 +111,7 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 ### Option A: Claude Desktop Extension (MCPB) — Recommended
 
 ```bash
-npx @anthropic-ai/mcpb install mcp-microsoft-0.4.0.mcpb
+npx @anthropic-ai/mcpb install mcp-microsoft-0.6.0.mcpb
 ```
 
 The installer prompts for your Azure App Registration details (see [Azure Setup](#azure-setup)):
@@ -94,6 +121,8 @@ The installer prompts for your Azure App Registration details (see [Azure Setup]
 | **Azure Client ID** | Application (client) ID from your App Registration |
 | **Tenant ID** | `common` for personal + work, `consumers` for personal only, or your org's tenant ID/domain |
 | **Credentials Directory** | Optional. Defaults to `~/.microsoft-mcp/` |
+| **Enable Teams Tools** | Toggle Teams tools on/off (requires work/school account) |
+| **Enable SharePoint Tools** | Toggle SharePoint tools on/off (requires work/school account) |
 
 A `default` profile is created automatically from these values.
 
@@ -161,6 +190,19 @@ You need an Azure App Registration to get a `client_id`. This is a one-time step
 
 For a detailed walkthrough with screenshots, see [`docs/azure-setup.md`](docs/azure-setup.md).
 
+## Account Type Compatibility
+
+| Module | Personal (Outlook.com/Live) | Work/School (Azure AD/Entra) |
+|---|---|---|
+| Mail | Yes | Yes |
+| Calendar | Yes | Yes |
+| OneDrive | Yes | Yes |
+| Contacts | Yes | Yes |
+| SharePoint | No | Yes (admin consent required) |
+| Teams | No | Yes (specific tenant ID required) |
+
+Personal accounts use `tenant_id=consumers`. For access to both personal and work accounts via a single profile, use `tenant_id=common`. Teams requires a specific tenant ID — it does not work with `common`.
+
 ## Profile Management
 
 The server supports multiple Microsoft 365 accounts as named profiles. Each profile has its own `client_id`, `tenant_id`, and MSAL token cache.
@@ -224,14 +266,14 @@ uv sync
 # Start the MCP server (stdio mode)
 uv run mcp-microsoft
 
-# Run the test suite
+# Run the test suite (137 tests)
 uv run pytest -q
 
 # Rebuild the MCPB bundle
 npx @anthropic-ai/mcpb pack
 ```
 
-Tool implementations are organized by surface area under `src/mcp_microsoft/tools/`. Authentication is handled by [MSAL](https://github.com/AzureAD/microsoft-authentication-library-for-python) with a per-profile serializable token cache. HTTP calls go through a shared async `httpx` client initialized at server startup.
+Tool implementations are organized by surface area under `src/mcp_microsoft/tools/`: `mail.py`, `drafts.py`, `folders.py`, `attachments.py`, `calendar.py`, `onedrive.py`, `sharepoint.py`, `contacts.py`, `teams.py`, `profiles.py`. Authentication is handled by [MSAL](https://github.com/AzureAD/microsoft-authentication-library-for-python) with a per-profile serializable token cache. HTTP calls go through a shared async `httpx` client initialized at server startup.
 
 ## License
 
