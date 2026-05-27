@@ -55,6 +55,15 @@ TEAMS_SCOPES: list[str] = [
     "OnlineMeetings.ReadWrite",
 ]
 
+TEAMS_MEETING_ARTIFACT_SCOPES: list[str] = [
+    "OnlineMeetingTranscript.Read.All",
+    "OnlineMeetingRecording.Read.All",
+]
+
+TEAMS_AI_INSIGHT_SCOPES: list[str] = [
+    "OnlineMeetingAiInsight.Read.All",
+]
+
 SHAREPOINT_SCOPES: list[str] = [
     "Sites.ReadWrite.All",
 ]
@@ -63,8 +72,13 @@ SHAREPOINT_SCOPES: list[str] = [
 def build_default_scopes(profile_name: str | None = None) -> list[str]:
     """Build the consent scope list for profiles without explicit overrides."""
     scopes = list(DEFAULT_SCOPES)
-    if resolve_optional_service_enabled("MCP_ENABLE_TEAMS", profile_name):
+    teams_enabled = resolve_optional_service_enabled("MCP_ENABLE_TEAMS", profile_name)
+    if teams_enabled:
         scopes.extend(TEAMS_SCOPES)
+    if teams_enabled and resolve_optional_service_enabled("MCP_ENABLE_TEAMS_MEETING_ARTIFACTS", profile_name):
+        scopes.extend(TEAMS_MEETING_ARTIFACT_SCOPES)
+    if teams_enabled and resolve_optional_service_enabled("MCP_ENABLE_TEAMS_AI_INSIGHTS", profile_name):
+        scopes.extend(TEAMS_AI_INSIGHT_SCOPES)
     if resolve_optional_service_enabled("MCP_ENABLE_SHAREPOINT", profile_name):
         scopes.extend(SHAREPOINT_SCOPES)
     return list(dict.fromkeys(scopes))

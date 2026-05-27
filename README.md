@@ -9,9 +9,9 @@ Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, Contacts, and
 
 ## Overview
 
-`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers six surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, SharePoint, contacts, and Teams — **86 tools** in total.
+`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers six surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, SharePoint, contacts, and Teams — **93 tools** in total.
 
-The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. Teams and SharePoint require a work or school account and are gated behind feature flags (`MCP_ENABLE_TEAMS` / `MCP_ENABLE_SHAREPOINT`). On manual installs, they auto-enable for corporate-oriented tenant values (`common`, `organizations`, or a specific tenant ID). In Claude Desktop / MCPB, the installer toggles remain authoritative. You can always override the default with the environment flags to force either service on or off.
+The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. Teams and SharePoint require a work or school account and are gated behind feature flags (`MCP_ENABLE_TEAMS` / `MCP_ENABLE_SHAREPOINT`). On manual installs, they auto-enable for corporate-oriented tenant values (`common`, `organizations`, or a specific tenant ID). In Claude Desktop / MCPB, the installer toggles remain authoritative. You can always override the default with the environment flags to force either service on or off. Teams meeting transcripts/recordings and Copilot AI insights are separate explicit opt-ins so the server does not request those additional scopes unless you enable them.
 
 Multi-account support is a first-class feature. Named profiles let you configure separate client IDs for each account and switch between them on any tool call by passing `profile="work"`. Profiles and MSAL token caches are stored in `~/.microsoft-mcp/` and survive server restarts without re-authentication.
 
@@ -19,7 +19,7 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 
 ## Features
 
-### Tools (86 total)
+### Tools (93 total)
 
 #### Mail (25 tools)
 
@@ -87,7 +87,7 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `search_contacts` — search contacts by display name or email
 - `get_contact_photo` — fetch a contact's profile photo as base64 or save to disk
 
-#### Teams (18 tools)
+#### Teams (25 tools)
 
 > Teams tools require a work or school account (Azure AD / Entra ID) with a specific tenant ID. They are not available for personal Outlook.com / Live accounts.
 
@@ -96,7 +96,12 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `teams_list_channel_messages` / `teams_get_channel_message` / `teams_send_channel_message` — read and post channel messages
 - `teams_reply_to_channel_message` / `teams_list_message_replies` — manage channel threads
 - `teams_list_chats` / `teams_get_chat` / `teams_list_chat_messages` / `teams_send_chat_message` / `teams_create_chat` — 1:1 and group chats
-- `teams_create_meeting` / `teams_get_meeting` / `teams_list_meetings` — online meetings with join URLs
+- `teams_create_meeting` / `teams_get_meeting` / `teams_find_meeting_by_url` / `teams_list_meetings` — online meetings with join URLs
+- `teams_list_meeting_transcripts` / `teams_get_meeting_transcript` — Teams meeting transcript metadata and VTT content
+- `teams_list_meeting_recordings` / `teams_download_meeting_recording` — Teams meeting recording metadata and downloads
+- `teams_list_meeting_ai_insights` / `teams_get_meeting_ai_insight` — Copilot meeting recap/insight metadata and full detail
+
+> Teams meeting transcripts and recordings require explicit opt-in via `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS` plus the delegated permissions `OnlineMeetingTranscript.Read.All` and `OnlineMeetingRecording.Read.All`. Teams AI insights require explicit opt-in via `MCP_ENABLE_TEAMS_AI_INSIGHTS`, the delegated permission `OnlineMeetingAiInsight.Read.All`, and Microsoft 365 Copilot licensing.
 
 #### Profile Management (5 tools)
 
@@ -122,6 +127,8 @@ The installer prompts for your Azure App Registration details (see [Azure Setup]
 | **Tenant ID** | `common` for personal + work, `consumers` for personal only, or your org's tenant ID/domain |
 | **Credentials Directory** | Optional. Defaults to `~/.microsoft-mcp/` |
 | **Enable Teams Tools** | Toggle Teams tools on/off (requires work/school account) |
+| **Enable Teams Meeting Artifacts** | Toggle Teams transcript/recording tools on/off (requires work/school account and extra Graph permissions) |
+| **Enable Teams AI Insights** | Toggle Teams Copilot AI insight tools on/off (requires work/school account, extra Graph permissions, and Copilot licensing) |
 | **Enable SharePoint Tools** | Toggle SharePoint tools on/off (requires work/school account) |
 
 A `default` profile is created automatically from these values.
@@ -137,6 +144,8 @@ export MS365_TENANT_ID=common
 # Optional overrides:
 # export MCP_ENABLE_SHAREPOINT=false
 # export MCP_ENABLE_TEAMS=false
+# export MCP_ENABLE_TEAMS_MEETING_ARTIFACTS=true
+# export MCP_ENABLE_TEAMS_AI_INSIGHTS=true
 uv run mcp-microsoft
 ```
 
@@ -185,8 +194,14 @@ You need an Azure App Registration to get a `client_id`. This is a one-time step
    - `Chat.ReadWrite`
    - `Chat.Create`
    - `OnlineMeetings.ReadWrite`
-9. For admin-restricted permissions such as `Sites.ReadWrite.All`, click **Grant admin consent**. Your IT administrator must approve this once per tenant.
-10. From the **Overview** page, copy the **Application (client) ID** and, if targeting a specific tenant, the **Directory (tenant) ID**.
+9. If you want to enable **Teams meeting transcripts and recordings**, also add:
+   - `OnlineMeetingTranscript.Read.All`
+   - `OnlineMeetingRecording.Read.All`
+10. If you want to enable **Teams Copilot AI insights**, also add:
+   - `OnlineMeetingAiInsight.Read.All`
+   All users of applications that call this API need a Microsoft 365 Copilot license.
+11. For admin-restricted permissions such as `Sites.ReadWrite.All`, click **Grant admin consent**. Your IT administrator must approve this once per tenant.
+12. From the **Overview** page, copy the **Application (client) ID** and, if targeting a specific tenant, the **Directory (tenant) ID**.
 
 For a detailed walkthrough with screenshots, see [`docs/azure-setup.md`](docs/azure-setup.md).
 
@@ -199,9 +214,9 @@ For a detailed walkthrough with screenshots, see [`docs/azure-setup.md`](docs/az
 | OneDrive | Yes | Yes |
 | Contacts | Yes | Yes |
 | SharePoint | No | Yes (admin consent required) |
-| Teams | No | Yes (specific tenant ID required) |
+| Teams | No | Yes |
 
-Personal accounts use `tenant_id=consumers`. For access to both personal and work accounts via a single profile, use `tenant_id=common`. Teams requires a specific tenant ID — it does not work with `common`.
+Personal accounts use `tenant_id=consumers`. For access to both personal and work accounts via a single profile, use `tenant_id=common`. Teams transcript/recording and AI-insight APIs remain work-account-only and are additional explicit opt-ins on top of the base Teams tools.
 
 ## Profile Management
 
@@ -254,8 +269,10 @@ Profiles are stored in `~/.microsoft-mcp/profiles.json`. Token caches are stored
 | `MS365_CREDENTIALS_DIR` | No | `~/.microsoft-mcp/` | Directory for `profiles.json` and token caches |
 | `MCP_ENABLE_SHAREPOINT` | No | auto-detect | Set to `true` to force-enable SharePoint tools or `false` to force-disable them |
 | `MCP_ENABLE_TEAMS` | No | auto-detect | Set to `true` to force-enable Teams tools or `false` to force-disable them |
+| `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS` | No | `false` | Set to `true` to register Teams transcript and recording tools and request the related delegated scopes |
+| `MCP_ENABLE_TEAMS_AI_INSIGHTS` | No | `false` | Set to `true` to register Teams Copilot AI insight tools and request `OnlineMeetingAiInsight.Read.All` |
 
-`MS365_CLIENT_ID`, `MS365_TENANT_ID`, and `MS365_CREDENTIALS_DIR` are only used to bootstrap the `default` profile on first run. The `MCP_ENABLE_*` flags are evaluated at server startup and override the auto-detection behavior when present.
+`MS365_CLIENT_ID`, `MS365_TENANT_ID`, and `MS365_CREDENTIALS_DIR` are only used to bootstrap the `default` profile on first run. `MCP_ENABLE_TEAMS` and `MCP_ENABLE_SHAREPOINT` participate in the existing auto-detection behavior; `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS` and `MCP_ENABLE_TEAMS_AI_INSIGHTS` are explicit opt-ins only.
 
 ## Development
 
@@ -266,7 +283,7 @@ uv sync
 # Start the MCP server (stdio mode)
 uv run mcp-microsoft
 
-# Run the test suite (137 tests)
+# Run the test suite
 uv run pytest -q
 
 # Rebuild the MCPB bundle

@@ -50,13 +50,23 @@ be to add automatic retry-with-backoff to GraphClient._request().
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal, Optional
 
-from mcp_microsoft.common.formatting import format_datetime_display
+import httpx
+
+from mcp_microsoft.common.formatting import format_datetime_display, format_size_display
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.tooling import READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.feature_flags import (
+    is_teams_ai_insights_enabled,
+    is_teams_meeting_artifacts_enabled,
+)
 from mcp_microsoft.graph import get_graph
 from mcp_microsoft.graph_types import (
+    GraphCallAiInsight,
+    GraphCallRecording,
+    GraphCallTranscript,
     GraphChannel,
     GraphChat,
     GraphChatMember,
@@ -75,7 +85,18 @@ from mcp_microsoft.models import (
     CreateChannelResponse,
     CreateTeamsChatResponse,
     CreateTeamsMeetingResponse,
+    DownloadMeetingRecordingResponse,
+    MeetingAiInsightActionItem,
+    MeetingAiInsightDetailResponse,
+    MeetingAiInsightInfo,
+    MeetingAiInsightMentionEvent,
+    MeetingAiInsightNote,
+    MeetingAiInsightNoteSubpoint,
+    MeetingAiInsightViewpoint,
     MeetingDetailResponse,
+    MeetingRecordingInfo,
+    MeetingTranscriptDetailResponse,
+    MeetingTranscriptInfo,
     OnlineMeetingInfo,
     SendTeamsMessageResponse,
     TeamDetailResponse,
@@ -93,7 +114,10 @@ from mcp_microsoft.models import (
     TeamsListChatsResponse,
     TeamsListChatMessagesResponse,
     TeamsListJoinedResponse,
+    TeamsListMeetingAiInsightsResponse,
     TeamsListMeetingsResponse,
+    TeamsListMeetingRecordingsResponse,
+    TeamsListMeetingTranscriptsResponse,
     TeamsListRepliesResponse,
     TeamsMessageInfo,
 )
@@ -142,6 +166,59 @@ def _normalize_filter_datetime(value: str | None, fallback: datetime) -> str:
     else:
         parsed = parsed.astimezone(timezone.utc)
     return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _escape_odata_string(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _build_join_web_url_filter(join_web_url: str) -> str:
+    return f"joinWebUrl eq '{_escape_odata_string(join_web_url)}'"
+
+
+def _meeting_detail_response(meeting: GraphOnlineMeetingDetail) -> MeetingDetailResponse:
+    return MeetingDetailResponse(
+        **_meeting_info(meeting).model_dump(),
+        participants=_meeting_participants_info(meeting.participants),
+        video_teleconference_id=meeting.video_teleconference_id,
+    )
+
+
+def _meeting_artifact_error(exc: httpx.HTTPStatusError, artifact_name: str) -> RuntimeError:
+    status = exc.response.status_code if exc.response is not None else None
+    if status in {400, 404}:
+        return RuntimeError(
+            f"{artifact_name} is unavailable for this meeting. Microsoft Graph only exposes "
+            f"{artifact_name.lower()} for calendar-backed online meetings that have not expired."
+        )
+    return RuntimeError(f"Unable to access {artifact_name}: {exc}")
+
+
+def _meeting_recording_download_error(exc: httpx.HTTPStatusError) -> RuntimeError:
+    status = exc.response.status_code if exc.response is not None else None
+    if status == 403:
+        return RuntimeError(
+            "Microsoft Graph denied the recording download. In delegated auth, meeting recording "
+            "content is typically available only to the meeting organizer unless tenant policy "
+            "allows participant downloads."
+        )
+    return _meeting_artifact_error(exc, "Meeting recording content")
+
+
+def _meeting_ai_insight_error(exc: httpx.HTTPStatusError) -> RuntimeError:
+    status = exc.response.status_code if exc.response is not None else None
+    if status == 403:
+        return RuntimeError(
+            "Microsoft Graph denied access to meeting AI insights. These tools require a work or "
+            "school account, the OnlineMeetingAiInsight.Read.All permission, and Microsoft 365 "
+            "Copilot licensing for the user."
+        )
+    if status in {400, 404}:
+        return RuntimeError(
+            "Meeting AI insights are unavailable for this meeting. Insights only work for "
+            "non-expired supported online meetings with Copilot-generated recap data."
+        )
+    return RuntimeError(f"Unable to access meeting AI insights: {exc}")
 
 
 def _extract_sender(from_obj: Any | None) -> str:
@@ -237,6 +314,69 @@ def _meeting_info(meeting: GraphOnlineMeetingDetail) -> OnlineMeetingInfo:
         end_display=format_datetime_display(meeting.end_date_time),
         created_at=meeting.created_date_time,
     )
+
+
+def _meeting_transcript_info(transcript: GraphCallTranscript) -> MeetingTranscriptInfo:
+    return MeetingTranscriptInfo(
+        id=transcript.id,
+        meeting_id=transcript.meeting_id,
+        call_id=transcript.call_id,
+        created_at=transcript.created_date_time,
+        end_at=transcript.end_date_time,
+        content_correlation_id=transcript.content_correlation_id,
+        transcript_content_url=transcript.transcript_content_url,
+        meeting_organizer_display=_extract_sender(transcript.meeting_organizer),
+    )
+
+
+def _meeting_recording_info(recording: GraphCallRecording) -> MeetingRecordingInfo:
+    return MeetingRecordingInfo(
+        id=recording.id,
+        meeting_id=recording.meeting_id,
+        call_id=recording.call_id,
+        created_at=recording.created_date_time,
+        end_at=recording.end_date_time,
+        content_correlation_id=recording.content_correlation_id,
+        recording_content_url=recording.recording_content_url,
+        meeting_organizer_display=_extract_sender(recording.meeting_organizer),
+    )
+
+
+def _meeting_ai_insight_info(
+    insight: GraphCallAiInsight,
+    meeting_id: str,
+) -> MeetingAiInsightInfo:
+    return MeetingAiInsightInfo(
+        id=insight.id,
+        meeting_id=meeting_id,
+        call_id=insight.call_id,
+        created_at=insight.created_date_time,
+        end_at=insight.end_date_time,
+        content_correlation_id=insight.content_correlation_id,
+    )
+
+
+def _meeting_ai_insight_viewpoint(viewpoint) -> MeetingAiInsightViewpoint:
+    if viewpoint is None:
+        return MeetingAiInsightViewpoint()
+    return MeetingAiInsightViewpoint(
+        mention_events=[
+            MeetingAiInsightMentionEvent(
+                speaker_display=_extract_sender(item.speaker),
+                event_at=item.event_date_time,
+                transcript_utterance=item.transcript_utterance,
+            )
+            for item in viewpoint.mention_events
+        ]
+    )
+
+
+async def _get_me_user_id(g) -> str:
+    me = await g.get("/me", params={"$select": "id"})
+    user_id = (me or {}).get("id", "")
+    if not user_id:
+        raise RuntimeError("Could not resolve the signed-in Microsoft Graph user ID.")
+    return user_id
 
 
 def _team_member_settings_info(settings) -> TeamMemberSettingsInfo:
@@ -410,10 +550,52 @@ class TeamsGetMeetingInput(ToolRequestModel):
     profile: str | None = None
 
 
+class TeamsFindMeetingByUrlInput(ToolRequestModel):
+    join_web_url: str
+    profile: str | None = None
+
+
 class TeamsListMeetingsInput(ToolRequestModel):
     start_after: str | None = None
     start_before: str | None = None
     top: int = 10
+    profile: str | None = None
+
+
+class TeamsListMeetingTranscriptsInput(ToolRequestModel):
+    meeting_id: str
+    top: int = 50
+    profile: str | None = None
+
+
+class TeamsGetMeetingTranscriptInput(ToolRequestModel):
+    meeting_id: str
+    transcript_id: str
+    format: Literal["vtt"] = "vtt"
+    profile: str | None = None
+
+
+class TeamsListMeetingRecordingsInput(ToolRequestModel):
+    meeting_id: str
+    top: int = 50
+    profile: str | None = None
+
+
+class TeamsDownloadMeetingRecordingInput(ToolRequestModel):
+    meeting_id: str
+    recording_id: str
+    destination_path: Path
+    profile: str | None = None
+
+
+class TeamsListMeetingAiInsightsInput(ToolRequestModel):
+    meeting_id: str
+    profile: str | None = None
+
+
+class TeamsGetMeetingAiInsightInput(ToolRequestModel):
+    meeting_id: str
+    ai_insight_id: str
     profile: str | None = None
 
 
@@ -1014,11 +1196,46 @@ async def teams_get_meeting(
     meeting = GraphOnlineMeetingDetail.model_validate(
         await g.get(f"/me/onlineMeetings/{params.meeting_id}")
     )
-    return MeetingDetailResponse(
-        **_meeting_info(meeting).model_dump(),
-        participants=_meeting_participants_info(meeting.participants),
-        video_teleconference_id=meeting.video_teleconference_id,
+    return _meeting_detail_response(meeting)
+
+
+async def teams_find_meeting_by_url(
+    params: TeamsFindMeetingByUrlInput,
+) -> MeetingDetailResponse:
+    """
+    Find a Teams online meeting by its join URL.
+
+    Args:
+        join_web_url: The Teams meeting join URL from a calendar event or invite.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Meeting details for the unique online meeting matching the join URL.
+    """
+    g = get_graph(params.profile)
+    result = await g.get(
+        "/me/onlineMeetings",
+        params={
+            "$filter": _build_join_web_url_filter(params.join_web_url),
+            "$top": 2,
+            "$select": "id",
+        },
     )
+    meetings = parse_graph_collection(result, GraphOnlineMeetingDetail)
+    if not meetings:
+        raise RuntimeError(
+            "No Teams online meeting matched that join URL. Ensure the URL belongs to a "
+            "meeting in the signed-in user's calendar-backed online meetings."
+        )
+    if len(meetings) > 1:
+        raise RuntimeError(
+            "Multiple Teams online meetings matched that join URL. Use teams_list_meetings "
+            "or teams_get_meeting with a specific meeting ID instead."
+        )
+    meeting = GraphOnlineMeetingDetail.model_validate(
+        await g.get(f"/me/onlineMeetings/{meetings[0].id}")
+    )
+    return _meeting_detail_response(meeting)
 
 
 async def teams_list_meetings(
@@ -1071,6 +1288,258 @@ async def teams_list_meetings(
     )
 
 
+async def teams_list_meeting_transcripts(
+    params: TeamsListMeetingTranscriptsInput,
+) -> TeamsListMeetingTranscriptsResponse:
+    """
+    List transcript metadata for a Teams online meeting.
+
+    Only calendar-backed, non-expired meetings expose transcripts through Graph.
+
+    Args:
+        meeting_id: The online meeting object ID.
+        top: Maximum number of transcripts to return. Defaults to 50.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Structured transcript metadata including transcript content URLs.
+    """
+    g = get_graph(params.profile)
+    try:
+        result = await g.get(
+            f"/me/onlineMeetings/{params.meeting_id}/transcripts",
+            params={
+                "$top": params.top,
+                "$select": (
+                    "id,meetingId,callId,createdDateTime,endDateTime,"
+                    "contentCorrelationId,transcriptContentUrl,meetingOrganizer"
+                ),
+            },
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _meeting_artifact_error(exc, "Meeting transcripts") from None
+
+    transcripts = parse_graph_collection(result, GraphCallTranscript)
+    return TeamsListMeetingTranscriptsResponse(
+        meeting_id=params.meeting_id,
+        count=len(transcripts),
+        transcripts=[_meeting_transcript_info(item) for item in transcripts],
+        next_link=result.get("@odata.nextLink"),
+    )
+
+
+async def teams_get_meeting_transcript(
+    params: TeamsGetMeetingTranscriptInput,
+) -> MeetingTranscriptDetailResponse:
+    """
+    Fetch the content of a Teams meeting transcript as VTT text.
+
+    Only calendar-backed, non-expired meetings expose transcripts through Graph.
+
+    Args:
+        meeting_id: The online meeting object ID.
+        transcript_id: The transcript ID returned by teams_list_meeting_transcripts.
+        format: Transcript output format. V1 only supports 'vtt'.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Transcript metadata plus the decoded VTT content.
+    """
+    g = get_graph(params.profile)
+    try:
+        transcript = GraphCallTranscript.model_validate(
+            await g.get(
+                f"/me/onlineMeetings/{params.meeting_id}/transcripts/{params.transcript_id}"
+            )
+        )
+        content = await g.get_raw(
+            f"/me/onlineMeetings/{params.meeting_id}/transcripts/{params.transcript_id}/content?$format=text/{params.format}"
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _meeting_artifact_error(exc, "Meeting transcript content") from None
+
+    return MeetingTranscriptDetailResponse(
+        **_meeting_transcript_info(transcript).model_dump(),
+        content_type="text/vtt",
+        content=content.decode("utf-8", errors="replace"),
+    )
+
+
+async def teams_list_meeting_recordings(
+    params: TeamsListMeetingRecordingsInput,
+) -> TeamsListMeetingRecordingsResponse:
+    """
+    List recording metadata for a Teams online meeting.
+
+    Only calendar-backed, non-expired meetings expose recordings through Graph.
+
+    Args:
+        meeting_id: The online meeting object ID.
+        top: Maximum number of recordings to return. Defaults to 50.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Structured recording metadata including recording content URLs.
+    """
+    g = get_graph(params.profile)
+    try:
+        result = await g.get(
+            f"/me/onlineMeetings/{params.meeting_id}/recordings",
+            params={
+                "$top": params.top,
+                "$select": (
+                    "id,meetingId,callId,createdDateTime,endDateTime,"
+                    "contentCorrelationId,recordingContentUrl,meetingOrganizer"
+                ),
+            },
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _meeting_artifact_error(exc, "Meeting recordings") from None
+
+    recordings = parse_graph_collection(result, GraphCallRecording)
+    return TeamsListMeetingRecordingsResponse(
+        meeting_id=params.meeting_id,
+        count=len(recordings),
+        recordings=[_meeting_recording_info(item) for item in recordings],
+        next_link=result.get("@odata.nextLink"),
+    )
+
+
+async def teams_download_meeting_recording(
+    params: TeamsDownloadMeetingRecordingInput,
+) -> DownloadMeetingRecordingResponse:
+    """
+    Download a Teams meeting recording to a local filesystem path.
+
+    In delegated auth, Graph typically allows recording content download only for
+    the meeting organizer unless tenant policy explicitly allows participants.
+
+    Args:
+        meeting_id: The online meeting object ID.
+        recording_id: The recording ID returned by teams_list_meeting_recordings.
+        destination_path: Local output file path, or a directory to use with a generated filename.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Structured download confirmation.
+    """
+    g = get_graph(params.profile)
+    try:
+        recording = GraphCallRecording.model_validate(
+            await g.get(
+                f"/me/onlineMeetings/{params.meeting_id}/recordings/{params.recording_id}"
+            )
+        )
+        content = await g.get_raw(
+            f"/me/onlineMeetings/{params.meeting_id}/recordings/{params.recording_id}/content"
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _meeting_recording_download_error(exc) from None
+
+    filename = f"teams-recording-{recording.id or params.recording_id}.mp4"
+    dest = params.destination_path
+    if dest.is_dir():
+        dest = dest / Path(filename).name
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+
+    return DownloadMeetingRecordingResponse(
+        success=True,
+        action="teams_download_meeting_recording",
+        meeting_id=params.meeting_id,
+        recording_id=params.recording_id,
+        path=str(dest),
+        filename=filename,
+        size_bytes=len(content),
+        size_display=format_size_display(len(content)),
+    )
+
+
+async def teams_list_meeting_ai_insights(
+    params: TeamsListMeetingAiInsightsInput,
+) -> TeamsListMeetingAiInsightsResponse:
+    """
+    List Copilot AI insight metadata for a Teams online meeting.
+
+    AI insights require a work or school account, Microsoft 365 Copilot
+    licensing, and the OnlineMeetingAiInsight.Read.All delegated permission.
+
+    Args:
+        meeting_id: The online meeting object ID.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Structured AI insight metadata for the meeting.
+    """
+    g = get_graph(params.profile)
+    user_id = await _get_me_user_id(g)
+    try:
+        result = await g.get(
+            f"/copilot/users/{user_id}/onlineMeetings/{params.meeting_id}/aiInsights"
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _meeting_ai_insight_error(exc) from None
+
+    insights = parse_graph_collection(result, GraphCallAiInsight)
+    return TeamsListMeetingAiInsightsResponse(
+        meeting_id=params.meeting_id,
+        count=len(insights),
+        ai_insights=[_meeting_ai_insight_info(item, params.meeting_id) for item in insights],
+        next_link=result.get("@odata.nextLink"),
+    )
+
+
+async def teams_get_meeting_ai_insight(
+    params: TeamsGetMeetingAiInsightInput,
+) -> MeetingAiInsightDetailResponse:
+    """
+    Fetch the full Copilot AI insight payload for a Teams online meeting.
+
+    Args:
+        meeting_id: The online meeting object ID.
+        ai_insight_id: The AI insight ID returned by teams_list_meeting_ai_insights.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        The full AI insight content including meeting notes, action items, and viewpoint mentions.
+    """
+    g = get_graph(params.profile)
+    user_id = await _get_me_user_id(g)
+    try:
+        insight = GraphCallAiInsight.model_validate(
+            await g.get(
+                f"/copilot/users/{user_id}/onlineMeetings/{params.meeting_id}/aiInsights/{params.ai_insight_id}"
+            )
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _meeting_ai_insight_error(exc) from None
+
+    return MeetingAiInsightDetailResponse(
+        **_meeting_ai_insight_info(insight, params.meeting_id).model_dump(),
+        meeting_notes=[
+            MeetingAiInsightNote(
+                title=item.title,
+                text=item.text,
+                subpoints=[
+                    MeetingAiInsightNoteSubpoint(title=sub.title, text=sub.text)
+                    for sub in item.subpoints
+                ],
+            )
+            for item in insight.meeting_notes
+        ],
+        action_items=[
+            MeetingAiInsightActionItem(
+                title=item.title,
+                text=item.text,
+                owner_display_name=item.owner_display_name,
+            )
+            for item in insight.action_items
+        ],
+        viewpoint=_meeting_ai_insight_viewpoint(insight.viewpoint),
+    )
+
+
 def register(server) -> None:
     """Register all Teams tools with the given FastMCP server instance."""
     # Teams & Channels
@@ -1094,4 +1563,13 @@ def register(server) -> None:
     # Online Meetings
     register_tool(server, teams_create_meeting, annotations=WRITE_TOOL)
     register_tool(server, teams_get_meeting, annotations=READ_ONLY_TOOL)
+    register_tool(server, teams_find_meeting_by_url, annotations=READ_ONLY_TOOL)
     register_tool(server, teams_list_meetings, annotations=READ_ONLY_TOOL)
+    if is_teams_meeting_artifacts_enabled():
+        register_tool(server, teams_list_meeting_transcripts, annotations=READ_ONLY_TOOL)
+        register_tool(server, teams_get_meeting_transcript, annotations=READ_ONLY_TOOL)
+        register_tool(server, teams_list_meeting_recordings, annotations=READ_ONLY_TOOL)
+        register_tool(server, teams_download_meeting_recording, annotations=WRITE_TOOL)
+    if is_teams_ai_insights_enabled():
+        register_tool(server, teams_list_meeting_ai_insights, annotations=READ_ONLY_TOOL)
+        register_tool(server, teams_get_meeting_ai_insight, annotations=READ_ONLY_TOOL)

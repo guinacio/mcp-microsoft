@@ -16,6 +16,8 @@ class AppConfig:
     credentials_dir: Path = Path()
     enable_teams: bool | None = None
     enable_sharepoint: bool | None = None
+    enable_teams_meeting_artifacts: bool | None = None
+    enable_teams_ai_insights: bool | None = None
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -32,6 +34,8 @@ class AppConfig:
             credentials_dir=base_dir,
             enable_teams=env_flag("MCP_ENABLE_TEAMS"),
             enable_sharepoint=env_flag("MCP_ENABLE_SHAREPOINT"),
+            enable_teams_meeting_artifacts=env_flag("MCP_ENABLE_TEAMS_MEETING_ARTIFACTS"),
+            enable_teams_ai_insights=env_flag("MCP_ENABLE_TEAMS_AI_INSIGHTS"),
         )
 
 

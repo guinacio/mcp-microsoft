@@ -10,6 +10,13 @@ from __future__ import annotations
 
 from mcp_microsoft.config import AppConfig, env_flag, get_app_config
 
+_EXPLICIT_ONLY_FLAGS = frozenset(
+    {
+        "MCP_ENABLE_TEAMS_MEETING_ARTIFACTS",
+        "MCP_ENABLE_TEAMS_AI_INSIGHTS",
+    }
+)
+
 
 def _resolve_profile_for_detection(
     profile_name: str | None,
@@ -29,6 +36,10 @@ def _get_configured_flag(
         return runtime_config.enable_teams
     if env_name == "MCP_ENABLE_SHAREPOINT":
         return runtime_config.enable_sharepoint
+    if env_name == "MCP_ENABLE_TEAMS_MEETING_ARTIFACTS":
+        return runtime_config.enable_teams_meeting_artifacts
+    if env_name == "MCP_ENABLE_TEAMS_AI_INSIGHTS":
+        return runtime_config.enable_teams_ai_insights
     return env_flag(env_name)
 
 
@@ -44,6 +55,8 @@ def resolve_optional_service_enabled(
     profile. If no profile is available yet, fail safe to False.
     """
     explicit = _get_configured_flag(env_name, config=config)
+    if env_name in _EXPLICIT_ONLY_FLAGS:
+        return bool(explicit)
     if explicit is not None:
         return explicit
 
@@ -64,3 +77,19 @@ def is_teams_enabled(config: AppConfig | None = None) -> bool:
 def is_sharepoint_enabled(config: AppConfig | None = None) -> bool:
     """Return True when SharePoint should be enabled for the active/default profile."""
     return resolve_optional_service_enabled("MCP_ENABLE_SHAREPOINT", config=config)
+
+
+def is_teams_meeting_artifacts_enabled(config: AppConfig | None = None) -> bool:
+    """Return True when Teams meeting transcript/recording tools should be enabled."""
+    runtime_config = config or get_app_config()
+    if not is_teams_enabled(config=runtime_config):
+        return False
+    return bool(runtime_config.enable_teams_meeting_artifacts)
+
+
+def is_teams_ai_insights_enabled(config: AppConfig | None = None) -> bool:
+    """Return True when Teams Copilot AI insight tools should be enabled."""
+    runtime_config = config or get_app_config()
+    if not is_teams_enabled(config=runtime_config):
+        return False
+    return bool(runtime_config.enable_teams_ai_insights)

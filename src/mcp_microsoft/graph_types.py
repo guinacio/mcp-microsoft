@@ -430,6 +430,66 @@ class GraphOnlineMeetingDetail(GraphModel):
     video_teleconference_id: str = Field(default="", alias="videoTeleconferenceId")
 
 
+class GraphCallTranscript(GraphModel):
+    id: str = ""
+    meeting_id: str = Field(default="", alias="meetingId")
+    call_id: str = Field(default="", alias="callId")
+    created_date_time: str = Field(default="", alias="createdDateTime")
+    end_date_time: str = Field(default="", alias="endDateTime")
+    content_correlation_id: str = Field(default="", alias="contentCorrelationId")
+    transcript_content_url: str = Field(default="", alias="transcriptContentUrl")
+    meeting_organizer: GraphIdentitySet | None = Field(default=None, alias="meetingOrganizer")
+
+
+class GraphCallRecording(GraphModel):
+    id: str = ""
+    meeting_id: str = Field(default="", alias="meetingId")
+    call_id: str = Field(default="", alias="callId")
+    created_date_time: str = Field(default="", alias="createdDateTime")
+    end_date_time: str = Field(default="", alias="endDateTime")
+    content_correlation_id: str = Field(default="", alias="contentCorrelationId")
+    recording_content_url: str = Field(default="", alias="recordingContentUrl")
+    meeting_organizer: GraphIdentitySet | None = Field(default=None, alias="meetingOrganizer")
+
+
+class GraphCallAiInsightNoteSubpoint(GraphModel):
+    title: str = ""
+    text: str = ""
+
+
+class GraphCallAiInsightNote(GraphModel):
+    title: str = ""
+    text: str = ""
+    subpoints: list[GraphCallAiInsightNoteSubpoint] = Field(default_factory=list)
+
+
+class GraphCallAiInsightActionItem(GraphModel):
+    title: str = ""
+    text: str = ""
+    owner_display_name: str = Field(default="", alias="ownerDisplayName")
+
+
+class GraphCallAiInsightMentionEvent(GraphModel):
+    speaker: GraphIdentitySet | None = None
+    event_date_time: str = Field(default="", alias="eventDateTime")
+    transcript_utterance: str = Field(default="", alias="transcriptUtterance")
+
+
+class GraphCallAiInsightViewpoint(FlexibleGraphModel):
+    mention_events: list[GraphCallAiInsightMentionEvent] = Field(default_factory=list, alias="mentionEvents")
+
+
+class GraphCallAiInsight(GraphModel):
+    id: str = ""
+    call_id: str = Field(default="", alias="callId")
+    content_correlation_id: str = Field(default="", alias="contentCorrelationId")
+    created_date_time: str = Field(default="", alias="createdDateTime")
+    end_date_time: str = Field(default="", alias="endDateTime")
+    meeting_notes: list[GraphCallAiInsightNote] = Field(default_factory=list, alias="meetingNotes")
+    action_items: list[GraphCallAiInsightActionItem] = Field(default_factory=list, alias="actionItems")
+    viewpoint: GraphCallAiInsightViewpoint | None = None
+
+
 GraphModelT = TypeVar("GraphModelT", bound=GraphModel)
 
 

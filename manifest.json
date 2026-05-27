@@ -4,7 +4,7 @@
   "display_name": "Microsoft 365",
   "version": "0.6.0",
   "description": "Mail, Calendar, OneDrive, SharePoint, Contacts, and Teams via Microsoft Graph API for personal and enterprise accounts with multi-profile support",
-  "long_description": "Full Microsoft 365 integration for Claude Desktop. Manage emails, drafts, calendar events, OneDrive files, SharePoint sites, contacts, and Teams channels/chats/meetings across multiple accounts (personal Outlook.com/Live and enterprise Azure AD/Entra). Supports multi-profile authentication so you can switch between work and personal accounts seamlessly.\n\n**86 tools** covering:\n- **Mail**: Read, send, reply, forward, search, move, and manage emails\n- **Drafts**: Create, update, and send draft messages\n- **Calendar**: Events, scheduling, free/busy lookups, and meeting time suggestions\n- **OneDrive**: Browse, upload, download, search, and manage files\n- **SharePoint**: Browse sites, document libraries, upload/download files, and manage SharePoint lists (work accounts only)\n- **Contacts**: List, search, create, update, and delete contacts; manage contact folders and photos\n- **Teams**: Channels, channel messages, 1:1 and group chats, and online meetings (work accounts only)\n- **Profiles**: Add and switch between multiple Microsoft 365 accounts",
+  "long_description": "Full Microsoft 365 integration for Claude Desktop. Manage emails, drafts, calendar events, OneDrive files, SharePoint sites, contacts, and Teams channels/chats/meetings across multiple accounts (personal Outlook.com/Live and enterprise Azure AD/Entra). Supports multi-profile authentication so you can switch between work and personal accounts seamlessly.\n\n**93 tools** covering:\n- **Mail**: Read, send, reply, forward, search, move, and manage emails\n- **Drafts**: Create, update, and send draft messages\n- **Calendar**: Events, scheduling, free/busy lookups, and meeting time suggestions\n- **OneDrive**: Browse, upload, download, search, and manage files\n- **SharePoint**: Browse sites, document libraries, upload/download files, and manage SharePoint lists (work accounts only)\n- **Contacts**: List, search, create, update, and delete contacts; manage contact folders and photos\n- **Teams**: Channels, channel messages, 1:1 and group chats, online meetings, meeting transcripts, recordings, and Copilot AI insights (work accounts only; transcript/recording/AI tools are optional)\n- **Profiles**: Add and switch between multiple Microsoft 365 accounts",
   "icon": "icon.png",
   "author": {
     "name": "Guilherme Inacio",
@@ -25,7 +25,9 @@
         "MS365_TENANT_ID": "${user_config.tenant_id}",
         "MS365_CREDENTIALS_DIR": "${user_config.credentials_dir}",
         "MCP_ENABLE_TEAMS": "${user_config.enable_teams}",
-        "MCP_ENABLE_SHAREPOINT": "${user_config.enable_sharepoint}"
+        "MCP_ENABLE_SHAREPOINT": "${user_config.enable_sharepoint}",
+        "MCP_ENABLE_TEAMS_MEETING_ARTIFACTS": "${user_config.enable_teams_meeting_artifacts}",
+        "MCP_ENABLE_TEAMS_AI_INSIGHTS": "${user_config.enable_teams_ai_insights}"
       }
     }
   },
@@ -110,7 +112,14 @@
     { "name": "teams_create_chat", "description": "Create a new 1:1 or group Teams chat (work/school accounts only)" },
     { "name": "teams_create_meeting", "description": "Create a new Teams online meeting with join URL (work/school accounts only)" },
     { "name": "teams_get_meeting", "description": "Get details and join URL for a Teams online meeting (work/school accounts only)" },
+    { "name": "teams_find_meeting_by_url", "description": "Resolve a Teams online meeting from its join URL (work/school accounts only)" },
     { "name": "teams_list_meetings", "description": "List Teams online meetings within a date range (work/school accounts only)" },
+    { "name": "teams_list_meeting_transcripts", "description": "List transcript metadata for a Teams online meeting (optional work/school feature)" },
+    { "name": "teams_get_meeting_transcript", "description": "Fetch a Teams meeting transcript as VTT text (optional work/school feature)" },
+    { "name": "teams_list_meeting_recordings", "description": "List recording metadata for a Teams online meeting (optional work/school feature)" },
+    { "name": "teams_download_meeting_recording", "description": "Download a Teams meeting recording to a local path (optional work/school feature)" },
+    { "name": "teams_list_meeting_ai_insights", "description": "List Copilot AI insight metadata for a Teams online meeting (optional work/school feature)" },
+    { "name": "teams_get_meeting_ai_insight", "description": "Fetch the full Copilot AI insights payload for a Teams online meeting (optional work/school feature)" },
     { "name": "list_ms_profiles", "description": "List all configured Microsoft 365 profiles" },
     { "name": "add_ms_profile", "description": "Add a new Microsoft 365 profile" },
     { "name": "remove_ms_profile", "description": "Remove a profile and its cached tokens" },
@@ -163,6 +172,20 @@
       "type": "boolean",
       "title": "Enable Teams Tools",
       "description": "Register Microsoft Teams tools. Requires a work/organisational account with a specific tenant_id.",
+      "default": false,
+      "required": false
+    },
+    "enable_teams_meeting_artifacts": {
+      "type": "boolean",
+      "title": "Enable Teams Meeting Artifacts",
+      "description": "Register Teams meeting transcript and recording tools. Requires a work account and extra Graph permissions.",
+      "default": false,
+      "required": false
+    },
+    "enable_teams_ai_insights": {
+      "type": "boolean",
+      "title": "Enable Teams AI Insights",
+      "description": "Register Teams Copilot AI insight tools. Requires a work account, extra Graph permissions, and Microsoft 365 Copilot licensing.",
       "default": false,
       "required": false
     },

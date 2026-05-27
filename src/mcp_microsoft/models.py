@@ -825,6 +825,8 @@ class ServiceFlagsResponse(MCPModel):
     onedrive: bool = True
     sharepoint: bool = False
     teams: bool = False
+    teams_meeting_artifacts: bool = False
+    teams_ai_insights: bool = False
     drafts: bool = True
     folders: bool = True
     attachments: bool = True
@@ -1051,3 +1053,102 @@ class TeamsListMeetingsResponse(MCPModel):
     count: int = 0
     meetings: list[OnlineMeetingInfo] = Field(default_factory=list)
     next_link: str | None = None
+
+
+class MeetingTranscriptInfo(MCPModel):
+    id: str = ""
+    meeting_id: str = ""
+    call_id: str = ""
+    created_at: str = ""
+    end_at: str = ""
+    content_correlation_id: str = ""
+    transcript_content_url: str = ""
+    meeting_organizer_display: str = ""
+
+
+class TeamsListMeetingTranscriptsResponse(MCPModel):
+    meeting_id: str = ""
+    count: int = 0
+    transcripts: list[MeetingTranscriptInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class MeetingTranscriptDetailResponse(MeetingTranscriptInfo):
+    content_type: str = ""
+    content: str = ""
+
+
+class MeetingRecordingInfo(MCPModel):
+    id: str = ""
+    meeting_id: str = ""
+    call_id: str = ""
+    created_at: str = ""
+    end_at: str = ""
+    content_correlation_id: str = ""
+    recording_content_url: str = ""
+    meeting_organizer_display: str = ""
+
+
+class TeamsListMeetingRecordingsResponse(MCPModel):
+    meeting_id: str = ""
+    count: int = 0
+    recordings: list[MeetingRecordingInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class DownloadMeetingRecordingResponse(ActionResult):
+    meeting_id: str = ""
+    recording_id: str = ""
+    path: str = ""
+    filename: str = ""
+    size_bytes: int = 0
+    size_display: str = ""
+
+
+class MeetingAiInsightInfo(MCPModel):
+    id: str = ""
+    meeting_id: str = ""
+    call_id: str = ""
+    created_at: str = ""
+    end_at: str = ""
+    content_correlation_id: str = ""
+
+
+class MeetingAiInsightNoteSubpoint(MCPModel):
+    title: str = ""
+    text: str = ""
+
+
+class MeetingAiInsightNote(MCPModel):
+    title: str = ""
+    text: str = ""
+    subpoints: list[MeetingAiInsightNoteSubpoint] = Field(default_factory=list)
+
+
+class MeetingAiInsightActionItem(MCPModel):
+    title: str = ""
+    text: str = ""
+    owner_display_name: str = ""
+
+
+class MeetingAiInsightMentionEvent(MCPModel):
+    speaker_display: str = ""
+    event_at: str = ""
+    transcript_utterance: str = ""
+
+
+class MeetingAiInsightViewpoint(MCPModel):
+    mention_events: list[MeetingAiInsightMentionEvent] = Field(default_factory=list)
+
+
+class TeamsListMeetingAiInsightsResponse(MCPModel):
+    meeting_id: str = ""
+    count: int = 0
+    ai_insights: list[MeetingAiInsightInfo] = Field(default_factory=list)
+    next_link: str | None = None
+
+
+class MeetingAiInsightDetailResponse(MeetingAiInsightInfo):
+    meeting_notes: list[MeetingAiInsightNote] = Field(default_factory=list)
+    action_items: list[MeetingAiInsightActionItem] = Field(default_factory=list)
+    viewpoint: MeetingAiInsightViewpoint = Field(default_factory=MeetingAiInsightViewpoint)

@@ -7,7 +7,12 @@ currently active, based on explicit feature flags.
 from __future__ import annotations
 
 from mcp_microsoft.common.tooling import LOCAL_READ_TOOL, register_tool
-from mcp_microsoft.feature_flags import is_sharepoint_enabled, is_teams_enabled
+from mcp_microsoft.feature_flags import (
+    is_sharepoint_enabled,
+    is_teams_ai_insights_enabled,
+    is_teams_enabled,
+    is_teams_meeting_artifacts_enabled,
+)
 from mcp_microsoft.models import ServiceFlagsResponse
 
 async def list_enabled_services() -> ServiceFlagsResponse:
@@ -15,6 +20,8 @@ async def list_enabled_services() -> ServiceFlagsResponse:
     return ServiceFlagsResponse(
         sharepoint=is_sharepoint_enabled(),
         teams=is_teams_enabled(),
+        teams_meeting_artifacts=is_teams_meeting_artifacts_enabled(),
+        teams_ai_insights=is_teams_ai_insights_enabled(),
     )
 
 
