@@ -4,6 +4,7 @@
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 ![MCP](https://img.shields.io/badge/MCP-compatible-purple)
 [![Tests](https://github.com/guilhermeinacio/mcp-microsoft/actions/workflows/ci.yml/badge.svg)](https://github.com/guilhermeinacio/mcp-microsoft/actions/workflows/ci.yml)
+[![SafeSkill 91/100](https://img.shields.io/badge/SafeSkill-91%2F100_Verified%20Safe-brightgreen)](https://safeskill.dev/scan/guinacio-mcp-microsoft)
 
 Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, Contacts, and Teams via the Microsoft Graph API, with multi-account support.
 
