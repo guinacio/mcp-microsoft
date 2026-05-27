@@ -26,6 +26,7 @@ from mcp_microsoft.common.formatting import format_datetime_display
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.text import strip_html
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph_types import (
     GraphAttendee,
     GraphCalendar,
@@ -822,7 +823,8 @@ def register(server) -> None:
     register_tool(server, get_event, annotations=READ_ONLY_TOOL)
     register_tool(server, create_event, annotations=WRITE_TOOL)
     register_tool(server, update_event, annotations=WRITE_TOOL)
-    register_tool(server, delete_event, annotations=DESTRUCTIVE_TOOL)
+    if not is_deletion_disabled():
+        register_tool(server, delete_event, annotations=DESTRUCTIVE_TOOL)
     register_tool(server, rsvp_event, annotations=WRITE_TOOL)
     register_tool(server, get_free_busy, annotations=READ_ONLY_TOOL)
     register_tool(server, find_meeting_times, annotations=READ_ONLY_TOOL)

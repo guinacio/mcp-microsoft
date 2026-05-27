@@ -23,6 +23,7 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph_types import (
     GraphContact,
     GraphContactFolder,
@@ -184,8 +185,13 @@ async def list_contacts(params: ListContactsInput) -> ListContactsResponse:
 
     extra_headers: dict[str, str] | None = None
     if params.search:
+        # Reject control characters and cap length — $search is a free-text term,
+        # not a $filter expression, but degenerate input still produces noisy queries.
+        raw_search = params.search
+        if any(ord(c) < 0x20 for c in raw_search) or len(raw_search) > 256:
+            raise ValueError("search must be ≤256 printable characters")
         # $search requires ConsistencyLevel: eventual
-        query["$search"] = params.search
+        query["$search"] = raw_search
         extra_headers = {"ConsistencyLevel": "eventual"}
 
     if params.folder_id:
@@ -489,8 +495,9 @@ async def search_contacts(params: SearchContactsInput) -> SearchContactsResponse
     g = get_graph(params.profile)
     top = max(1, min(params.top, 100))
 
-    # Sanitize: remove single quotes to prevent OData injection
-    safe_query = params.query.replace("'", "")
+    # Escape single quotes by doubling (OData literal-string convention) to
+    # prevent injection via the $filter clause below.
+    safe_query = params.query.replace("'", "''")
 
     query_params: dict[str, Any] = {
         "$select": _CONTACT_SELECT,
@@ -554,7 +561,8 @@ def register(server) -> None:
     register_tool(server, get_contact, annotations=READ_ONLY_TOOL)
     register_tool(server, create_contact, annotations=WRITE_TOOL)
     register_tool(server, update_contact, annotations=WRITE_TOOL)
-    register_tool(server, delete_contact, annotations=DESTRUCTIVE_TOOL)
+    if not is_deletion_disabled():
+        register_tool(server, delete_contact, annotations=DESTRUCTIVE_TOOL)
     register_tool(server, list_contact_folders, annotations=READ_ONLY_TOOL)
     register_tool(server, search_contacts, annotations=READ_ONLY_TOOL)
     register_tool(server, get_contact_photo, annotations=READ_ONLY_TOOL)

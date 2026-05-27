@@ -256,9 +256,11 @@ list_ms_profiles()
 set_default_ms_profile(profile="work")
 ```
 
-Profiles are stored in `~/.microsoft-mcp/profiles.json`. Token caches are stored as `~/.microsoft-mcp/msal_cache_{name}.json`. After the first interactive login, MSAL handles token refresh silently.
+Profiles are stored in `~/.microsoft-mcp/profiles.json`. Token caches are stored as `~/.microsoft-mcp/msal_cache_{name}.bin` and encrypted at rest via OS-native APIs (DPAPI on Windows, Keychain on macOS, libsecret on Linux) using [msal-extensions](https://github.com/AzureAD/microsoft-authentication-extensions-for-python). Legacy plaintext caches from older versions are migrated automatically on first run. After the first interactive login, MSAL handles token refresh silently.
 
-> **Security note:** `profiles.json` and `msal_cache_*.json` contain refresh tokens. Do not commit them to version control. `MS365_CLIENT_ID` is not a secret and can be committed.
+> **Security note:** `profiles.json` contains the client/tenant IDs only — it has no secrets but is restricted to mode `0600` on POSIX. The `msal_cache_*.bin` files hold encrypted refresh tokens; do not commit either to version control. `MS365_CLIENT_ID` is not a secret and can be committed.
+>
+> **Disabling destructive tools:** set `MCP_DISABLE_DELETION_TOOLS=1` to suppress registration of all permanent-delete tools (`delete_email`, `bulk_delete_emails`, `delete_event`, `delete_contact`, `delete_folder`, `delete_drive_item`, `delete_list_item`, `remove_ms_profile`). Recoverable variants such as `trash_email` remain available.
 
 ## Configuration
 
@@ -271,6 +273,7 @@ Profiles are stored in `~/.microsoft-mcp/profiles.json`. Token caches are stored
 | `MCP_ENABLE_TEAMS` | No | auto-detect | Set to `true` to force-enable Teams tools or `false` to force-disable them |
 | `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS` | No | `false` | Set to `true` to register Teams transcript and recording tools and request the related delegated scopes |
 | `MCP_ENABLE_TEAMS_AI_INSIGHTS` | No | `false` | Set to `true` to register Teams Copilot AI insight tools and request `OnlineMeetingAiInsight.Read.All` |
+| `MCP_DISABLE_DELETION_TOOLS` | No | `false` | Set to `true` to suppress registration of all permanent-delete tools (recoverable trash variants remain) |
 
 `MS365_CLIENT_ID`, `MS365_TENANT_ID`, and `MS365_CREDENTIALS_DIR` are only used to bootstrap the `default` profile on first run. `MCP_ENABLE_TEAMS` and `MCP_ENABLE_SHAREPOINT` participate in the existing auto-detection behavior; `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS` and `MCP_ENABLE_TEAMS_AI_INSIGHTS` are explicit opt-ins only.
 

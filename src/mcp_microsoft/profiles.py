@@ -13,17 +13,114 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import msal
+from msal_extensions import FilePersistence, PersistedTokenCache
 
 from mcp_microsoft.config import AppConfig, get_app_config
 from mcp_microsoft.feature_flags import resolve_optional_service_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _cache_path_for(base_dir: Path, name: str) -> Path:
+    """Encrypted-cache file path for a profile (kept as .bin to signal opaque)."""
+    return base_dir / f"msal_cache_{name}.bin"
+
+
+def _legacy_cache_path_for(base_dir: Path, name: str) -> Path:
+    """Pre-encryption plaintext path; used only for one-time migration."""
+    return base_dir / f"msal_cache_{name}.json"
+
+
+def _restrict_permissions(path: Path, mode: int) -> None:
+    """Apply restrictive POSIX permissions; silently skip on Windows / on error.
+
+    Windows relies on the user-profile ACL which already restricts access to
+    the current user. ``chmod`` is essentially a no-op there.
+    """
+    if sys.platform == "win32":
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        logger.debug("chmod %o on %s failed: %s", mode, path, exc)
+
+
+def _build_persisted_cache(cfg: "ProfileConfig") -> msal.SerializableTokenCache:
+    """Return an OS-native encrypted MSAL token cache for *cfg*.
+
+    Uses DPAPI on Windows, Keychain on macOS, libsecret on Linux. When no
+    encrypted backend is available (typically headless Linux without
+    libsecret/dbus) falls back to plaintext ``FilePersistence`` with the
+    file restricted to mode 0600 and logs a warning.
+
+    Migrates any legacy plaintext cache (``msal_cache_<name>.json``) into the
+    encrypted store on first run, then deletes the legacy file.
+    """
+    encrypted_path = cfg.cache_path
+    persistence: Any = None
+
+    try:
+        if sys.platform == "win32":
+            from msal_extensions import FilePersistenceWithDataProtection
+
+            persistence = FilePersistenceWithDataProtection(str(encrypted_path))
+        elif sys.platform == "darwin":
+            from msal_extensions import KeychainPersistence
+
+            persistence = KeychainPersistence(
+                str(encrypted_path),
+                service_name="mcp-microsoft",
+                account_name=cfg.name,
+            )
+        else:
+            from msal_extensions import LibsecretPersistence
+
+            persistence = LibsecretPersistence(
+                str(encrypted_path),
+                schema_name="mcp-microsoft",
+                attributes={"profile": cfg.name},
+            )
+    except Exception as exc:
+        logger.warning(
+            "Encrypted token storage unavailable for profile %s (%s). "
+            "Falling back to plaintext cache with 0600 permissions.",
+            cfg.name,
+            exc,
+        )
+        persistence = FilePersistence(str(encrypted_path))
+
+    cache = PersistedTokenCache(persistence)
+
+    legacy_path = _legacy_cache_path_for(encrypted_path.parent, cfg.name)
+    if legacy_path.exists() and not encrypted_path.exists():
+        try:
+            legacy_content = legacy_path.read_text(encoding="utf-8")
+            persistence.save(legacy_content)
+            cache.deserialize(legacy_content)
+            legacy_path.unlink()
+            logger.info(
+                "Migrated token cache for profile %s to encrypted store.",
+                cfg.name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to migrate legacy token cache for profile %s: %s",
+                cfg.name,
+                exc,
+            )
+
+    if isinstance(persistence, FilePersistence) and encrypted_path.exists():
+        _restrict_permissions(encrypted_path, 0o600)
+
+    return cache
 
 # ---------------------------------------------------------------------------
 # Default scopes (importable by auth.py facade)
@@ -160,6 +257,7 @@ class ProfileManager:
     def _resolve_base_dir(config: AppConfig) -> Path:
         base = config.credentials_dir
         base.mkdir(parents=True, exist_ok=True)
+        _restrict_permissions(base, 0o700)
         return base
 
     # --- Loading / saving ------------------------------------------------
@@ -197,7 +295,7 @@ class ProfileManager:
                 client_id=cfg["client_id"],
                 tenant_id=cfg.get("tenant_id", "common"),
                 scopes=cfg.get("scopes"),
-                cache_path=self._base_dir / f"msal_cache_{name}.json",
+                cache_path=_cache_path_for(self._base_dir, name),
             )
 
         self._default_profile = data.get("default_profile", "")
@@ -220,7 +318,7 @@ class ProfileManager:
             name="default",
             client_id=client_id,
             tenant_id=tenant_id,
-            cache_path=self._base_dir / "msal_cache_default.json",
+            cache_path=_cache_path_for(self._base_dir, "default"),
         )
         self._default_profile = "default"
         self._save()
@@ -236,6 +334,7 @@ class ProfileManager:
         self._config_path.write_text(
             json.dumps(data, indent=2) + "\n", encoding="utf-8"
         )
+        _restrict_permissions(self._config_path, 0o600)
 
     # --- Profile resolution -----------------------------------------------
 
@@ -264,12 +363,7 @@ class ProfileManager:
         if cfg.name in self._msal_apps:
             return self._msal_apps[cfg.name]
 
-        cache = msal.SerializableTokenCache()
-        if cfg.cache_path.exists():
-            try:
-                cache.deserialize(cfg.cache_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass  # corrupt cache — fall through to interactive auth
+        cache = _build_persisted_cache(cfg)
 
         app = msal.PublicClientApplication(
             client_id=cfg.client_id,
@@ -280,18 +374,12 @@ class ProfileManager:
         return app
 
     def _save_cache(self, cfg: ProfileConfig, app: msal.PublicClientApplication) -> None:
-        """Persist the MSAL token cache for a profile if it has changed."""
-        cache = app.token_cache  # type: ignore[attr-defined]
-        if cache.has_state_changed:
-            try:
-                cfg.cache_path.write_text(cache.serialize(), encoding="utf-8")
-            except OSError as exc:
-                logger.warning(
-                    "Failed to persist token cache for profile %s at %s: %s",
-                    cfg.name,
-                    cfg.cache_path,
-                    exc,
-                )
+        """PersistedTokenCache auto-saves through ``modify()``; this is a no-op.
+
+        Retained for call-site stability; remove once no internal callers
+        invoke it directly.
+        """
+        return
 
     def get_token(self, profile: str | None = None) -> str:
         """Acquire a valid access token for the given profile."""
@@ -406,7 +494,7 @@ class ProfileManager:
             client_id=client_id.strip(),
             tenant_id=tenant_id.strip(),
             scopes=scopes,
-            cache_path=self._base_dir / f"msal_cache_{name}.json",
+            cache_path=_cache_path_for(self._base_dir, name),
         )
         self._profiles[name] = cfg
 
@@ -428,12 +516,13 @@ class ProfileManager:
         self._msal_apps.pop(name, None)
         self._graph_clients.pop(name, None)
 
-        # Remove token cache file
-        if cfg.cache_path.exists():
-            try:
-                cfg.cache_path.unlink()
-            except OSError:
-                pass
+        # Remove token cache file(s) — both encrypted and any leftover legacy file
+        for stale in (cfg.cache_path, _legacy_cache_path_for(self._base_dir, name)):
+            if stale.exists():
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
 
         # If we removed the default, pick the first remaining
         if self._default_profile == name:

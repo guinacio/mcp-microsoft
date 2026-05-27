@@ -93,3 +93,15 @@ def is_teams_ai_insights_enabled(config: AppConfig | None = None) -> bool:
     if not is_teams_enabled(config=runtime_config):
         return False
     return bool(runtime_config.enable_teams_ai_insights)
+
+
+def is_deletion_disabled(config: AppConfig | None = None) -> bool:
+    """Return True when destructive hard-delete tools should NOT be registered.
+
+    Controlled by ``MCP_DISABLE_DELETION_TOOLS``. When truthy, the server
+    omits all permanent-deletion tools (e.g. delete_email, delete_event,
+    delete_drive_item, remove_ms_profile). Recoverable variants such as
+    trash_email remain available.
+    """
+    runtime_config = config or get_app_config()
+    return bool(runtime_config.disable_deletion_tools)

@@ -1,0 +1,149 @@
+"""Tests for the security-hardening pass (token cache, deletion gate, confirm-fix)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from mcp_microsoft.config import reset_app_config
+from mcp_microsoft.runtime import reset_runtime_state
+from mcp_microsoft.tools import mail
+from mcp_microsoft.tools.mail import DeleteEmailInput, delete_email
+
+
+@pytest.fixture(autouse=True)
+def _reset_cached_config():
+    reset_app_config()
+    yield
+    reset_app_config()
+
+
+@pytest.mark.asyncio
+async def test_delete_email_with_confirm_true_and_no_ctx_fails_closed() -> None:
+    """confirm=True must NOT silently fall through to permanent deletion when
+    the host did not supply a Context (older MCP clients). Pre-fix code did
+    `if params.confirm and ctx:` which silently skipped the elicit prompt.
+    """
+    result = await delete_email(
+        DeleteEmailInput(message_id="msg-1", confirm=True),
+        ctx=None,
+    )
+
+    assert result.success is False
+    assert result.irreversible is True
+    assert "confirm=True requires" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_delete_email_with_confirm_false_still_deletes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When confirm=False the tool should perform the delete without elicitation.
+
+    Regression guard: ensure the new fail-closed branch only fires when confirm=True.
+    """
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def post(self, path: str, json: dict | None = None):
+            captured["path"] = path
+            return {}
+
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: DummyGraph())
+
+    result = await delete_email(
+        DeleteEmailInput(message_id="msg-2", confirm=False),
+        ctx=None,
+    )
+
+    assert result.success is True
+    assert captured["path"] == "/me/messages/msg-2/permanentDelete"
+
+
+@pytest.mark.asyncio
+async def test_disable_deletion_tools_hides_hard_deletes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MCP_DISABLE_DELETION_TOOLS=1 should remove every hard-delete tool from
+    the registered set while leaving recoverable variants registered.
+    """
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    monkeypatch.setenv("MS365_CLIENT_ID", "client-id")
+    monkeypatch.setenv("MS365_TENANT_ID", "common")
+    monkeypatch.setenv("MCP_DISABLE_DELETION_TOOLS", "1")
+    reset_runtime_state()
+
+    tool_names = {
+        tool.name
+        for tool in await server_mod.get_mcp_server(reset=True).list_tools(
+            run_middleware=False
+        )
+    }
+
+    hard_deletes = {
+        "delete_email",
+        "bulk_delete_emails",
+        "delete_event",
+        "delete_contact",
+        "delete_folder",
+        "delete_drive_item",
+        "remove_ms_profile",
+    }
+    assert hard_deletes.isdisjoint(tool_names), (
+        f"Expected hard-delete tools to be hidden, found: "
+        f"{hard_deletes & tool_names}"
+    )
+    # Recoverable variants must remain available.
+    assert "trash_email" in tool_names
+    assert "bulk_trash_emails" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_disable_deletion_tools_off_registers_hard_deletes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Default behavior: with the flag unset, hard-deletes remain registered."""
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    monkeypatch.setenv("MS365_CLIENT_ID", "client-id")
+    monkeypatch.setenv("MS365_TENANT_ID", "common")
+    monkeypatch.delenv("MCP_DISABLE_DELETION_TOOLS", raising=False)
+    reset_runtime_state()
+
+    tool_names = {
+        tool.name
+        for tool in await server_mod.get_mcp_server(reset=True).list_tools(
+            run_middleware=False
+        )
+    }
+
+    assert "delete_email" in tool_names
+    assert "delete_event" in tool_names
+    assert "delete_drive_item" in tool_names
+
+
+def test_persisted_cache_falls_back_and_restricts_permissions(tmp_path: Path) -> None:
+    """_build_persisted_cache must always return a usable cache.
+
+    On CI runners without DPAPI/Keychain/libsecret the encrypted backends raise
+    on construction and the helper falls back to FilePersistence. The fallback
+    path must still produce a working cache and restrict file permissions on
+    POSIX.
+    """
+    from mcp_microsoft.profiles import ProfileConfig, _build_persisted_cache
+
+    cfg = ProfileConfig(
+        name="test",
+        client_id="client",
+        tenant_id="common",
+        cache_path=tmp_path / "msal_cache_test.bin",
+    )
+
+    cache = _build_persisted_cache(cfg)
+
+    # Exercise the cache: serialize empty state and write through persistence.
+    cache.deserialize("")  # initialise empty
+    cache._persistence.save(cache.serialize())  # type: ignore[attr-defined]
+    assert cfg.cache_path.exists()

@@ -23,6 +23,7 @@ from mcp_microsoft.common.tooling import (
     WRITE_TOOL,
     register_tool,
 )
+from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.models import (
     AddProfileResponse,
     AddedProfileInfo,
@@ -251,6 +252,7 @@ def register(server) -> None:
     """Register all profile management tools with the given FastMCP server instance."""
     register_tool(server, list_ms_profiles, annotations=LOCAL_READ_TOOL)
     register_tool(server, add_ms_profile, annotations=LOCAL_WRITE_TOOL)
-    register_tool(server, remove_ms_profile, annotations=LOCAL_DESTRUCTIVE_TOOL)
+    if not is_deletion_disabled():
+        register_tool(server, remove_ms_profile, annotations=LOCAL_DESTRUCTIVE_TOOL)
     register_tool(server, authenticate_ms_profile, annotations=WRITE_TOOL)
     register_tool(server, set_default_ms_profile, annotations=LOCAL_IDEMPOTENT_TOOL)

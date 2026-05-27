@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph import get_graph
 from mcp_microsoft.graph_types import GraphMailFolder, parse_graph_collection
 from mcp_microsoft.models import (
@@ -197,4 +198,5 @@ def register(server) -> None:
     """Register all folder tools with the given FastMCP server instance."""
     register_tool(server, list_folders, annotations=READ_ONLY_TOOL)
     register_tool(server, create_folder, annotations=WRITE_TOOL)
-    register_tool(server, delete_folder, annotations=DESTRUCTIVE_TOOL)
+    if not is_deletion_disabled():
+        register_tool(server, delete_folder, annotations=DESTRUCTIVE_TOOL)

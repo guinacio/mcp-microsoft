@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "mcp-microsoft",
   "display_name": "Microsoft 365",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Mail, Calendar, OneDrive, SharePoint, Contacts, and Teams via Microsoft Graph API for personal and enterprise accounts with multi-profile support",
   "long_description": "Full Microsoft 365 integration for Claude Desktop. Manage emails, drafts, calendar events, OneDrive files, SharePoint sites, contacts, and Teams channels/chats/meetings across multiple accounts (personal Outlook.com/Live and enterprise Azure AD/Entra). Supports multi-profile authentication so you can switch between work and personal accounts seamlessly.\n\n**93 tools** covering:\n- **Mail**: Read, send, reply, forward, search, move, and manage emails\n- **Drafts**: Create, update, and send draft messages\n- **Calendar**: Events, scheduling, free/busy lookups, and meeting time suggestions\n- **OneDrive**: Browse, upload, download, search, and manage files\n- **SharePoint**: Browse sites, document libraries, upload/download files, and manage SharePoint lists (work accounts only)\n- **Contacts**: List, search, create, update, and delete contacts; manage contact folders and photos\n- **Teams**: Channels, channel messages, 1:1 and group chats, online meetings, meeting transcripts, recordings, and Copilot AI insights (work accounts only; transcript/recording/AI tools are optional)\n- **Profiles**: Add and switch between multiple Microsoft 365 accounts",
   "icon": "icon.png",
@@ -27,7 +27,8 @@
         "MCP_ENABLE_TEAMS": "${user_config.enable_teams}",
         "MCP_ENABLE_SHAREPOINT": "${user_config.enable_sharepoint}",
         "MCP_ENABLE_TEAMS_MEETING_ARTIFACTS": "${user_config.enable_teams_meeting_artifacts}",
-        "MCP_ENABLE_TEAMS_AI_INSIGHTS": "${user_config.enable_teams_ai_insights}"
+        "MCP_ENABLE_TEAMS_AI_INSIGHTS": "${user_config.enable_teams_ai_insights}",
+        "MCP_DISABLE_DELETION_TOOLS": "${user_config.disable_deletion_tools}"
       }
     }
   },
@@ -193,6 +194,13 @@
       "type": "boolean",
       "title": "Enable SharePoint Tools",
       "description": "Register SharePoint tools. Requires a work/organisational account.",
+      "default": false,
+      "required": false
+    },
+    "disable_deletion_tools": {
+      "type": "boolean",
+      "title": "Disable Permanent-Delete Tools",
+      "description": "When enabled, hides all permanent-delete tools (delete_email, delete_event, delete_drive_item, delete_folder, delete_contact, delete_list_item, bulk_delete_emails, remove_ms_profile). Recoverable variants such as trash_email remain available.",
       "default": false,
       "required": false
     }

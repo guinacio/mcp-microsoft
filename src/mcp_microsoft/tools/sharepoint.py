@@ -36,6 +36,7 @@ from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.text import strip_html
 from mcp_microsoft.common.transfer import upload_large_file_via_session
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph_types import (
     GraphDrive,
     GraphDriveItem,
@@ -1019,4 +1020,5 @@ def register(server) -> None:
     register_tool(server, get_list_items, annotations=READ_ONLY_TOOL)
     register_tool(server, create_list_item, annotations=WRITE_TOOL)
     register_tool(server, update_list_item, annotations=WRITE_TOOL)
-    register_tool(server, delete_list_item, annotations=DESTRUCTIVE_TOOL)
+    if not is_deletion_disabled():
+        register_tool(server, delete_list_item, annotations=DESTRUCTIVE_TOOL)

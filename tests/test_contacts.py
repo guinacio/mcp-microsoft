@@ -323,8 +323,8 @@ async def test_search_contacts_uses_startswith_filter(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
-async def test_search_contacts_sanitizes_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify search_contacts strips single quotes to prevent OData injection."""
+async def test_search_contacts_escapes_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify search_contacts doubles single quotes per the OData escape rule."""
     captured: dict[str, object] = {}
 
     class DummyGraph:
@@ -335,9 +335,30 @@ async def test_search_contacts_sanitizes_quotes(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
     await contacts.search_contacts(contacts.SearchContactsInput(query="O'Reilly"))
 
-    # Single quotes must be stripped from the filter value
-    assert "O'Reilly" not in captured["params"]["$filter"]
-    assert "OReilly" in captured["params"]["$filter"]
+    # Quote-doubling produces a syntactically valid OData literal that
+    # preserves the apostrophe rather than silently mangling user input.
+    assert "startswith(displayName,'O''Reilly')" in captured["params"]["$filter"]
+
+
+@pytest.mark.asyncio
+async def test_search_contacts_injection_cannot_escape_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify a probe attempting to break out of the literal stays contained."""
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None, headers: dict = None):
+            captured["params"] = params
+            return {"value": []}
+
+    monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
+    # Classic OData break-out attempt: close the string and append a tautology.
+    await contacts.search_contacts(contacts.SearchContactsInput(query="x') or (true"))
+
+    filter_clause = captured["params"]["$filter"]
+    # All literal quotes are doubled, so the apostrophe cannot terminate the string.
+    assert filter_clause == "startswith(displayName,'x'') or (true')"
+    # Sanity: no unbalanced ') sequence that would close the literal prematurely.
+    assert "''" in filter_clause
 
 
 # ---------------------------------------------------------------------------

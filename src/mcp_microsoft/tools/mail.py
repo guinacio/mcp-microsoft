@@ -63,6 +63,7 @@ from mcp_microsoft.common.tooling import (
     WRITE_TOOL,
     register_tool,
 )
+from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph_types import (
     GraphAttachment,
     GraphItemBody,
@@ -880,7 +881,18 @@ async def delete_email(
     Returns:
         Structured delete confirmation.
     """
-    if params.confirm and ctx:
+    if params.confirm:
+        if ctx is None:
+            return DeleteEmailResponse(
+                success=False,
+                action="permanent_delete",
+                message_id=params.message_id,
+                error=(
+                    "confirm=True requires an MCP host that supports elicitation. "
+                    "Set confirm=False to bypass the prompt or upgrade your client."
+                ),
+                irreversible=True,
+            )
         result = await ctx.elicit(
             f"Permanently delete this email? This action is IRREVERSIBLE.\n\nMessage ID: {params.message_id}",
             response_type=_Confirmation,
@@ -1232,7 +1244,8 @@ def register(server) -> None:
     register_tool(server, mark_as_unread, annotations=IDEMPOTENT_WRITE_TOOL)
     register_tool(server, move_email, annotations=WRITE_TOOL)
     register_tool(server, trash_email, annotations=WRITE_TOOL)
-    register_tool(server, delete_email, annotations=DESTRUCTIVE_TOOL)
     register_tool(server, bulk_move_emails, annotations=WRITE_TOOL)
     register_tool(server, bulk_trash_emails, annotations=WRITE_TOOL)
-    register_tool(server, bulk_delete_emails, annotations=DESTRUCTIVE_TOOL)
+    if not is_deletion_disabled():
+        register_tool(server, delete_email, annotations=DESTRUCTIVE_TOOL)
+        register_tool(server, bulk_delete_emails, annotations=DESTRUCTIVE_TOOL)

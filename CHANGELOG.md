@@ -7,6 +7,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.7.0] — 2026-05-26
+
+### Security
+
+- **Encrypted token cache** (`profiles.py`). MSAL token caches were previously written as plaintext JSON to `~/.microsoft-mcp/msal_cache_*.json`, exposing refresh tokens to any process running as the same user. Caches are now persisted via [msal-extensions](https://github.com/AzureAD/microsoft-authentication-extensions-for-python) using OS-native encryption: DPAPI on Windows, Keychain on macOS, libsecret on Linux. A permission-restricted plaintext fallback (mode `0600`) covers headless Linux without a keyring. Legacy `msal_cache_*.json` files are migrated to the encrypted `.bin` format on first run and the originals are deleted.
+- **`profiles.json` permissions tightened** to `0600` on POSIX; the credentials directory to `0700`. Windows relies on the existing user-profile ACL.
+- **`delete_email` confirm bug fix** (`tools/mail.py`). The pre-flight guard read `if params.confirm and ctx:`, silently skipping the elicitation prompt when an MCP host did not supply a `Context` and proceeding straight to permanent deletion. The tool now fails closed when `confirm=True` but `ctx` is unavailable.
+- **OData injection fix in `search_contacts`** (`tools/contacts.py`). User input was previously sanitised by stripping single quotes — bypassable via OData operators (e.g. `') and (true`). Replaced with proper OData quote-doubling (`'` → `''`). `list_contacts` `$search` now also rejects control characters and caps input at 256 chars.
+
+### Added
+
+- **`MCP_DISABLE_DELETION_TOOLS` env var** (`config.py`, `feature_flags.py`). When truthy, the server omits registration of all permanent-delete tools: `delete_email`, `bulk_delete_emails`, `delete_event`, `delete_contact`, `delete_folder`, `delete_drive_item`, `delete_list_item`, `remove_ms_profile`. Recoverable variants (`trash_email`, `bulk_trash_emails`, `move_or_copy_item`) remain available. Surfaced as a "Disable Permanent-Delete Tools" toggle in the MCPB extension settings.
+- **`mcp-microsoft-nodelete.mcpb`** companion bundle — identical capability surface but with `MCP_DISABLE_DELETION_TOOLS=true` hardcoded and the toggle hidden from extension settings. Installable side-by-side with the main bundle.
+
+### Changed
+
+- New runtime dependency: `msal-extensions>=1.2`.
+- Token-cache file extension changed from `.json` to `.bin` to signal the new opaque encrypted format.
+
+### Tests
+
+- `tests/test_security_hardening.py` — confirm fail-closed path, deletion-tool gating in both directions, persisted-cache fallback writes through to disk.
+- `tests/test_contacts.py` — updated to assert OData quote-doubling instead of quote-stripping; added a break-out attempt to verify the literal cannot be escaped.
+
+---
+
 ## [0.6.0] — 2026-04-02
 
 ### Added

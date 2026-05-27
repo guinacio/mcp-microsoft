@@ -18,6 +18,7 @@ class AppConfig:
     enable_sharepoint: bool | None = None
     enable_teams_meeting_artifacts: bool | None = None
     enable_teams_ai_insights: bool | None = None
+    disable_deletion_tools: bool = False
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -36,6 +37,7 @@ class AppConfig:
             enable_sharepoint=env_flag("MCP_ENABLE_SHAREPOINT"),
             enable_teams_meeting_artifacts=env_flag("MCP_ENABLE_TEAMS_MEETING_ARTIFACTS"),
             enable_teams_ai_insights=env_flag("MCP_ENABLE_TEAMS_AI_INSIGHTS"),
+            disable_deletion_tools=bool(env_flag("MCP_DISABLE_DELETION_TOOLS")),
         )
 
 
