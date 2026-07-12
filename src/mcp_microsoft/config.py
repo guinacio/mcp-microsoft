@@ -19,6 +19,17 @@ class AppConfig:
     enable_teams_meeting_artifacts: bool | None = None
     enable_teams_ai_insights: bool | None = None
     disable_deletion_tools: bool = False
+    # Transport / remote (http) mode. stdio mode ignores every MCP_HTTP_* /
+    # MCP_AUTH_* value below.
+    transport: str = "stdio"
+    http_host: str = "127.0.0.1"
+    http_port: int = 8000
+    http_stateless: bool = False
+    base_url: str = ""
+    auth_client_id: str = ""
+    auth_client_secret: str = ""
+    auth_tenant_id: str = ""
+    auth_required_scope: str = "mcp-access"
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -38,6 +49,16 @@ class AppConfig:
             enable_teams_meeting_artifacts=env_flag("MCP_ENABLE_TEAMS_MEETING_ARTIFACTS"),
             enable_teams_ai_insights=env_flag("MCP_ENABLE_TEAMS_AI_INSIGHTS"),
             disable_deletion_tools=bool(env_flag("MCP_DISABLE_DELETION_TOOLS")),
+            transport=os.environ.get("MCP_TRANSPORT", "stdio").strip().lower() or "stdio",
+            http_host=os.environ.get("MCP_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1",
+            http_port=_int_env("MCP_HTTP_PORT", 8000),
+            http_stateless=bool(env_flag("MCP_HTTP_STATELESS")),
+            base_url=os.environ.get("MCP_BASE_URL", "").strip(),
+            auth_client_id=os.environ.get("MCP_AUTH_CLIENT_ID", "").strip(),
+            auth_client_secret=os.environ.get("MCP_AUTH_CLIENT_SECRET", "").strip(),
+            auth_tenant_id=os.environ.get("MCP_AUTH_TENANT_ID", "").strip(),
+            auth_required_scope=os.environ.get("MCP_AUTH_REQUIRED_SCOPE", "mcp-access").strip()
+            or "mcp-access",
         )
 
 
@@ -46,6 +67,47 @@ def env_flag(name: str) -> bool | None:
     if not value:
         return None
     return value.lower() in TRUTHY_ENV_VALUES
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def validate_http_config(config: AppConfig) -> list[str]:
+    """Return human-readable configuration problems for http transport mode.
+
+    An empty list means the configuration is complete enough to start the
+    Streamable HTTP server. Dependency-free: performs no imports, disk, or
+    network I/O so it can run before any provider is constructed.
+    """
+    problems: list[str] = []
+
+    if config.transport not in ("stdio", "http"):
+        problems.append(
+            f"MCP_TRANSPORT must be 'stdio' or 'http' (got {config.transport!r})"
+        )
+
+    if not config.base_url:
+        problems.append("MCP_BASE_URL is required in http mode")
+    elif not config.base_url.startswith(("http://", "https://")):
+        problems.append(
+            f"MCP_BASE_URL must start with http:// or https:// (got {config.base_url!r})"
+        )
+
+    if not config.auth_client_id:
+        problems.append("MCP_AUTH_CLIENT_ID is required in http mode")
+    if not config.auth_client_secret:
+        problems.append("MCP_AUTH_CLIENT_SECRET is required in http mode")
+    if not config.auth_tenant_id:
+        problems.append("MCP_AUTH_TENANT_ID is required in http mode")
+
+    return problems
 
 
 _config_cache: AppConfig | None = None
