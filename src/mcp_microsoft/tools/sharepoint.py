@@ -25,6 +25,7 @@ Implemented:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -70,6 +71,8 @@ from mcp_microsoft.models import (
 from mcp_microsoft.config import get_app_config
 from mcp_microsoft.graph import get_graph
 from mcp_microsoft.profiles import _PERSONAL_TENANT_IDS, get_profile_manager
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -496,6 +499,12 @@ async def upload_to_site(
     Returns:
         Structured upload confirmation.
     """
+    if params.local_path is not None and get_app_config().transport == "http":
+        raise ValueError(
+            "local_path is not available in multi-user http mode (the server's "
+            "disk is not the caller's disk); use content_base64 instead."
+        )
+
     import base64
     import tempfile
 
@@ -1046,7 +1055,13 @@ def register(server) -> None:
     register_tool(server, list_site_files, annotations=READ_ONLY_TOOL)
     register_tool(server, get_site_file, annotations=READ_ONLY_TOOL)
     register_tool(server, upload_to_site, annotations=WRITE_TOOL)
-    register_tool(server, download_from_site, annotations=WRITE_TOOL)
+    if get_app_config().transport == "http":
+        _log.info(
+            "download_from_site not registered (http transport; server disk "
+            "is not the caller's disk)"
+        )
+    else:
+        register_tool(server, download_from_site, annotations=WRITE_TOOL)
     register_tool(server, list_site_lists, annotations=READ_ONLY_TOOL)
     register_tool(server, get_list_items, annotations=READ_ONLY_TOOL)
     register_tool(server, create_list_item, annotations=WRITE_TOOL)

@@ -30,7 +30,22 @@ _HTTP_ENV_VARS = (
     "MCP_AUTH_CLIENT_SECRET",
     "MCP_AUTH_TENANT_ID",
     "MCP_AUTH_REQUIRED_SCOPE",
+    "MCP_RATE_LIMIT_RPS",
 )
+
+_FULL_HTTP_ENV = {
+    "MCP_TRANSPORT": "http",
+    "MCP_BASE_URL": "https://mcp.example.com",
+    "MCP_AUTH_CLIENT_ID": "cid",
+    "MCP_AUTH_CLIENT_SECRET": "secret",
+    "MCP_AUTH_TENANT_ID": "organizations",
+}
+
+
+def _set_full_http_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    """Set the minimal env needed to construct a valid http-mode server."""
+    for name, value in {**_FULL_HTTP_ENV, **overrides}.items():
+        monkeypatch.setenv(name, value)
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +131,26 @@ def test_from_env_invalid_port_raises_clear_error(
     _clear_http_env(monkeypatch)
     monkeypatch.setenv("MCP_HTTP_PORT", "not-a-number")
     with pytest.raises(ValueError, match="MCP_HTTP_PORT must be an integer"):
+        AppConfig.from_env()
+
+
+def test_from_env_rate_limit_rps_defaults_to_ten(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_http_env(monkeypatch)
+    assert AppConfig.from_env().rate_limit_rps == 10.0
+
+
+def test_from_env_parses_rate_limit_rps(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_http_env(monkeypatch)
+    monkeypatch.setenv("MCP_RATE_LIMIT_RPS", "25.5")
+    assert AppConfig.from_env().rate_limit_rps == 25.5
+
+
+def test_from_env_invalid_rate_limit_raises_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_http_env(monkeypatch)
+    monkeypatch.setenv("MCP_RATE_LIMIT_RPS", "not-a-number")
+    with pytest.raises(ValueError, match="MCP_RATE_LIMIT_RPS must be a number"):
         AppConfig.from_env()
 
 
@@ -380,3 +415,549 @@ def test_sharepoint_stdio_mode_still_rejects_consumer_profile(
 
     with pytest.raises(ValueError, match="work or school"):
         sharepoint._get_sharepoint_graph("personal")
+
+
+# --------------------------------------------------------------------------
+# server.main() — transport dispatch
+# --------------------------------------------------------------------------
+
+
+def test_main_aborts_on_unknown_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unrecognized MCP_TRANSPORT must abort startup, never silently run stdio."""
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    monkeypatch.setenv("MCP_TRANSPORT", "garbage")
+    reset_runtime_state()
+
+    def _fail_if_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "get_mcp_server() must not be reached for an unknown transport"
+        )
+
+    monkeypatch.setattr(server_mod, "get_mcp_server", _fail_if_called)
+
+    with pytest.raises(SystemExit, match="MCP_TRANSPORT must be 'stdio' or 'http'"):
+        server_mod.main()
+
+
+def test_main_rejects_incomplete_http_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression guard: http transport with missing auth config still aborts."""
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    monkeypatch.setenv("MCP_TRANSPORT", "http")
+    reset_runtime_state()
+
+    monkeypatch.setattr(
+        server_mod,
+        "get_mcp_server",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("get_mcp_server() must not be reached")
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="Cannot start http transport"):
+        server_mod.main()
+
+
+# --------------------------------------------------------------------------
+# create_mcp_server — ProfileManager warm-up is stdio-only
+# --------------------------------------------------------------------------
+
+
+def test_http_mode_skips_profile_manager_warmup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """http mode never uses ProfileManager, so it must not create its dir."""
+    import mcp_microsoft.server as server_mod
+
+    creds_dir = tmp_path / "creds"
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(creds_dir))
+    _clear_http_env(monkeypatch)
+    _set_full_http_env(monkeypatch)
+    reset_runtime_state()
+
+    server_mod.get_mcp_server(reset=True)
+
+    assert not creds_dir.exists(), (
+        "http mode must not warm up ProfileManager (it would needlessly "
+        "create the credentials directory)"
+    )
+
+
+def test_stdio_mode_still_warms_up_profile_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression guard: stdio mode's eager ProfileManager warm-up is unchanged."""
+    import mcp_microsoft.server as server_mod
+
+    creds_dir = tmp_path / "creds"
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(creds_dir))
+    _clear_http_env(monkeypatch)
+    reset_runtime_state()
+
+    server_mod.get_mcp_server(reset=True)
+
+    assert creds_dir.exists()
+
+
+# --------------------------------------------------------------------------
+# create_mcp_server — http-only middleware stack (rate limit + audit log)
+# and error masking
+# --------------------------------------------------------------------------
+
+
+def test_http_mode_wires_rate_limit_and_audit_middleware(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import mcp_microsoft.server as server_mod
+    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
+    from mcp_microsoft.middleware import AuditLoggingMiddleware
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    _set_full_http_env(monkeypatch)
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+
+    rate_limiters = [mw for mw in mcp.middleware if isinstance(mw, RateLimitingMiddleware)]
+    audit_loggers = [mw for mw in mcp.middleware if isinstance(mw, AuditLoggingMiddleware)]
+    assert len(rate_limiters) == 1
+    assert rate_limiters[0].max_requests_per_second == 10.0
+    assert len(audit_loggers) == 1
+    # Rate limiting runs before audit logging in the stack.
+    assert mcp.middleware.index(rate_limiters[0]) < mcp.middleware.index(audit_loggers[0])
+
+
+def test_http_mode_zero_rate_limit_disables_limiter_but_keeps_audit_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import mcp_microsoft.server as server_mod
+    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
+    from mcp_microsoft.middleware import AuditLoggingMiddleware
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    _set_full_http_env(monkeypatch, MCP_RATE_LIMIT_RPS="0")
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+
+    assert not any(isinstance(mw, RateLimitingMiddleware) for mw in mcp.middleware)
+    assert any(isinstance(mw, AuditLoggingMiddleware) for mw in mcp.middleware)
+
+
+def test_stdio_mode_has_no_http_only_middleware(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import mcp_microsoft.server as server_mod
+    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
+    from mcp_microsoft.middleware import AuditLoggingMiddleware
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+
+    assert not any(isinstance(mw, RateLimitingMiddleware) for mw in mcp.middleware)
+    assert not any(isinstance(mw, AuditLoggingMiddleware) for mw in mcp.middleware)
+
+
+def test_http_mode_enables_error_masking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    _set_full_http_env(monkeypatch)
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+
+    assert mcp._mask_error_details is True
+
+
+def test_stdio_mode_does_not_force_error_masking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression guard: stdio mode keeps fastmcp's own default (False)."""
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+
+    assert mcp._mask_error_details is False
+
+
+# --------------------------------------------------------------------------
+# create_mcp_server — GET /health (http mode only, unauthenticated)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_http_mode_health_endpoint_is_unauthenticated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import httpx
+
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    _set_full_http_env(monkeypatch)
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+    app = mcp.http_app()
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "transport": "http"}
+
+
+def test_stdio_mode_registers_no_custom_http_routes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+
+    assert mcp._additional_http_routes == []
+
+
+# --------------------------------------------------------------------------
+# Local-disk tool audit — mixed-interface tools reject disk paths in http
+# mode; disk-only tools are not registered in http mode.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_onedrive_upload_file_rejects_local_path_in_http_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from mcp_microsoft.tools import onedrive
+
+    monkeypatch.setattr(onedrive, "get_app_config", lambda: AppConfig(transport="http"))
+    local_file = tmp_path / "f.txt"
+    local_file.write_text("hi")
+
+    with pytest.raises(ValueError, match="not available in multi-user http mode"):
+        await onedrive.upload_file(onedrive.UploadFileInput(local_path=local_file))
+
+
+@pytest.mark.asyncio
+async def test_onedrive_upload_file_allows_content_base64_in_http_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    from mcp_microsoft.tools import onedrive
+
+    monkeypatch.setattr(onedrive, "get_app_config", lambda: AppConfig(transport="http"))
+
+    class DummyGraph:
+        async def put(self, path: str, content: bytes) -> dict:
+            return {"id": "drive-item", "webUrl": "https://example.invalid/file"}
+
+    monkeypatch.setattr(onedrive, "get_graph", lambda _profile: DummyGraph())
+
+    result = await onedrive.upload_file(
+        onedrive.UploadFileInput(
+            local_path=None,
+            filename="report.txt",
+            content_base64=base64.b64encode(b"hello").decode("ascii"),
+        )
+    )
+
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_onedrive_download_file_not_registered_in_http_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastmcp import FastMCP
+
+    from mcp_microsoft.tools import onedrive
+
+    monkeypatch.setattr(onedrive, "get_app_config", lambda: AppConfig(transport="http"))
+    mcp = FastMCP("test-server")
+    onedrive.register(mcp)
+
+    names = {t.name for t in await mcp.list_tools(run_middleware=False)}
+    assert "download_file" not in names
+    assert "upload_file" in names  # mixed-interface tools stay registered
+
+
+@pytest.mark.asyncio
+async def test_onedrive_download_file_registered_in_stdio_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastmcp import FastMCP
+
+    from mcp_microsoft.tools import onedrive
+
+    monkeypatch.setattr(onedrive, "get_app_config", lambda: AppConfig(transport="stdio"))
+    mcp = FastMCP("test-server")
+    onedrive.register(mcp)
+
+    names = {t.name for t in await mcp.list_tools(run_middleware=False)}
+    assert "download_file" in names
+
+
+@pytest.mark.asyncio
+async def test_download_attachment_rejects_save_path_in_http_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from mcp_microsoft.tools import attachments
+
+    monkeypatch.setattr(attachments, "get_app_config", lambda: AppConfig(transport="http"))
+
+    with pytest.raises(ValueError, match="not available in multi-user http mode"):
+        await attachments.download_attachment(
+            attachments.DownloadAttachmentInput(
+                message_id="m1",
+                attachment_id="a1",
+                save_path=tmp_path / "out.bin",
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_contact_photo_rejects_save_path_in_http_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from mcp_microsoft.tools import contacts
+
+    monkeypatch.setattr(contacts, "get_app_config", lambda: AppConfig(transport="http"))
+
+    with pytest.raises(ValueError, match="not available in multi-user http mode"):
+        await contacts.get_contact_photo(
+            contacts.GetContactPhotoInput(
+                contact_id="c1",
+                save_path=str(tmp_path / "photo.jpg"),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_upload_to_site_rejects_local_path_in_http_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from mcp_microsoft.tools import sharepoint
+
+    monkeypatch.setattr(sharepoint, "get_app_config", lambda: AppConfig(transport="http"))
+    local_file = tmp_path / "f.txt"
+    local_file.write_text("hi")
+
+    with pytest.raises(ValueError, match="not available in multi-user http mode"):
+        await sharepoint.upload_to_site(
+            sharepoint.UploadToSiteInput(
+                site_id="site",
+                drive_id="drive",
+                local_path=local_file,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_from_site_not_registered_in_http_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastmcp import FastMCP
+
+    from mcp_microsoft.tools import sharepoint
+
+    monkeypatch.setattr(sharepoint, "get_app_config", lambda: AppConfig(transport="http"))
+    mcp = FastMCP("test-server")
+    sharepoint.register(mcp)
+
+    names = {t.name for t in await mcp.list_tools(run_middleware=False)}
+    assert "download_from_site" not in names
+    assert "upload_to_site" in names  # mixed-interface tools stay registered
+
+
+@pytest.mark.asyncio
+async def test_download_from_site_registered_in_stdio_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastmcp import FastMCP
+
+    from mcp_microsoft.tools import sharepoint
+
+    monkeypatch.setattr(sharepoint, "get_app_config", lambda: AppConfig(transport="stdio"))
+    mcp = FastMCP("test-server")
+    sharepoint.register(mcp)
+
+    names = {t.name for t in await mcp.list_tools(run_middleware=False)}
+    assert "download_from_site" in names
+
+
+@pytest.mark.asyncio
+async def test_teams_download_recording_not_registered_in_http_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Disk-only Teams recording download stays gated in http mode even when
+    the meeting-artifacts flag (explicit-only in all modes) is turned on.
+    """
+    _clear_http_env(monkeypatch)
+    monkeypatch.delenv("MCP_ENABLE_TEAMS_MEETING_ARTIFACTS", raising=False)
+    names = await _tool_names(
+        monkeypatch,
+        tmp_path,
+        MCP_TRANSPORT="http",
+        MCP_BASE_URL="https://mcp.example.com",
+        MCP_AUTH_CLIENT_ID="cid",
+        MCP_AUTH_CLIENT_SECRET="secret",
+        MCP_AUTH_TENANT_ID="organizations",
+        MCP_ENABLE_TEAMS="true",
+        MCP_ENABLE_TEAMS_MEETING_ARTIFACTS="true",
+    )
+
+    assert "teams_list_meeting_recordings" in names  # sanity: artifacts flag worked
+    assert "teams_download_meeting_recording" not in names
+
+
+@pytest.mark.asyncio
+async def test_teams_download_recording_registered_in_stdio_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_http_env(monkeypatch)
+    monkeypatch.delenv("MCP_ENABLE_TEAMS_MEETING_ARTIFACTS", raising=False)
+    names = await _tool_names(
+        monkeypatch,
+        tmp_path,
+        MCP_ENABLE_TEAMS="true",
+        MCP_ENABLE_TEAMS_MEETING_ARTIFACTS="true",
+    )
+
+    assert "teams_download_meeting_recording" in names
+
+
+# --------------------------------------------------------------------------
+# Kill-switch & optional-service gating verified specifically in http mode
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_http_mode_disable_deletion_tools_removes_hard_deletes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MCP_DISABLE_DELETION_TOOLS must still hide hard-delete tools in http mode."""
+    _clear_http_env(monkeypatch)
+    names = await _tool_names(
+        monkeypatch,
+        tmp_path,
+        MCP_TRANSPORT="http",
+        MCP_BASE_URL="https://mcp.example.com",
+        MCP_AUTH_CLIENT_ID="cid",
+        MCP_AUTH_CLIENT_SECRET="secret",
+        MCP_AUTH_TENANT_ID="organizations",
+        MCP_DISABLE_DELETION_TOOLS="1",
+    )
+
+    # remove_ms_profile is already absent in http mode regardless (profile
+    # tools aren't registered at all); the other six are the kill switch's
+    # http-relevant surface.
+    hard_deletes = {
+        "delete_email",
+        "bulk_delete_emails",
+        "delete_event",
+        "delete_contact",
+        "delete_folder",
+        "delete_drive_item",
+    }
+    assert hard_deletes.isdisjoint(names), (
+        f"Expected hard-delete tools hidden in http mode, found: {hard_deletes & names}"
+    )
+    assert "remove_ms_profile" not in names
+    # Recoverable variants remain available.
+    assert "trash_email" in names
+
+
+@pytest.mark.asyncio
+async def test_http_mode_disable_deletion_tools_off_registers_hard_deletes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Default (flag unset): hard-deletes stay registered in http mode too."""
+    _clear_http_env(monkeypatch)
+    monkeypatch.delenv("MCP_DISABLE_DELETION_TOOLS", raising=False)
+    names = await _tool_names(
+        monkeypatch,
+        tmp_path,
+        MCP_TRANSPORT="http",
+        MCP_BASE_URL="https://mcp.example.com",
+        MCP_AUTH_CLIENT_ID="cid",
+        MCP_AUTH_CLIENT_SECRET="secret",
+        MCP_AUTH_TENANT_ID="organizations",
+    )
+
+    assert "delete_email" in names
+    assert "delete_event" in names
+    assert "delete_drive_item" in names
+
+
+@pytest.mark.asyncio
+async def test_http_mode_teams_and_sharepoint_stay_unregistered_without_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Teams/SharePoint require explicit env flags in http mode (no fallback)."""
+    _clear_http_env(monkeypatch)
+    monkeypatch.delenv("MCP_ENABLE_TEAMS", raising=False)
+    monkeypatch.delenv("MCP_ENABLE_SHAREPOINT", raising=False)
+    names = await _tool_names(
+        monkeypatch,
+        tmp_path,
+        MCP_TRANSPORT="http",
+        MCP_BASE_URL="https://mcp.example.com",
+        MCP_AUTH_CLIENT_ID="cid",
+        MCP_AUTH_CLIENT_SECRET="secret",
+        MCP_AUTH_TENANT_ID="organizations",
+    )
+
+    assert "teams_list_joined" not in names
+    assert "search_sharepoint_sites" not in names
+
+
+@pytest.mark.asyncio
+async def test_http_mode_teams_and_sharepoint_register_with_explicit_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_http_env(monkeypatch)
+    names = await _tool_names(
+        monkeypatch,
+        tmp_path,
+        MCP_TRANSPORT="http",
+        MCP_BASE_URL="https://mcp.example.com",
+        MCP_AUTH_CLIENT_ID="cid",
+        MCP_AUTH_CLIENT_SECRET="secret",
+        MCP_AUTH_TENANT_ID="organizations",
+        MCP_ENABLE_TEAMS="true",
+        MCP_ENABLE_SHAREPOINT="true",
+    )
+
+    assert "teams_list_joined" in names
+    assert "search_sharepoint_sites" in names

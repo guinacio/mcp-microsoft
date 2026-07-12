@@ -18,6 +18,7 @@ Implemented:
 from __future__ import annotations
 
 import asyncio
+import logging
 import httpx
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from mcp_microsoft.common.formatting import drive_item_payload, format_datetime_
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.transfer import upload_large_file_via_session
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.config import get_app_config
 from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph_types import GraphDriveItem, graph_identity_display, parse_graph_collection
 from mcp_microsoft.models import (
@@ -44,6 +46,8 @@ from mcp_microsoft.models import (
     UploadFileResponse,
 )
 from mcp_microsoft.graph import get_graph, get_transfer_http_client
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -300,6 +304,12 @@ async def upload_file(
     Returns:
         Structured upload confirmation.
     """
+    if params.local_path is not None and get_app_config().transport == "http":
+        raise ValueError(
+            "local_path is not available in multi-user http mode (the server's "
+            "disk is not the caller's disk); use content_base64 instead."
+        )
+
     import base64
     import tempfile
 
@@ -609,7 +619,13 @@ def register(server) -> None:
     register_tool(server, search_drive, annotations=READ_ONLY_TOOL)
     register_tool(server, create_drive_folder, annotations=WRITE_TOOL)
     register_tool(server, upload_file, annotations=WRITE_TOOL)
-    register_tool(server, download_file, annotations=WRITE_TOOL)
+    if get_app_config().transport == "http":
+        _log.info(
+            "download_file not registered (http transport; server disk is "
+            "not the caller's disk)"
+        )
+    else:
+        register_tool(server, download_file, annotations=WRITE_TOOL)
     register_tool(server, move_or_copy_item, annotations=WRITE_TOOL)
     if not is_deletion_disabled():
         register_tool(server, delete_drive_item, annotations=DESTRUCTIVE_TOOL)

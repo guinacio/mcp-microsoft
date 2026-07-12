@@ -23,6 +23,7 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.config import get_app_config
 from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph_types import (
     GraphContact,
@@ -533,6 +534,12 @@ async def get_contact_photo(params: GetContactPhotoInput) -> GetContactPhotoResp
     Returns:
         Base64-encoded photo bytes and/or saved file path confirmation.
     """
+    if params.save_path and get_app_config().transport == "http":
+        raise ValueError(
+            "save_path is not available in multi-user http mode (the server's "
+            "disk is not the caller's disk); omit it to receive base64 only."
+        )
+
     g = get_graph(params.profile)
     raw: bytes = await g.get_raw(f"/me/contacts/{params.contact_id}/photo/$value")
 

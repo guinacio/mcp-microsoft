@@ -70,6 +70,43 @@ def build_graph_authorize_scopes(config: AppConfig) -> list[str]:
     return scopes
 
 
+def _build_http_middleware(config: AppConfig) -> list[Any]:
+    """Build the middleware stack for http (multi-user) transport.
+
+    Order matters: rate limiting runs first so throttled requests are
+    rejected before audit logging (and tool execution) ever sees them. Audit
+    logging always runs so every authenticated tool call that gets through
+    is recorded.
+    """
+    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
+    from mcp_microsoft.middleware import AuditLoggingMiddleware
+
+    stack: list[Any] = []
+    if config.rate_limit_rps > 0:
+        stack.append(
+            RateLimitingMiddleware(max_requests_per_second=config.rate_limit_rps)
+        )
+    stack.append(AuditLoggingMiddleware())
+    return stack
+
+
+def _register_health_route(mcp: FastMCP) -> None:
+    """Register an unauthenticated ``GET /health`` for load balancers.
+
+    ``@custom_route`` handlers are mounted outside FastMCP's
+    ``RequireAuthMiddleware`` (which wraps only the MCP endpoint route
+    itself), so this stays reachable without a bearer token — exactly what a
+    health check needs.
+    """
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+
+    @mcp.custom_route("/health", methods=["GET"])
+    async def health(_request: Request) -> Response:
+        return JSONResponse({"status": "ok", "transport": "http"})
+
+
 def _build_azure_provider(config: AppConfig):
     """Construct the FastMCP AzureProvider for http (multi-user) transport.
 
@@ -102,11 +139,28 @@ async def app_lifespan(_server: FastMCP):
 def create_mcp_server(config: AppConfig | None = None) -> FastMCP:
     """Build a FastMCP server using the current runtime configuration."""
     runtime_config = config or get_app_config()
-    get_profile_manager(config=runtime_config)
-
     http_mode = runtime_config.transport == "http"
+
+    if not http_mode:
+        # http mode never touches ProfileManager — identity always comes from
+        # the caller's bearer token via OboTokenProvider (see graph.get_graph
+        # and feature_flags.resolve_optional_service_enabled). Warming it up
+        # here would only create ~/.microsoft-mcp on a server that will never
+        # read or write it.
+        get_profile_manager(config=runtime_config)
+
     auth = _build_azure_provider(runtime_config) if http_mode else None
-    mcp = FastMCP("mcp-microsoft", lifespan=app_lifespan, auth=auth)
+    middleware = _build_http_middleware(runtime_config) if http_mode else None
+    mcp = FastMCP(
+        "mcp-microsoft",
+        lifespan=app_lifespan,
+        auth=auth,
+        middleware=middleware,
+        mask_error_details=True if http_mode else None,
+    )
+
+    if http_mode:
+        _register_health_route(mcp)
 
     from mcp_microsoft.tools import attachments
     from mcp_microsoft.tools import calendar
@@ -177,6 +231,11 @@ mcp = _MCPProxy()
 def main() -> None:
     """CLI entry point — starts the MCP server over stdio or Streamable HTTP."""
     config = get_app_config()
+    if config.transport not in ("stdio", "http"):
+        raise SystemExit(
+            "Cannot start mcp-microsoft — MCP_TRANSPORT must be 'stdio' or "
+            f"'http' (got {config.transport!r})"
+        )
     if config.transport == "http":
         problems = validate_http_config(config)
         if problems:

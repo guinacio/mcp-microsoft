@@ -19,6 +19,7 @@ from fastmcp.utilities.types import File
 from mcp_microsoft.common.formatting import format_size_display
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.tooling import READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.config import get_app_config
 from mcp_microsoft.graph_types import GraphAttachment, parse_graph_collection
 from mcp_microsoft.models import AttachmentInfo, DownloadAttachmentResponse, ListAttachmentsResponse
 from mcp_microsoft.graph import get_graph
@@ -102,6 +103,12 @@ async def download_attachment(
     Returns:
         A FastMCP file when no save path is given, or structured file-save metadata.
     """
+    if params.save_path is not None and get_app_config().transport == "http":
+        raise ValueError(
+            "save_path is not available in multi-user http mode (the server's "
+            "disk is not the caller's disk); omit it to receive the file inline."
+        )
+
     g = get_graph(params.profile)
     result = GraphAttachment.model_validate(await g.get(
         f"/me/messages/{params.message_id}/attachments/{params.attachment_id}"

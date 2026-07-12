@@ -30,6 +30,10 @@ class AppConfig:
     auth_client_secret: str = ""
     auth_tenant_id: str = ""
     auth_required_scope: str = "mcp-access"
+    # Per-client requests/second ceiling enforced by fastmcp's token-bucket
+    # rate limiter in http mode. stdio mode ignores this entirely. 0 disables
+    # rate limiting.
+    rate_limit_rps: float = 10.0
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -59,6 +63,7 @@ class AppConfig:
             auth_tenant_id=os.environ.get("MCP_AUTH_TENANT_ID", "").strip(),
             auth_required_scope=os.environ.get("MCP_AUTH_REQUIRED_SCOPE", "mcp-access").strip()
             or "mcp-access",
+            rate_limit_rps=_float_env("MCP_RATE_LIMIT_RPS", 10.0),
         )
 
 
@@ -77,6 +82,16 @@ def _int_env(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
 
 
 def validate_http_config(config: AppConfig) -> list[str]:
