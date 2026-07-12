@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from mcp_microsoft.config import AppConfig, reset_app_config, validate_http_config
 from mcp_microsoft.runtime import reset_runtime_state
@@ -819,7 +820,7 @@ async def test_onedrive_upload_file_rejects_local_path_in_http_mode(
     local_file = tmp_path / "f.txt"
     local_file.write_text("hi")
 
-    with pytest.raises(ValueError, match="not available in multi-user http mode"):
+    with pytest.raises(ToolError, match="not available in multi-user http mode"):
         await onedrive.upload_file(onedrive.UploadFileInput(local_path=local_file))
 
 
@@ -928,7 +929,7 @@ async def test_upload_to_site_rejects_local_path_in_http_mode(
     local_file = tmp_path / "f.txt"
     local_file.write_text("hi")
 
-    with pytest.raises(ValueError, match="not available in multi-user http mode"):
+    with pytest.raises(ToolError, match="not available in multi-user http mode"):
         await sharepoint.upload_to_site(
             sharepoint.UploadToSiteInput(
                 site_id="site",
@@ -1116,3 +1117,77 @@ async def test_http_mode_teams_and_sharepoint_register_with_explicit_flags(
 
     assert "teams_list_joined" in names
     assert "search_sharepoint_sites" in names
+
+
+# --------------------------------------------------------------------------
+# File-upload app registration matrix per transport / explicit flag
+# --------------------------------------------------------------------------
+
+# Model-visible tools contributed by the FileUpload provider. ``store_files`` is
+# app-visibility only (called by the UI via CallTool, not the model), so it does
+# not appear in a model tool listing even when the feature is on.
+_UPLOAD_MODEL_TOOLS = frozenset({"file_manager", "list_files", "read_file"})
+
+
+@pytest.mark.asyncio
+async def test_http_mode_registers_file_upload_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_http_env(monkeypatch)
+    monkeypatch.delenv("MCP_ENABLE_FILE_UPLOAD", raising=False)
+    names = await _tool_names(
+        monkeypatch,
+        tmp_path,
+        MCP_TRANSPORT="http",
+        MCP_BASE_URL="https://mcp.example.com",
+        MCP_AUTH_CLIENT_ID="cid",
+        MCP_AUTH_CLIENT_SECRET="secret",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
+    )
+
+    assert _UPLOAD_MODEL_TOOLS.issubset(names), (
+        f"file-upload tools missing in http default: {_UPLOAD_MODEL_TOOLS - names}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stdio_mode_omits_file_upload_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_http_env(monkeypatch)
+    monkeypatch.delenv("MCP_ENABLE_FILE_UPLOAD", raising=False)
+    names = await _tool_names(monkeypatch, tmp_path)
+
+    assert _UPLOAD_MODEL_TOOLS.isdisjoint(names), (
+        f"file-upload tools must be absent in stdio default: "
+        f"{_UPLOAD_MODEL_TOOLS & names}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_http_mode_explicit_flag_off_omits_file_upload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_http_env(monkeypatch)
+    names = await _tool_names(
+        monkeypatch,
+        tmp_path,
+        MCP_TRANSPORT="http",
+        MCP_BASE_URL="https://mcp.example.com",
+        MCP_AUTH_CLIENT_ID="cid",
+        MCP_AUTH_CLIENT_SECRET="secret",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
+        MCP_ENABLE_FILE_UPLOAD="false",
+    )
+
+    assert _UPLOAD_MODEL_TOOLS.isdisjoint(names)
+
+
+@pytest.mark.asyncio
+async def test_stdio_mode_explicit_flag_on_registers_file_upload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _clear_http_env(monkeypatch)
+    names = await _tool_names(monkeypatch, tmp_path, MCP_ENABLE_FILE_UPLOAD="true")
+
+    assert _UPLOAD_MODEL_TOOLS.issubset(names)

@@ -386,6 +386,9 @@ Every `MCP_*` variable read in http mode. stdio mode ignores all `MCP_HTTP_*` / 
 | `MCP_HTTP_STATELESS` | Stateless Streamable HTTP. Single-worker constraint still applies. | `false` | No. |
 | `MCP_RATE_LIMIT_RPS` | Per-user requests/second ceiling (burst = 2×). `0`/negative disables. | `10` | No. |
 | `MCP_STATS_TOKEN` | Enables the observability routes (empty = disabled). | *(empty)* | No. |
+| `MCP_ENABLE_FILE_UPLOAD` | Drag-drop file-upload app ([§6.8](#68-file-uploads)). Explicit value wins. | on in http | No. |
+| `MCP_UPLOAD_MAX_MB` | Max size (MB) per uploaded file. Positive integer. | `10` | No. |
+| `MCP_UPLOAD_GLOBAL_BUDGET_MB` | Global cap (MB) on the base64 footprint of all uploads across every user. Positive integer. | `1024` | No. |
 
 Feature flags (`MCP_ENABLE_TEAMS`, `MCP_ENABLE_SHAREPOINT`, `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS`,
 `MCP_ENABLE_TEAMS_AI_INSIGHTS`) and `MCP_DISABLE_DELETION_TOOLS` behave as in stdio — **except** the
@@ -513,9 +516,11 @@ http mode.
 | **Deletion kill-switch** | Works | Works identically. |
 | **Rate limiting / audit logging** | None (single local caller) | On by default. |
 | **Error details in responses** | Full | Masked (`mask_error_details=True`). |
+| **File-upload app** ([§6.8](#68-file-uploads)) | Off (local users have `local_path`) | **On by default** — adds a drag-drop UI plus 3 model-visible tools (`file_manager`, `list_files`, `read_file`). |
 
 The 87 vs 95 delta is exactly the **5 profile-management tools** plus the **3 local-disk download
-tools** that http mode omits.
+tools** that http mode omits. (These counts exclude the optional file-upload app; when it is enabled
+it adds 3 model-visible tools on top — see [§6.8](#68-file-uploads).)
 
 ### 6.7 No-delete deployment
 
@@ -548,6 +553,49 @@ in `docker-compose.yml`.
 For **stdio / Claude Desktop** users the equivalent is the pre-built no-delete bundle
 (`mcp-microsoft-nodelete.mcpb`) or the **Disable Permanent-Delete Tools** toggle in the MCPB
 installer (see [§5.1](#51-mcpb-claude-desktop--recommended)).
+
+### 6.8 File uploads
+
+**What it is.** In http mode there is no shared disk between the caller and the server, so
+`local_path` is rejected and passing a file as base64 forces its whole content through the model's
+context window. The **file-upload app** (built on FastMCP's `FileUpload` provider, `fastmcp[apps]`)
+fixes this: it exposes a drag-and-drop UI. Files the user drops travel **straight to the server**,
+bypassing the model context, and land in a per-user upload area. The upload tools then consume them
+**by name** via a new `uploaded_file` parameter on `upload_file` (OneDrive) and `upload_to_site`
+(SharePoint) — mutually exclusive with `local_path`/`content_base64`, filename defaults to the
+uploaded name.
+
+**Client requirement.** The client must support **MCP Apps** (interactive UI resources) — e.g.
+Claude Desktop. Clients without MCP Apps support see the model-visible `list_files`/`read_file`
+tools but cannot open the drag-drop UI, so uploads originate elsewhere. The feature is **on by
+default in http mode, off in stdio** (local users already have `local_path`); override either way
+with `MCP_ENABLE_FILE_UPLOAD`.
+
+**Quotas & limits** (per connected user; enforced in-process, bounded against abuse):
+
+| Limit | Value | Notes |
+|---|---|---|
+| Max size per file | `MCP_UPLOAD_MAX_MB` (default **10 MB**) | Rejected before storage; must be a positive integer. |
+| Max files per user | **20** | Over-quota upload is rejected with a clear message; overwriting a name reuses its slot. |
+| Max bytes per user | **100 MB** total | Per-user quota uses the true **decoded** size, not the client-reported size. |
+| Global upload budget | `MCP_UPLOAD_GLOBAL_BUDGET_MB` (default **1024 MB**) | Caps the **encoded** (base64) footprint across all users; a store over budget is rejected even if the user is under their own quota. |
+| Distinct users tracked | **1000** | Whole least-recently-used upload areas are evicted past the cap. |
+| Idle upload-area TTL | **2 h** | Idle areas are lazily pruned on the next upload/list. |
+
+Uploads live **only in the server process's memory**, scoped to the caller's Entra `oid` (stable
+across reconnects and stateless mode), falling back to `sub`; a request with **neither** is refused
+rather than sharing a bucket. Uploads are lost on restart. File **content is never logged**.
+Provider tool calls flow through the same rate-limit / audit / metrics middleware as every other
+tool — including the drag-drop backend `store_files`, which is reachable by its hashed name (not
+UI-only) and passes through those same middleware, per-file, and quota checks.
+
+**Config:**
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `MCP_ENABLE_FILE_UPLOAD` | Enable/disable the file-upload app. Explicit value wins. | on in http, off in stdio |
+| `MCP_UPLOAD_MAX_MB` | Max size (MB) of any single uploaded file. Positive integer. | `10` |
+| `MCP_UPLOAD_GLOBAL_BUDGET_MB` | Global cap (MB) on the base64 footprint of all uploads across every user. Positive integer. | `1024` |
 
 ---
 

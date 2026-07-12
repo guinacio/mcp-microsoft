@@ -253,3 +253,61 @@ middleware, no routes.
 - **No new dependencies** (stdlib + starlette responses, already transitive).
   No tool payloads/args/results and no tokens are ever recorded or logged —
   only `oid`/`username`, the same exposure as the audit log.
+
+## Phase 8 — file upload app (2026-07-12)
+
+- **Goal.** Kill the "base64 as a tool argument" upload path that pushes a
+  file's whole content through the model context window. Adopt FastMCP's
+  `FileUpload` app (`fastmcp[apps]` → prefab-ui 0.20.2): users drag-drop files
+  into an interactive UI, the bytes go straight to the server (bypassing the
+  model), and the Graph upload tools consume them by name.
+- **Dependency.** `fastmcp[azure]>=3.4.4` → `fastmcp[azure,apps]>=3.4.4`;
+  `uv lock`/`uv sync` pull prefab-ui 0.20.2. NB the class imports as
+  `from fastmcp.apps.file_upload import FileUpload` — `fastmcp.apps.__init__`
+  only lazily re-exports `FastMCPApp`, not `FileUpload`.
+- **`src/mcp_microsoft/uploads.py` — `ScopedFileUpload(FileUpload)`.**
+  - *Scoping* (`_get_scope_key`): http mode keys on the caller's Entra `oid`
+    claim (via `get_access_token`, same as `middleware._caller_identity`) —
+    stable across reconnects and stateless HTTP where the stock `session_id`
+    keying is not — falling back to session id then `"__default__"`; stdio
+    keeps the per-session default. Never raises.
+  - *Bounds* over the otherwise-unbounded in-memory store: per-scope max files
+    (20) and max bytes (100 MB); global whole-scope LRU cap (1000, mirroring
+    `metrics` user-cap); idle-scope TTL prune (2h, lazy sweep like the rate
+    limiter). Over-quota `on_store` raises `ValueError`; `scopes_evicted` /
+    `scopes_pruned` counters exposed as attributes. Byte accounting uses true
+    decoded size; name length capped at 255. Content never logged.
+  - *Accessors*: module singleton (`get`/`set`/`reset_upload_provider`, reset
+    wired into `runtime.reset_runtime_state`) plus
+    `resolve_uploaded_file(name) -> (bytes, content_type)` reading the current
+    request's scope; raises `ValueError` (feature-off message, or missing with
+    available names).
+- **Config** (`config.py`): `enable_file_upload: bool | None`
+  (`MCP_ENABLE_FILE_UPLOAD`, tri-state; default on in http, off in stdio via
+  `feature_flags.is_file_upload_enabled`) and `upload_max_mb: int = 10`
+  (`MCP_UPLOAD_MAX_MB`, positive; `feature_flags.resolve_upload_max_bytes`
+  rejects ≤ 0).
+- **Wiring** (`server.py`): when enabled, construct
+  `ScopedFileUpload(max_file_size=upload_max_mb*1MB)`, `set_upload_provider`,
+  `mcp.add_provider(provider)` under the default (empty) namespace — its tool
+  names (`store_files`/`list_files`/`read_file`/`file_manager`) don't collide
+  with our 95 tools. Info-logged either way. Provider tools go through the
+  http middleware stack (rate limit / audit / metrics) — proven by test.
+  Note: `store_files` is not model-visible (absent from model tool listing), but
+  it IS callable programmatically via its hashed backend name (the same name the
+  UI's CallTool uses) — it is not UI-only or unreachable. That is safe because
+  such calls flow through the same middleware (per-user rate limit, audit,
+  metrics), the per-file `max_file_size` check, the per-scope file/byte quotas,
+  and the global encoded-byte budget.
+- **Tool integration**: `upload_file` (onedrive) and `upload_to_site`
+  (sharepoint) gain `uploaded_file: str | None` — mutually exclusive with
+  `local_path`/`content_base64`, filename defaults to the stored name, bytes
+  reused through the EXISTING small-PUT / chunked-session paths via a temp
+  file. Feature-off / not-found raise a clear `ValueError`.
+- **Tests** (`tests/test_uploads.py` new, `test_http_transport.py` +
+  `test_observability.py` extended): store quotas + atomicity, oid scope
+  isolation, LRU eviction + TTL prune (fake clock), name cap, resolve
+  happy/missing/feature-off, registration matrix (http default on / stdio
+  default off / explicit both ways), middleware-coverage proof, and
+  tool-integration (uploaded_file → Graph PUT, mutual exclusion, feature off).
+  Suite: 299 → 323 green.

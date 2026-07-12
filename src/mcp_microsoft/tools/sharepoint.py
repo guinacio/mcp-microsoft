@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 
 from mcp_microsoft.common.formatting import drive_item_payload, format_datetime_display, format_size_display
@@ -88,6 +89,7 @@ class UploadToSiteInput(ToolRequestModel):
     folder_id: str | None = None
     filename: str | None = None
     content_base64: str | None = None
+    uploaded_file: str | None = None
     profile: str | None = None
 
 
@@ -487,6 +489,10 @@ async def upload_to_site(
     local filesystem access is not available (e.g. container environments).
     When using content_base64, filename is required.
 
+    You may also pass uploaded_file with the name of a file previously uploaded
+    via the file-upload UI (see list_files); its bytes never passed through the
+    model's context window.
+
     Args:
         site_id: The SharePoint site ID.
         drive_id: The document library (drive) ID.
@@ -494,13 +500,16 @@ async def upload_to_site(
         folder_id: Optional destination folder ID inside the document library.
         filename: Optional upload filename override. Required when using `content_base64`.
         content_base64: Optional base64-encoded file content when no local path is available.
+        uploaded_file: Optional name of a file previously uploaded via the
+            file-upload UI (see list_files). Mutually exclusive with local_path
+            and content_base64.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured upload confirmation.
     """
     if params.local_path is not None and get_app_config().transport == "http":
-        raise ValueError(
+        raise ToolError(
             "local_path is not available in multi-user http mode (the server's "
             "disk is not the caller's disk); use content_base64 instead."
         )
@@ -508,13 +517,39 @@ async def upload_to_site(
     import base64
     import tempfile
 
+    # File-upload UI source: resolve the stored bytes by name. Mutually
+    # exclusive with the local_path / content_base64 sources.
+    uploaded_bytes: bytes | None = None
+    default_upload_name: str | None = None
+    if params.uploaded_file is not None:
+        if params.local_path is not None or params.content_base64 is not None:
+            raise ToolError(
+                "uploaded_file cannot be combined with local_path or "
+                "content_base64; provide exactly one file source."
+            )
+        from mcp_microsoft.uploads import resolve_uploaded_file
+
+        uploaded_bytes, _content_type = resolve_uploaded_file(params.uploaded_file)
+        default_upload_name = params.uploaded_file
+
     g = _get_sharepoint_graph(params.profile)
     temp_local_path: Path | None = None
     local_path = params.local_path
 
     try:
+        # File-upload UI: stream the resolved bytes through a temp file so the
+        # existing small-PUT / chunked-session paths are reused unchanged.
+        if uploaded_bytes is not None:
+            name_for_suffix = params.filename or default_upload_name or "upload"
+            suffix = Path(name_for_suffix).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                # Record the path before writing so a write failure still cleans up.
+                temp_local_path = Path(tmp.name)
+                tmp.write(uploaded_bytes)
+            local_path = temp_local_path
+
         # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
-        if (local_path is None or not local_path.is_file()) and params.content_base64:
+        elif (local_path is None or not local_path.is_file()) and params.content_base64:
             if not params.filename:
                 return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="filename is required when using content_base64.")
             try:
@@ -523,8 +558,9 @@ async def upload_to_site(
                 return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error=f"Invalid base64: {e}")
             suffix = Path(params.filename).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(raw)
+                # Record the path before writing so a write failure still cleans up.
                 temp_local_path = Path(tmp.name)
+                tmp.write(raw)
             local_path = temp_local_path
 
         if local_path is None:
@@ -533,7 +569,7 @@ async def upload_to_site(
         if not local_path.is_file():
             return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="File not found.")
 
-        upload_name = params.filename or local_path.name
+        upload_name = params.filename or default_upload_name or local_path.name
         encoded_name = quote(upload_name, safe="")
         file_size = local_path.stat().st_size
 
