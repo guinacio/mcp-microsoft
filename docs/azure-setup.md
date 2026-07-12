@@ -147,7 +147,7 @@ You now have everything you need. During installation, enter:
 
 ### MCPB (Claude Desktop, recommended)
 
-Download `mcp-microsoft-0.6.0.mcpb` from the [latest release](https://github.com/guinacio/mcp-microsoft/releases/latest) and double-click to open in Claude Desktop. The installer will prompt for the values above.
+Download `mcp-microsoft-0.8.0.mcpb` from the [latest release](https://github.com/guinacio/mcp-microsoft/releases/latest) and double-click to open in Claude Desktop. The installer will prompt for the values above.
 
 ### Manual (from source)
 

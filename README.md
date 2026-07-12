@@ -123,7 +123,7 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 ### Option A: Claude Desktop Extension (MCPB) — Recommended
 
 ```bash
-npx @anthropic-ai/mcpb install mcp-microsoft-0.6.0.mcpb
+npx @anthropic-ai/mcpb install mcp-microsoft-0.8.0.mcpb
 ```
 
 The installer prompts for your Azure App Registration details (see [Azure Setup](#azure-setup)):
