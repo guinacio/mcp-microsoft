@@ -204,6 +204,12 @@ def _register_stats_routes(mcp: FastMCP, config: AppConfig) -> None:
     # Captured once at registration; the token is never placed in a log line.
     token = config.stats_token
 
+    # These responses carry live operational data (and, on the dashboard, the
+    # page a browser holds behind Basic auth). Forbid any shared or browser
+    # cache from retaining them so a scrape/response is never served from cache
+    # to a later, differently-authorized reader.
+    _NO_STORE = {"Cache-Control": "no-store"}
+
     def _challenge() -> Response:
         return Response(
             status_code=401,
@@ -216,20 +222,22 @@ def _register_stats_routes(mcp: FastMCP, config: AppConfig) -> None:
             return _challenge()
         body = get_metrics_registry().render_prometheus()
         return PlainTextResponse(
-            body, media_type="text/plain; version=0.0.4; charset=utf-8"
+            body,
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+            headers=_NO_STORE,
         )
 
     @mcp.custom_route("/stats", methods=["GET"], include_in_schema=False)
     async def stats_route(request: Request) -> Response:
         if not _stats_authorized(request, token):
             return _challenge()
-        return JSONResponse(get_metrics_registry().snapshot())
+        return JSONResponse(get_metrics_registry().snapshot(), headers=_NO_STORE)
 
     @mcp.custom_route("/dashboard", methods=["GET"], include_in_schema=False)
     async def dashboard_route(request: Request) -> Response:
         if not _stats_authorized(request, token):
             return _challenge()
-        return HTMLResponse(_DASHBOARD_HTML)
+        return HTMLResponse(_DASHBOARD_HTML, headers=_NO_STORE)
 
 
 # Self-contained observability dashboard: inline CSS + JS, no external requests
@@ -406,6 +414,7 @@ _DASHBOARD_HTML = """<!doctype html>
       card("Total calls", s.total_calls) +
       card("Error rate", pct(s.total_errors, s.total_calls)) +
       card("Users tracked", d.users.count) +
+      card("Unknown tools", s.unknown_tool_calls) +
       card("Calls (5m)", tr.last_5m.calls) +
       card("Calls (60m)", tr.last_60m.calls);
     sparkline(tr.per_minute);

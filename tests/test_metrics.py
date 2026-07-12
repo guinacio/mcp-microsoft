@@ -182,6 +182,73 @@ def test_users_top_sorted_by_last_seen_desc(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 # ---------------------------------------------------------------------------
+# registry: unknown-tool aggregate counter (poisoning resistance)
+# ---------------------------------------------------------------------------
+
+
+def test_record_unknown_tool_is_aggregate_only() -> None:
+    reg = MetricsRegistry()
+    # A couple of legitimate calls to establish a baseline.
+    reg.record("list_emails", "oid-1", "alice@x.com", 5.0, True)
+    reg.record("list_emails", "oid-1", "alice@x.com", 5.0, False)
+
+    for _ in range(7):
+        reg.record_unknown_tool()
+
+    snap = reg.snapshot()
+    # The aggregate counter caught every unknown call...
+    assert snap["server"]["unknown_tool_calls"] == 7
+    # ...without touching the global totals, the per-tool dict, or the minute
+    # error buckets (poisoning resistance).
+    assert snap["server"]["total_calls"] == 2
+    assert snap["server"]["total_errors"] == 1
+    assert {t["name"] for t in snap["tools"]} == {"list_emails"}
+    assert snap["traffic"]["last_60m"]["errors"] == 1
+
+
+# ---------------------------------------------------------------------------
+# registry: per-tool LRU cap (backstop against name injection)
+# ---------------------------------------------------------------------------
+
+
+def test_tool_cap_evicts_least_recently_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(metrics, "_TOOL_CAP", 3)
+    reg = MetricsRegistry()
+
+    for i in range(3):
+        reg.record(f"tool-{i}", "oid", "u", 1.0, True)
+    snap = reg.snapshot()
+    assert len(snap["tools"]) == 3
+    assert snap["server"]["tools_evicted"] == 0
+
+    # Re-touch tool-0 so tool-1 becomes the least-recently-seen entry.
+    reg.record("tool-0", "oid", "u", 1.0, True)
+    # A brand-new tool overflows the cap and evicts the LRU (tool-1).
+    reg.record("tool-3", "oid", "u", 1.0, True)
+
+    snap = reg.snapshot()
+    names = {t["name"] for t in snap["tools"]}
+    assert len(names) == 3
+    assert names == {"tool-0", "tool-2", "tool-3"}
+    assert "tool-1" not in names
+    assert snap["server"]["tools_evicted"] == 1
+
+
+def test_tool_cap_bounds_size_under_many_distinct_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(metrics, "_TOOL_CAP", 8)
+    reg = MetricsRegistry()
+
+    for i in range(100):
+        reg.record(f"tool-{i}", "oid", "u", 1.0, True)
+
+    snap = reg.snapshot()
+    assert len(snap["tools"]) == 8
+    assert snap["server"]["tools_evicted"] == 92
+
+
+# ---------------------------------------------------------------------------
 # registry: prometheus rendering
 # ---------------------------------------------------------------------------
 
@@ -228,6 +295,38 @@ def test_prometheus_totals_and_types() -> None:
     assert out.endswith("\n")
 
 
+def test_prometheus_exposes_unknown_tool_and_eviction_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(metrics, "_TOOL_CAP", 1)
+    reg = MetricsRegistry()
+    reg.record_unknown_tool()
+    reg.record_unknown_tool()
+    reg.record("tool-a", "oid", "u", 1.0, True)
+    reg.record("tool-b", "oid", "u", 1.0, True)  # evicts tool-a (cap == 1)
+
+    out = reg.render_prometheus()
+    assert "# TYPE mcp_unknown_tool_calls_total counter" in out
+    assert "mcp_unknown_tool_calls_total 2" in out
+    assert "# TYPE mcp_tools_evicted_total counter" in out
+    assert "mcp_tools_evicted_total 1" in out
+
+
+def test_escape_label_escapes_carriage_return() -> None:
+    # \r must be escaped so a label value can never break the one-sample-per-
+    # line framing of the exposition format.
+    assert metrics._escape_label("a\rb") == "a\\rb"
+    # All four special characters, backslash first.
+    assert metrics._escape_label('x\\y"z\na\rb') == 'x\\\\y\\"z\\na\\rb'
+
+    reg = MetricsRegistry()
+    reg.record("carriage\rreturn", "oid", "u", 1.0, True)
+    out = reg.render_prometheus()
+    assert 'mcp_tool_calls_total{tool="carriage\\rreturn"} 1' in out
+    # The raw CR never reaches the wire.
+    assert "\r" not in out
+
+
 # ---------------------------------------------------------------------------
 # registry: snapshot shape
 # ---------------------------------------------------------------------------
@@ -244,6 +343,8 @@ def test_snapshot_shape() -> None:
         "started_at_iso",
         "total_calls",
         "total_errors",
+        "unknown_tool_calls",
+        "tools_evicted",
     }
     assert set(snap["traffic"]) == {"last_5m", "last_60m", "per_minute"}
     assert set(snap["traffic"]["last_5m"]) == {"calls", "errors"}
@@ -281,12 +382,18 @@ def test_singleton_reset() -> None:
 class _FakeRegistry:
     def __init__(self, explode: bool = False) -> None:
         self.calls: list[tuple] = []
+        self.unknown_calls = 0
         self._explode = explode
 
     def record(self, tool, oid, username, duration_ms, ok) -> None:
         if self._explode:
             raise RuntimeError("registry boom")
         self.calls.append((tool, oid, username, ok))
+
+    def record_unknown_tool(self) -> None:
+        if self._explode:
+            raise RuntimeError("registry boom")
+        self.unknown_calls += 1
 
 
 @pytest.mark.asyncio
@@ -364,6 +471,60 @@ async def test_middleware_registry_failure_does_not_mask_tool_error(
     # The tool's own exception propagates unchanged, not the registry's.
     with pytest.raises(ValueError, match="tool failure"):
         await mw.on_call_tool(_ctx(), call_next)
+
+
+@pytest.mark.asyncio
+async def test_middleware_unknown_tool_is_not_recorded_per_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NotFoundError (unknown tool name) is counted in aggregate only."""
+    import fastmcp.server.dependencies as deps
+    from fastmcp.exceptions import NotFoundError
+
+    monkeypatch.setattr(deps, "get_access_token", lambda: None)
+
+    reg = _FakeRegistry()
+    mw = MetricsMiddleware(registry=reg)
+
+    async def call_next(_ctx: MiddlewareContext):
+        raise NotFoundError("Unknown tool: 'attacker-chosen-name'")
+
+    with pytest.raises(NotFoundError):
+        await mw.on_call_tool(_ctx("attacker-chosen-name"), call_next)
+
+    # The arbitrary name never entered the per-tool record path...
+    assert reg.calls == []
+    # ...only the aggregate unknown-tool counter moved.
+    assert reg.unknown_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_middleware_known_tool_validation_error_recorded_under_real_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Argument-validation failures on a REAL tool are still recorded as errors.
+
+    fastmcp raises ``ValidationError`` (a ``FastMCPError``, distinct from
+    ``NotFoundError``) for bad arguments on a resolved tool, so the specific
+    NotFoundError branch must not swallow it.
+    """
+    import fastmcp.server.dependencies as deps
+    from fastmcp.exceptions import ValidationError
+
+    monkeypatch.setattr(deps, "get_access_token", lambda: None)
+
+    reg = _FakeRegistry()
+    mw = MetricsMiddleware(registry=reg)
+
+    async def call_next(_ctx: MiddlewareContext):
+        raise ValidationError("1 validation error for call[list_emails]")
+
+    with pytest.raises(ValidationError):
+        await mw.on_call_tool(_ctx("list_emails"), call_next)
+
+    # Recorded as an error under its real name; not filtered as an unknown tool.
+    assert reg.calls == [("list_emails", "-", "-", False)]
+    assert reg.unknown_calls == 0
 
 
 @pytest.mark.asyncio

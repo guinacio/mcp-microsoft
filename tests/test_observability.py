@@ -165,6 +165,72 @@ async def test_401_with_wrong_basic_password(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.asyncio
+async def test_no_store_header_on_all_three_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live observability responses must forbid caching (Cache-Control: no-store)."""
+    mcp = _build_server(monkeypatch, MCP_STATS_TOKEN=_TOKEN)
+    async with _client(mcp) as client:
+        for path in ("/metrics", "/stats", "/dashboard"):
+            resp = await client.get(
+                path, headers={"Authorization": f"Bearer {_TOKEN}"}
+            )
+            assert resp.status_code == 200, path
+            assert resp.headers.get("cache-control") == "no-store", path
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_calls_do_not_poison_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The confirmed HIGH finding's repro: unknown tool names sent by an
+    authenticated caller must NOT grow per-tool cardinality, inflate the
+    global/error counters or minute buckets, or leak into the Prometheus
+    ``tool`` label. They are absorbed by a single aggregate counter.
+
+    Driven through a real http-mode server via an in-memory ``fastmcp.Client``
+    (which is where fastmcp raises ``NotFoundError`` inside the middleware
+    chain), then verified against both the registry snapshot and the scraped
+    /metrics wire output (both read the same process-singleton registry).
+    """
+    from fastmcp import Client
+
+    mcp = _build_server(monkeypatch, MCP_STATS_TOKEN=_TOKEN)
+    registry = get_metrics_registry()
+
+    bogus_names = [f"bogus_tool_{i}" for i in range(6)]
+    async with Client(mcp) as client:
+        for name in bogus_names:
+            # Each unknown name surfaces client-side as an error; the server
+            # raised NotFoundError inside the metrics middleware.
+            with pytest.raises(Exception):
+                await client.call_tool(name, {})
+
+    snap = registry.snapshot()
+    tool_names = {t["name"] for t in snap["tools"]}
+    for name in bogus_names:
+        assert name not in tool_names, f"{name} poisoned the per-tool registry"
+
+    # Aggregate counter absorbed every unknown call; nothing else moved.
+    assert snap["server"]["unknown_tool_calls"] == len(bogus_names)
+    assert snap["server"]["total_calls"] == 0
+    assert snap["server"]["total_errors"] == 0
+    assert snap["traffic"]["last_60m"]["calls"] == 0
+    assert snap["traffic"]["last_60m"]["errors"] == 0
+
+    # Prometheus: the aggregate line is present and carries the count; no bogus
+    # per-tool series leaked onto the wire.
+    async with _client(mcp) as http:
+        resp = await http.get(
+            "/metrics", headers={"Authorization": f"Bearer {_TOKEN}"}
+        )
+    body = resp.text
+    assert f"mcp_unknown_tool_calls_total {len(bogus_names)}" in body
+    for name in bogus_names:
+        assert name not in body, f"{name} leaked into the Prometheus output"
+
+
+@pytest.mark.asyncio
 async def test_metrics_content_type_and_known_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

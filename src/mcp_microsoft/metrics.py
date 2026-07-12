@@ -41,6 +41,12 @@ _DURATION_SAMPLES = 256
 _USER_CAP = 1000
 # Cap on the number of users included in a snapshot's ``top`` list.
 _USER_TOP = 100
+# Hard cap on distinct tool names tracked at once. There are only ~95
+# registered tools, so under normal operation this is never approached; it is
+# a backstop (mirroring ``_USER_CAP``) against any path that might ever inject
+# an arbitrary name. On overflow the least-recently-seen tool is evicted (and
+# counted). See the write-path comment in ``record``.
+_TOOL_CAP = 256
 
 
 def _iso(ts: float) -> str:
@@ -73,12 +79,25 @@ class MetricsRegistry:
         self._started_at = time.time()
         self._total_calls = 0
         self._total_errors = 0
+        # Calls to tool names that never resolved (fastmcp raised NotFoundError
+        # inside the middleware chain). Counted in aggregate ONLY -- the
+        # attacker-chosen name is deliberately never retained. See
+        # ``record_unknown_tool`` and MetricsMiddleware.on_call_tool.
+        self._unknown_tool_calls = 0
         # Rolling per-minute traffic, keyed by minute index (int(ts // 60)).
         # Pruned to the last _TIMELINE_MINUTES entries on write.
         self._minutes: dict[int, dict[str, int]] = {}
-        # Per-tool aggregates. Cardinality is naturally bounded by the ~95
-        # registered tools, so no cap is needed here.
-        self._tools: dict[str, dict[str, Any]] = {}
+        # Per-tool aggregates. Cardinality is defended in depth: the metrics
+        # middleware filters out unknown (unresolved) tool names before they
+        # ever reach here (they go to the aggregate ``unknown_tool_calls``
+        # counter instead), and the ``_TOOL_CAP`` LRU below is a backstop in
+        # case any other path ever injects a name. Ordered by recency of last
+        # activity so the least-recently-seen tool sits at the front for O(1)
+        # eviction.
+        self._tools: "collections.OrderedDict[str, dict[str, Any]]" = (
+            collections.OrderedDict()
+        )
+        self._tools_evicted = 0
         # Per-user aggregates, ordered by recency of last activity so the
         # least-recently-seen identity sits at the front for O(1) eviction.
         self._users: "collections.OrderedDict[str, dict[str, Any]]" = (
@@ -124,9 +143,14 @@ class MetricsRegistry:
             self._total_errors += 1
             bucket["errors"] += 1
 
-        # Per-tool.
+        # Per-tool (LRU-capped as a backstop -- see the note in __init__).
         stats = self._tools.get(tool)
         if stats is None:
+            if len(self._tools) >= _TOOL_CAP:
+                # Evict the least-recently-seen tool (front of the OrderedDict)
+                # and count it.
+                self._tools.popitem(last=False)
+                self._tools_evicted += 1
             stats = {
                 "calls": 0,
                 "errors": 0,
@@ -137,6 +161,8 @@ class MetricsRegistry:
         if not ok:
             stats["errors"] += 1
         stats["durations"].append(float(duration_ms))
+        # Mark most-recently-seen so eviction order tracks last activity.
+        self._tools.move_to_end(tool)
 
         # Per-user (unauthenticated / unknown collapses to the "-" key).
         key = oid or "-"
@@ -162,6 +188,24 @@ class MetricsRegistry:
         user["last_seen"] = now
         # Mark most-recently-seen so eviction order tracks last_seen.
         self._users.move_to_end(key)
+
+    def record_unknown_tool(self) -> None:
+        """Count a call to an unknown (unresolved) tool name in aggregate only.
+
+        fastmcp resolves the tool name *inside* the middleware chain, so a
+        ``tools/call`` for a name that does not exist surfaces to the metrics
+        middleware as a ``NotFoundError`` (see ``server.py``'s ``call_tool`` in
+        fastmcp 3.4.4). The middleware routes those calls here instead of
+        :meth:`record`, so an attacker-chosen name never enters the per-tool
+        dict, the ``total_calls``/``total_errors`` counters, or the per-minute
+        error buckets. Only this single global counter moves -- which keeps the
+        observability surface poisoning-resistant and bounds the ``tool``-label
+        cardinality of the Prometheus output.
+
+        Runs synchronously on the event loop with no ``await`` -- see the
+        module docstring's concurrency invariant.
+        """
+        self._unknown_tool_calls += 1
 
     # -- read path ----------------------------------------------------------
 
@@ -231,6 +275,8 @@ class MetricsRegistry:
                 "started_at_iso": _iso(self._started_at),
                 "total_calls": self._total_calls,
                 "total_errors": self._total_errors,
+                "unknown_tool_calls": self._unknown_tool_calls,
+                "tools_evicted": self._tools_evicted,
             },
             "traffic": {
                 "last_5m": _window(series[-5:]),
@@ -280,6 +326,19 @@ class MetricsRegistry:
         lines.append("# TYPE mcp_users_evicted_total counter")
         lines.append(f"mcp_users_evicted_total {self._users_evicted}")
 
+        lines.append(
+            "# HELP mcp_unknown_tool_calls_total Calls to unknown tool names, counted "
+            "in aggregate (the arbitrary names are never retained)."
+        )
+        lines.append("# TYPE mcp_unknown_tool_calls_total counter")
+        lines.append(f"mcp_unknown_tool_calls_total {self._unknown_tool_calls}")
+
+        lines.append(
+            "# HELP mcp_tools_evicted_total Per-tool metric entries evicted due to the tool tracking cap."
+        )
+        lines.append("# TYPE mcp_tools_evicted_total counter")
+        lines.append(f"mcp_tools_evicted_total {self._tools_evicted}")
+
         # Per-tool series (sorted by name for stable, diff-friendly output).
         ordered_tools = sorted(self._tools.items())
 
@@ -325,10 +384,18 @@ class MetricsRegistry:
 def _escape_label(value: str) -> str:
     """Escape a Prometheus label value per the text exposition format.
 
-    Backslash, double-quote, and newline are the three characters that must be
-    escaped in a label value.
+    Backslash, double-quote, newline, and carriage return are escaped. The
+    backslash replacement runs first so the escape sequences it introduces are
+    not themselves re-escaped. A stray ``\\r`` would otherwise pass through
+    verbatim and break the single-line-per-sample framing of the exposition
+    format.
     """
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
 
 
 _registry: MetricsRegistry | None = None

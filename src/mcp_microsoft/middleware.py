@@ -13,6 +13,7 @@ import logging
 import time
 from typing import Any
 
+from fastmcp.exceptions import NotFoundError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
 _log = logging.getLogger(__name__)
@@ -127,6 +128,16 @@ class MetricsMiddleware(Middleware):
         except Exception:  # pragma: no cover - defensive; must never break a call
             self._logger.debug("metrics recording failed", exc_info=True)
 
+    def _record_unknown(self) -> None:
+        """Bump the aggregate unknown-tool counter, swallowing any failure."""
+        try:
+            from mcp_microsoft.metrics import get_metrics_registry
+
+            registry = self._registry or get_metrics_registry()
+            registry.record_unknown_tool()
+        except Exception:  # pragma: no cover - defensive; must never break a call
+            self._logger.debug("metrics recording failed", exc_info=True)
+
     async def on_call_tool(
         self,
         context: MiddlewareContext,
@@ -135,12 +146,26 @@ class MetricsMiddleware(Middleware):
         tool_name = getattr(context.message, "name", "unknown")
         oid, username = _caller_identity()
         start = time.perf_counter()
-        ok = True
         try:
-            return await call_next(context)
-        except Exception:
-            ok = False
+            result = await call_next(context)
+        except NotFoundError:
+            # fastmcp resolves the tool name INSIDE call_next (after the
+            # middleware chain has already started), so a tools/call for a name
+            # that does not exist surfaces here as a NotFoundError carrying the
+            # attacker-controlled name. Recording it under that name would let
+            # any authenticated caller grow the per-tool dict without bound,
+            # poison the error/traffic counters, and explode Prometheus
+            # tool-label cardinality. Count it in a single aggregate bucket
+            # instead and re-raise unchanged. (NotFoundError is a bare
+            # Exception subclass, distinct from fastmcp's ValidationError -- so
+            # argument-validation failures on a REAL tool fall through to the
+            # branch below and are still recorded under their real name.)
+            self._record_unknown()
             raise
-        finally:
+        except Exception:
             duration_ms = (time.perf_counter() - start) * 1000
-            self._record(tool_name, oid, username, duration_ms, ok)
+            self._record(tool_name, oid, username, duration_ms, ok=False)
+            raise
+        duration_ms = (time.perf_counter() - start) * 1000
+        self._record(tool_name, oid, username, duration_ms, ok=True)
+        return result
