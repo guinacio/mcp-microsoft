@@ -1,8 +1,8 @@
 """HTTP-mode-only middleware for mcp-microsoft.
 
-Rate limiting reuses fastmcp's own ``RateLimitingMiddleware`` (see
-``server._build_http_middleware``); this module holds the two pieces that
-need repo-specific behavior: per-call audit logging and metrics recording.
+Holds the repo-specific pieces of the http-mode middleware stack: a bounded
+per-user token-bucket rate limiter, per-call audit logging, and metrics
+recording.
 
 Never wired up in stdio mode — see server.py's ``create_mcp_server``.
 """
@@ -11,12 +11,26 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import OrderedDict
 from typing import Any
 
 from fastmcp.exceptions import NotFoundError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.server.middleware.rate_limiting import RateLimitError
 
 _log = logging.getLogger(__name__)
+
+# Shared rate-limit bucket key for any request whose caller identity cannot be
+# resolved. Kept separate from every authenticated user's per-identity bucket so
+# an unauthenticated caller can only ever starve other unauthenticated callers.
+_UNAUTHENTICATED_KEY = "unauthenticated"
+
+# Bounds for UserRateLimitMiddleware's per-key bucket store. fastmcp's own
+# RateLimitingMiddleware backs its per-client limiters with an unbounded
+# defaultdict that never evicts (entries live for the whole process lifetime);
+# these caps keep our store bounded in a long-running multi-user server.
+_LIMITER_CAP = 10_000  # max distinct keys retained (LRU eviction beyond this)
+_LIMITER_IDLE_TTL = 900.0  # seconds a bucket may sit idle before it is pruned
 
 
 def _caller_identity() -> tuple[str, str]:
@@ -43,6 +57,165 @@ def _caller_identity() -> tuple[str, str]:
     oid = claims.get("oid") or "-"
     username = claims.get("preferred_username") or "-"
     return str(oid), str(username)
+
+
+def _caller_tid_oid_sub() -> tuple[str | None, str | None, str | None]:
+    """Return ``(tid, oid, sub)`` from the ambient bearer token, else ``None``s.
+
+    Sibling of :func:`_caller_identity` (which returns ``(oid, username)``);
+    added for per-user rate-limit keying without changing that helper's
+    signature. Like it, this never raises — an absent claim, no ambient token,
+    or a raising dependency all collapse to ``None`` for the affected field so
+    keying a rate-limit bucket can never break the request it is limiting. The
+    bearer token itself is never read into the return value.
+    """
+    try:
+        from fastmcp.server.dependencies import get_access_token
+
+        token = get_access_token()
+    except Exception:
+        return None, None, None
+
+    if token is None:
+        return None, None, None
+
+    claims = getattr(token, "claims", None) or {}
+    tid = claims.get("tid")
+    oid = claims.get("oid")
+    sub = claims.get("sub")
+    return (
+        str(tid) if tid else None,
+        str(oid) if oid else None,
+        str(sub) if sub else None,
+    )
+
+
+def _rate_limit_key() -> str:
+    """Return the per-user rate-limit bucket key for the current request.
+
+    Prefers ``f"{tid}:{oid}"`` (tenant + object id — globally unique per user),
+    falling back to ``oid`` alone, then ``sub``, then the shared
+    ``"unauthenticated"`` bucket. Never raises — see :func:`_caller_tid_oid_sub`.
+    """
+    tid, oid, sub = _caller_tid_oid_sub()
+    if tid and oid:
+        return f"{tid}:{oid}"
+    if oid:
+        return oid
+    if sub:
+        return sub
+    return _UNAUTHENTICATED_KEY
+
+
+class _TokenBucket:
+    """A single token bucket with a last-seen stamp for idle eviction.
+
+    Mirrors fastmcp ``TokenBucketRateLimiter`` semantics (capacity tokens,
+    refilled at ``refill_rate`` tokens/second, consume one per request) but is
+    driven by an externally supplied monotonic clock and carries ``last_seen``
+    so the owning store can prune idle buckets. The refill/consume arithmetic is
+    synchronous and does no ``await``, so it is atomic on the single event loop.
+    """
+
+    __slots__ = ("tokens", "last_refill", "last_seen")
+
+    def __init__(self, capacity: float, now: float) -> None:
+        self.tokens = float(capacity)
+        self.last_refill = now
+        self.last_seen = now
+
+
+class UserRateLimitMiddleware(Middleware):
+    """Bounded per-user token-bucket rate limiter for http (multi-user) mode.
+
+    Replaces fastmcp's ``RateLimitingMiddleware`` to fix two problems:
+
+    * **Keying.** fastmcp keys every request under a single literal ``"global"``
+      bucket unless a ``get_client_id`` callable is supplied, letting one user
+      throttle everyone. We key on the caller's validated Entra identity
+      (:func:`_rate_limit_key`: ``tid:oid``, falling back to ``oid`` / ``sub`` /
+      the shared ``"unauthenticated"`` bucket).
+    * **Unbounded state.** fastmcp's per-client ``defaultdict`` of limiters never
+      evicts, so entries accumulate for the whole process lifetime. We store the
+      buckets in an ``OrderedDict`` capped at ``_LIMITER_CAP`` (LRU eviction) and
+      additionally prune any bucket idle longer than ``_LIMITER_IDLE_TTL`` on a
+      lazy sweep from the LRU head.
+
+    User-facing semantics are unchanged from fastmcp: same token-bucket algorithm
+    (``burst_capacity`` defaults to ``2 * max_requests_per_second`` as fastmcp's
+    does), applied in ``on_request`` (so it covers all MCP requests, not just
+    tool calls), and over-limit raises the same ``RateLimitError`` (an
+    ``McpError`` with JSON-RPC code ``-32000``) so client-visible behavior is
+    identical.
+    """
+
+    def __init__(
+        self,
+        max_requests_per_second: float = 10.0,
+        burst_capacity: int | None = None,
+    ) -> None:
+        self.max_requests_per_second = max_requests_per_second
+        self.burst_capacity = (
+            burst_capacity
+            if burst_capacity is not None
+            else int(max_requests_per_second * 2)
+        )
+        self._buckets: OrderedDict[str, _TokenBucket] = OrderedDict()
+
+    def _prune_idle(self, now: float) -> None:
+        """Evict buckets idle longer than the TTL, sweeping from the LRU head.
+
+        Buckets are ordered by last access (``move_to_end`` on every hit), so the
+        head is the least-recently-seen: once it is within the TTL, every later
+        bucket is too, and the sweep stops. O(1) amortized per request.
+        """
+        while self._buckets:
+            _key, bucket = next(iter(self._buckets.items()))
+            if now - bucket.last_seen <= _LIMITER_IDLE_TTL:
+                break
+            self._buckets.popitem(last=False)
+
+    def _allow(self, key: str, now: float) -> bool:
+        """Refill and consume one token for *key*; True if a token was available.
+
+        Purely synchronous (no ``await``) so the read-modify-write is atomic on
+        the event loop.
+        """
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = _TokenBucket(self.burst_capacity, now)
+            self._buckets[key] = bucket
+        else:
+            self._buckets.move_to_end(key)
+            elapsed = now - bucket.last_refill
+            bucket.tokens = min(
+                self.burst_capacity,
+                bucket.tokens + elapsed * self.max_requests_per_second,
+            )
+            bucket.last_refill = now
+        bucket.last_seen = now
+
+        # Enforce the LRU cap. The just-touched key sits at the tail, so only
+        # genuinely least-recently-used keys are evicted.
+        while len(self._buckets) > _LIMITER_CAP:
+            self._buckets.popitem(last=False)
+
+        if bucket.tokens >= 1:
+            bucket.tokens -= 1
+            return True
+        return False
+
+    async def on_request(
+        self,
+        context: MiddlewareContext,
+        call_next: CallNext,
+    ) -> Any:
+        now = time.monotonic()
+        self._prune_idle(now)
+        key = _rate_limit_key()
+        if not self._allow(key, now):
+            raise RateLimitError(f"Rate limit exceeded for client: {key}")
+        return await call_next(context)
 
 
 class AuditLoggingMiddleware(Middleware):

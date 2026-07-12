@@ -31,12 +31,15 @@ _HTTP_ENV_VARS = (
     "MCP_STATS_TOKEN",
 )
 
+# Structurally valid dummy tenant GUID (http mode requires a concrete GUID).
+_TENANT_GUID = "11111111-1111-1111-1111-111111111111"
+
 _FULL_HTTP_ENV = {
     "MCP_TRANSPORT": "http",
     "MCP_BASE_URL": "https://mcp.example.com",
     "MCP_AUTH_CLIENT_ID": "cid",
     "MCP_AUTH_CLIENT_SECRET": "secret",
-    "MCP_AUTH_TENANT_ID": "organizations",
+    "MCP_AUTH_TENANT_ID": _TENANT_GUID,
 }
 
 _TOKEN = "s3cr3t-stats-token"

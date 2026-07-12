@@ -34,12 +34,17 @@ _HTTP_ENV_VARS = (
     "MCP_STATS_TOKEN",
 )
 
+# A dummy but structurally valid Directory (tenant) ID GUID. http mode now
+# requires a concrete GUID (fastmcp pins the issuer to a literal URL built from
+# it, so pseudo-tenants like "organizations" can never validate a real token).
+_TENANT_GUID = "11111111-1111-1111-1111-111111111111"
+
 _FULL_HTTP_ENV = {
     "MCP_TRANSPORT": "http",
     "MCP_BASE_URL": "https://mcp.example.com",
     "MCP_AUTH_CLIENT_ID": "cid",
     "MCP_AUTH_CLIENT_SECRET": "secret",
-    "MCP_AUTH_TENANT_ID": "organizations",
+    "MCP_AUTH_TENANT_ID": _TENANT_GUID,
 }
 
 
@@ -67,7 +72,7 @@ def _http_config(**overrides: object) -> AppConfig:
         base_url="https://mcp.example.com",
         auth_client_id="cid",
         auth_client_secret="secret",
-        auth_tenant_id="organizations",
+        auth_tenant_id=_TENANT_GUID,
     )
     base.update(overrides)
     return AppConfig(**base)  # type: ignore[arg-type]
@@ -212,6 +217,45 @@ def test_validate_http_config_accepts_in_range_port(ok_port: int) -> None:
     assert validate_http_config(_http_config(http_port=ok_port)) == []
 
 
+@pytest.mark.parametrize(
+    "guid",
+    [
+        "11111111-1111-1111-1111-111111111111",
+        "9a8b7c6d-1234-4abc-8def-0123456789ab",
+        "9A8B7C6D-1234-4ABC-8DEF-0123456789AB",  # upper-case accepted
+        "AaBbCcDd-1122-3344-5566-778899AaBbCc",  # mixed case accepted
+    ],
+)
+def test_validate_http_config_accepts_tenant_guid_any_casing(guid: str) -> None:
+    assert validate_http_config(_http_config(auth_tenant_id=guid)) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "organizations",
+        "common",
+        "consumers",
+        "contoso.onmicrosoft.com",
+        "not-a-guid",
+        "11111111-1111-1111-1111-11111111111",  # 11 hex in last group
+        "11111111-1111-1111-1111-1111111111111",  # 13 hex in last group
+        "gggggggg-1111-1111-1111-111111111111",  # non-hex chars
+    ],
+)
+def test_validate_http_config_rejects_non_guid_tenant(bad: str) -> None:
+    problems = validate_http_config(_http_config(auth_tenant_id=bad))
+    # Exactly the tenant problem, with the actionable guidance.
+    tenant_problems = [p for p in problems if "MCP_AUTH_TENANT_ID" in p]
+    assert len(tenant_problems) == 1
+    msg = tenant_problems[0]
+    assert "tenant GUID" in msg
+    assert "Directory (tenant) ID" in msg
+    assert "Microsoft Entra ID" in msg
+    # Explains WHY (fastmcp's literal issuer pinning).
+    assert "iss" in msg and "issuer" in msg
+
+
 # --------------------------------------------------------------------------
 # server.py — build_graph_authorize_scopes helper
 # --------------------------------------------------------------------------
@@ -303,7 +347,7 @@ async def test_http_mode_omits_profile_tools_but_keeps_core(
         MCP_BASE_URL="https://mcp.example.com",
         MCP_AUTH_CLIENT_ID="cid",
         MCP_AUTH_CLIENT_SECRET="secret",
-        MCP_AUTH_TENANT_ID="organizations",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
     )
 
     assert PROFILE_TOOLS.isdisjoint(names), (
@@ -348,7 +392,7 @@ async def test_http_mode_disables_corporate_profile_teams_fallback(
         MCP_BASE_URL="https://mcp.example.com",
         MCP_AUTH_CLIENT_ID="cid",
         MCP_AUTH_CLIENT_SECRET="secret",
-        MCP_AUTH_TENANT_ID="organizations",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
     )
 
     assert "teams_list_joined" not in names
@@ -606,9 +650,8 @@ def test_http_mode_wires_rate_limit_and_audit_middleware(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import mcp_microsoft.server as server_mod
-    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
 
-    from mcp_microsoft.middleware import AuditLoggingMiddleware
+    from mcp_microsoft.middleware import AuditLoggingMiddleware, UserRateLimitMiddleware
 
     monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
     _clear_http_env(monkeypatch)
@@ -617,7 +660,7 @@ def test_http_mode_wires_rate_limit_and_audit_middleware(
 
     mcp = server_mod.get_mcp_server(reset=True)
 
-    rate_limiters = [mw for mw in mcp.middleware if isinstance(mw, RateLimitingMiddleware)]
+    rate_limiters = [mw for mw in mcp.middleware if isinstance(mw, UserRateLimitMiddleware)]
     audit_loggers = [mw for mw in mcp.middleware if isinstance(mw, AuditLoggingMiddleware)]
     assert len(rate_limiters) == 1
     assert rate_limiters[0].max_requests_per_second == 10.0
@@ -635,7 +678,8 @@ def test_http_mode_threads_non_default_rate_limit_rps(
     so cannot prove the value is actually plumbed through; this uses 42.5.
     """
     import mcp_microsoft.server as server_mod
-    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
+    from mcp_microsoft.middleware import UserRateLimitMiddleware
 
     monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
     _clear_http_env(monkeypatch)
@@ -644,66 +688,19 @@ def test_http_mode_threads_non_default_rate_limit_rps(
 
     mcp = server_mod.get_mcp_server(reset=True)
 
-    limiters = [mw for mw in mcp.middleware if isinstance(mw, RateLimitingMiddleware)]
+    limiters = [mw for mw in mcp.middleware if isinstance(mw, UserRateLimitMiddleware)]
     assert len(limiters) == 1
     assert limiters[0].max_requests_per_second == 42.5
-    # Per-client keying is wired: without get_client_id fastmcp buckets every
-    # request under the single literal "global" key (one user throttles all).
-    assert limiters[0].get_client_id is not None
-
-
-def test_rate_limit_client_id_keys_on_oid_with_unauthenticated_fallback(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The wired get_client_id returns the caller's oid, else the constant.
-
-    Exercises the callable actually attached to the middleware (proving it is
-    the derivation the limiter uses), directly rather than through a request.
-    """
-    import fastmcp.server.dependencies as deps
-
-    import mcp_microsoft.server as server_mod
-    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
-
-    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
-    _clear_http_env(monkeypatch)
-    _set_full_http_env(monkeypatch)
-    reset_runtime_state()
-
-    mcp = server_mod.get_mcp_server(reset=True)
-    limiter = next(
-        mw for mw in mcp.middleware if isinstance(mw, RateLimitingMiddleware)
-    )
-    derive = limiter.get_client_id
-    assert derive is not None
-
-    class _Tok:
-        claims = {"oid": "user-oid-123"}
-        token = "assertion"
-
-    monkeypatch.setattr(deps, "get_access_token", lambda: _Tok())
-    # The MiddlewareContext argument is ignored by the derivation; pass a stub.
-    assert derive(object()) == "user-oid-123"
-
-    # No ambient token -> the shared unauthenticated bucket (never raises).
-    monkeypatch.setattr(deps, "get_access_token", lambda: None)
-    assert derive(object()) == server_mod._UNAUTHENTICATED_CLIENT_ID
-
-    # A raising dependency still collapses to the fallback, never propagating.
-    def _boom() -> object:
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(deps, "get_access_token", _boom)
-    assert derive(object()) == server_mod._UNAUTHENTICATED_CLIENT_ID
+    # Burst mirrors fastmcp's default (2x rps).
+    assert limiters[0].burst_capacity == int(42.5 * 2)
 
 
 def test_http_mode_zero_rate_limit_disables_limiter_but_keeps_audit_log(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import mcp_microsoft.server as server_mod
-    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
 
-    from mcp_microsoft.middleware import AuditLoggingMiddleware
+    from mcp_microsoft.middleware import AuditLoggingMiddleware, UserRateLimitMiddleware
 
     monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
     _clear_http_env(monkeypatch)
@@ -712,7 +709,7 @@ def test_http_mode_zero_rate_limit_disables_limiter_but_keeps_audit_log(
 
     mcp = server_mod.get_mcp_server(reset=True)
 
-    assert not any(isinstance(mw, RateLimitingMiddleware) for mw in mcp.middleware)
+    assert not any(isinstance(mw, UserRateLimitMiddleware) for mw in mcp.middleware)
     assert any(isinstance(mw, AuditLoggingMiddleware) for mw in mcp.middleware)
 
 
@@ -720,9 +717,8 @@ def test_stdio_mode_has_no_http_only_middleware(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     import mcp_microsoft.server as server_mod
-    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
 
-    from mcp_microsoft.middleware import AuditLoggingMiddleware
+    from mcp_microsoft.middleware import AuditLoggingMiddleware, UserRateLimitMiddleware
 
     monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
     _clear_http_env(monkeypatch)
@@ -730,7 +726,7 @@ def test_stdio_mode_has_no_http_only_middleware(
 
     mcp = server_mod.get_mcp_server(reset=True)
 
-    assert not any(isinstance(mw, RateLimitingMiddleware) for mw in mcp.middleware)
+    assert not any(isinstance(mw, UserRateLimitMiddleware) for mw in mcp.middleware)
     assert not any(isinstance(mw, AuditLoggingMiddleware) for mw in mcp.middleware)
 
 
@@ -991,7 +987,7 @@ async def test_teams_download_recording_not_registered_in_http_mode(
         MCP_BASE_URL="https://mcp.example.com",
         MCP_AUTH_CLIENT_ID="cid",
         MCP_AUTH_CLIENT_SECRET="secret",
-        MCP_AUTH_TENANT_ID="organizations",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
         MCP_ENABLE_TEAMS="true",
         MCP_ENABLE_TEAMS_MEETING_ARTIFACTS="true",
     )
@@ -1034,7 +1030,7 @@ async def test_http_mode_disable_deletion_tools_removes_hard_deletes(
         MCP_BASE_URL="https://mcp.example.com",
         MCP_AUTH_CLIENT_ID="cid",
         MCP_AUTH_CLIENT_SECRET="secret",
-        MCP_AUTH_TENANT_ID="organizations",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
         MCP_DISABLE_DELETION_TOOLS="1",
     )
 
@@ -1071,7 +1067,7 @@ async def test_http_mode_disable_deletion_tools_off_registers_hard_deletes(
         MCP_BASE_URL="https://mcp.example.com",
         MCP_AUTH_CLIENT_ID="cid",
         MCP_AUTH_CLIENT_SECRET="secret",
-        MCP_AUTH_TENANT_ID="organizations",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
     )
 
     assert "delete_email" in names
@@ -1094,7 +1090,7 @@ async def test_http_mode_teams_and_sharepoint_stay_unregistered_without_flags(
         MCP_BASE_URL="https://mcp.example.com",
         MCP_AUTH_CLIENT_ID="cid",
         MCP_AUTH_CLIENT_SECRET="secret",
-        MCP_AUTH_TENANT_ID="organizations",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
     )
 
     assert "teams_list_joined" not in names
@@ -1113,7 +1109,7 @@ async def test_http_mode_teams_and_sharepoint_register_with_explicit_flags(
         MCP_BASE_URL="https://mcp.example.com",
         MCP_AUTH_CLIENT_ID="cid",
         MCP_AUTH_CLIENT_SECRET="secret",
-        MCP_AUTH_TENANT_ID="organizations",
+        MCP_AUTH_TENANT_ID=_TENANT_GUID,
         MCP_ENABLE_TEAMS="true",
         MCP_ENABLE_SHAREPOINT="true",
     )

@@ -261,7 +261,7 @@ Because this is a confidential-client, work/school-only registration, plan on **
 |---|---|
 | Application (client) ID | `MCP_AUTH_CLIENT_ID` |
 | Client secret value (Step 4) | `MCP_AUTH_CLIENT_SECRET` |
-| Directory (tenant) ID, or `organizations` | `MCP_AUTH_TENANT_ID` |
+| Directory (tenant) ID (the **tenant GUID** — required; pseudo-tenants like `organizations`/`common`/`consumers` and domain values are rejected at startup, since fastmcp pins the token issuer to a literal URL built from this value) | `MCP_AUTH_TENANT_ID` |
 | Your reverse proxy's public HTTPS URL | `MCP_BASE_URL` |
 | The scope name from Step 2 (only if not `mcp-access`) | `MCP_AUTH_REQUIRED_SCOPE` |
 

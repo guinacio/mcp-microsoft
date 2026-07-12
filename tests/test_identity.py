@@ -238,7 +238,7 @@ def _build_real_azure_provider():
     return AzureProvider(
         client_id="cid",
         client_secret="secret",
-        tenant_id="organizations",
+        tenant_id="11111111-1111-1111-1111-111111111111",
         base_url="https://mcp.example.com",
         required_scopes=["mcp-access"],
     )

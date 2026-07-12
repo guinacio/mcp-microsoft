@@ -186,7 +186,7 @@ export MCP_TRANSPORT=http
 export MCP_BASE_URL=https://mcp.example.com   # your public HTTPS URL (behind a reverse proxy)
 export MCP_AUTH_CLIENT_ID=your-confidential-client-id
 export MCP_AUTH_CLIENT_SECRET=your-client-secret
-export MCP_AUTH_TENANT_ID=your-tenant-id-or-organizations
+export MCP_AUTH_TENANT_ID=your-directory-tenant-id-guid   # Entra > Overview > Directory (tenant) ID
 uv run mcp-microsoft
 ```
 
@@ -212,9 +212,9 @@ Point an MCP client with OAuth support at `https://your-host/mcp`. The client di
 - **Local-disk tools are not available.** The server's disk is not the caller's disk. `download_file`, `download_from_site`, and `teams_download_meeting_recording` are not registered at all; `upload_file` / `upload_to_site` reject `local_path` (use `content_base64`), and `download_attachment` / `get_contact_photo` reject `save_path` (you get the content/photo inline instead).
 - **Feature flags must be explicit.** `MCP_ENABLE_TEAMS`, `MCP_ENABLE_SHAREPOINT`, `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS`, and `MCP_ENABLE_TEAMS_AI_INSIGHTS` need to be set directly — the corporate-account auto-detect fallback that manual stdio installs get doesn't apply, since there's no single configured profile to inspect.
 - **The deletion kill-switch still works.** `MCP_DISABLE_DELETION_TOOLS=true` suppresses the same permanent-delete tools as in stdio mode.
-- **Work/school accounts only.** http mode targets a specific tenant GUID or `organizations`. Personal Microsoft accounts (Outlook.com/Live) remain stdio-only — OBO and custom API scopes aren't reliably supported for consumer accounts.
+- **Work/school accounts only, single concrete tenant.** `MCP_AUTH_TENANT_ID` must be your directory's **tenant GUID** (Entra → Overview → Directory (tenant) ID). Pseudo-tenants (`organizations`, `common`, `consumers`) and verified domains (`contoso.onmicrosoft.com`) are rejected at startup — fastmcp's `AzureProvider` pins the accepted token issuer to a literal URL built from this value, and real Entra tokens carry the concrete GUID, so a pseudo-tenant/domain never validates. Personal Microsoft accounts (Outlook.com/Live) remain stdio-only — OBO and custom API scopes aren't reliably supported for consumer accounts. Multi-tenant deployments are future work (they need issuer-validation skipping plus per-tenant OBO authority).
 - **Unauthenticated `GET /health`** is available for load balancers and container healthchecks; every other route requires a valid bearer token.
-- **Rate limiting is on by default.** `MCP_RATE_LIMIT_RPS` (default `10`) caps requests per client per second; set it to `0` or a negative number to disable.
+- **Rate limiting is on by default.** `MCP_RATE_LIMIT_RPS` (default `10`) caps requests per user (per second) via a bounded per-user (tenant + object id) token bucket; set it to `0` or a negative number to disable.
 - **Every tool call is audit-logged**: tool name, caller `oid` and `preferred_username` (from the token's claims), duration, and outcome — never the arguments, results, or the token itself.
 - **Error details are masked** in responses sent to remote clients (internal exception messages are logged server-side but not echoed back).
 
@@ -222,10 +222,10 @@ Point an MCP client with OAuth support at `https://your-host/mcp`. The client di
 
 - **TLS is not terminated by this server.** It speaks plain HTTP; put a reverse proxy (Traefik, Caddy, nginx, your cloud load balancer, etc.) in front of it for TLS, and set `MCP_BASE_URL` to the proxy's public HTTPS URL — not this process's bind address. See the commented example in `docker-compose.yml`.
 - **`MCP_BASE_URL` must match exactly** (scheme, host, port, path) what MCP clients connect to and what's registered as the Azure redirect URI base. A mismatch breaks the OAuth redirect and the JWT audience/issuer checks.
-- **Work/school tenants only** — see above. Don't point `MCP_AUTH_TENANT_ID` at `consumers` or `common`.
+- **Single concrete work/school tenant only** — see above. `MCP_AUTH_TENANT_ID` must be a tenant GUID; `consumers`, `common`, `organizations`, and domain values are rejected at startup because fastmcp validates the token `iss` against a literal issuer URL built from this value.
 - **Single worker only.** The OAuth-proxy client store and the per-user OBO credential cache both live in this process's memory. Running more than one worker/replica splits that state and breaks sessions unpredictably. Horizontal scaling requires wiring fastmcp's external `client_storage` backend (a pluggable key-value store) in place of the in-memory default — not implemented here; treat it as a prerequisite before scaling beyond one process.
 - **Rate limiting and audit logging are on by default** in http mode (see above) — there is no equivalent in stdio mode, since stdio has exactly one caller.
-- **The built-in rate limit covers MCP tool traffic only.** `MCP_RATE_LIMIT_RPS` throttles authenticated calls to the `/mcp` endpoint (per user); it does not protect the unauthenticated OAuth endpoints (`/authorize`, `/token`, `/register`, `/auth/callback`). Throttle those at your reverse proxy.
+- **The built-in rate limit covers MCP tool traffic only.** `MCP_RATE_LIMIT_RPS` throttles authenticated calls to the `/mcp` endpoint via a bounded per-user (`tid`+`oid`) token bucket — bounded memory (LRU-capped, idle buckets pruned) so per-user state can't grow without limit. It does not protect the unauthenticated OAuth endpoints (`/authorize`, `/token`, `/register`, `/auth/callback`). Throttle those at your reverse proxy.
 - **Secrets belong in the environment, not in files you commit.** `MCP_AUTH_CLIENT_SECRET` in particular; consider a secrets manager (Azure Key Vault, etc.) that injects it as an env var at deploy time rather than storing it in `.env` on disk long-term.
 
 ### Observability

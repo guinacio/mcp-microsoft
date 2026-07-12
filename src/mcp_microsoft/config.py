@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 TRUTHY_ENV_VALUES = ("1", "true", "yes", "on")
+
+# A directory (tenant) ID GUID: 8-4-4-4-12 hexadecimal, case-insensitive.
+# MCP_AUTH_TENANT_ID must be a concrete GUID (see validate_http_config for why
+# pseudo-tenants and verified domains cannot work with fastmcp's issuer pinning).
+_TENANT_GUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -30,8 +39,9 @@ class AppConfig:
     auth_client_secret: str = ""
     auth_tenant_id: str = ""
     auth_required_scope: str = "mcp-access"
-    # Per-client requests/second ceiling enforced by fastmcp's token-bucket
-    # rate limiter in http mode. stdio mode ignores this entirely. 0 disables
+    # Per-user requests/second ceiling enforced by our bounded per-user
+    # (tid+oid) token-bucket rate limiter (middleware.UserRateLimitMiddleware)
+    # in http mode. stdio mode ignores this entirely. 0 (or negative) disables
     # rate limiting.
     rate_limit_rps: float = 10.0
     # Observability shared secret (http mode). Empty = disabled: the /metrics,
@@ -127,6 +137,19 @@ def validate_http_config(config: AppConfig) -> list[str]:
         problems.append("MCP_AUTH_CLIENT_SECRET is required in http mode")
     if not config.auth_tenant_id:
         problems.append("MCP_AUTH_TENANT_ID is required in http mode")
+    elif not _TENANT_GUID_RE.fullmatch(config.auth_tenant_id):
+        problems.append(
+            "MCP_AUTH_TENANT_ID must be your directory's tenant GUID "
+            "(8-4-4-4-12 hexadecimal), not "
+            f"{config.auth_tenant_id!r}. Copy the Directory (tenant) ID from "
+            "Azure Portal -> Microsoft Entra ID -> Overview. Pseudo-tenants "
+            "('organizations', 'common', 'consumers') and verified domains "
+            "('contoso.onmicrosoft.com') are rejected because fastmcp's "
+            "AzureProvider validates the token 'iss' claim against a single "
+            "literal issuer URL built from this value, and real Entra tokens "
+            "always carry the concrete tenant GUID -- so a pseudo-tenant or "
+            "domain never matches and every request fails authentication."
+        )
 
     if not 1 <= config.http_port <= 65535:
         problems.append(

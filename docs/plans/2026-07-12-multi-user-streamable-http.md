@@ -59,9 +59,11 @@ that heuristic depends on a configured profile which http mode doesn't use).
 `build_default_scopes()` semantics) + `offline_access`, expressed as full
 `https://graph.microsoft.com/<Scope>` URIs.
 
-**Audience:** http mode targets work/school tenants (`tenant_id` = specific tenant GUID or
-`organizations`). Personal Microsoft accounts remain served by stdio mode (OBO + custom API scopes
-are not reliably supported for consumer accounts).
+**Audience:** http mode targets a single work/school tenant (`tenant_id` = the concrete tenant
+GUID; pseudo-tenants such as `organizations`/`common`/`consumers` and verified domains are rejected
+at startup — fastmcp's `AzureProvider` pins the accepted token issuer to a literal URL built from
+this value, so only the concrete GUID validates real tokens). Personal Microsoft accounts remain
+served by stdio mode (OBO + custom API scopes are not reliably supported for consumer accounts).
 
 ## Azure App Registration (http mode) — required setup
 
@@ -83,10 +85,10 @@ New or updated registration (documented in docs/azure-setup.md):
 | `MCP_BASE_URL` | public base URL (behind proxy: the external HTTPS URL) | required in http mode |
 | `MCP_AUTH_CLIENT_ID` | confidential app client id | required in http mode |
 | `MCP_AUTH_CLIENT_SECRET` | client secret | required in http mode |
-| `MCP_AUTH_TENANT_ID` | tenant GUID or `organizations` | required in http mode |
+| `MCP_AUTH_TENANT_ID` | tenant GUID (concrete; pseudo-tenants/domains rejected) | required in http mode |
 | `MCP_AUTH_REQUIRED_SCOPE` | custom API scope name | `mcp-access` |
 | `MCP_HTTP_STATELESS` | stateless streamable HTTP (horizontal scaling) | `false` |
-| `MCP_RATE_LIMIT_RPS` | per-client rate limit | `10` |
+| `MCP_RATE_LIMIT_RPS` | per-user rate limit | `10` |
 
 Fail-fast validation: http mode with missing/incomplete auth config aborts startup with a clear error.
 stdio mode ignores all `MCP_AUTH_*` / `MCP_HTTP_*` vars.
@@ -136,7 +138,8 @@ stdio mode ignores all `MCP_AUTH_*` / `MCP_HTTP_*` vars.
 - Tests: fake auth context / fake provider; assert per-user header derivation and profile-arg inertness.
 
 ### Phase 4 — production hardening
-- Middleware (http mode only): FastMCP rate-limiting middleware; structured logging middleware
+- Middleware (http mode only): bounded per-user rate-limiting middleware (see As-built deviations);
+  structured logging middleware
   (tool name, user oid, duration, outcome); error masking (`mask_error_details=True`).
 - **Local-disk tool audit**: any tool that reads/writes server-local paths (onedrive upload/download
   `save_path`-style args, attachment save) must be gated or content-returning in http mode —
@@ -186,12 +189,28 @@ recorded here rather than by rewriting the historical text.
 - **Endpoint path.** The Streamable HTTP endpoint is `/mcp` (no trailing slash);
   `/mcp/` 307-redirects to it. RFC 9728 metadata is served at
   `/.well-known/oauth-protected-resource/mcp`.
-- **Rate limiting keys per user (post-review fix).** `RateLimitingMiddleware`
-  is constructed with a `get_client_id` callable that keys the token bucket on
-  the caller's validated `oid` (falling back to `sub`, then a shared
-  `"unauthenticated"` bucket). Without it, fastmcp keys every request under a
-  single literal `"global"` bucket, letting one user throttle all others. The
-  callable never raises.
+- **Rate limiting is a bounded per-user middleware (post-review fix).** fastmcp's
+  `RateLimitingMiddleware` is replaced by `middleware.UserRateLimitMiddleware`.
+  Two reasons: (1) fastmcp keys every request under a single literal `"global"`
+  bucket unless a `get_client_id` callable is supplied, letting one user throttle
+  all others; and (2) its per-client `defaultdict` of limiters never evicts, so
+  entries accumulate for the whole process lifetime. Ours keys the token bucket
+  on `f"{tid}:{oid}"` (falling back to `oid`, then `sub`, then a shared
+  `"unauthenticated"` bucket; never raises), and stores buckets in an
+  `OrderedDict` capped at `_LIMITER_CAP` (10,000, LRU eviction) with a lazy
+  idle-TTL sweep (`_LIMITER_IDLE_TTL`, 900 s). User-facing semantics are
+  unchanged: same token-bucket algorithm, `burst_capacity` still defaults to
+  `2 * max_requests_per_second`, applied in `on_request`, and over-limit raises
+  the same `RateLimitError` (McpError code `-32000`).
+- **Single-tenant GUID required for `MCP_AUTH_TENANT_ID` (post-review fix).**
+  `validate_http_config` now requires a concrete tenant GUID and rejects
+  pseudo-tenants (`organizations`/`common`/`consumers`) and verified domains
+  with an actionable error. fastmcp's `AzureProvider` pins the accepted token
+  issuer to a literal `https://{authority}/{tenant_id}/v2.0` (unlike
+  `AzureJWTVerifier`, it has no pseudo-tenant special-casing), and real Entra
+  tokens carry the concrete tenant GUID in `iss`, so any non-GUID value makes
+  every request fail authentication. Multi-tenant support is future work: it
+  needs issuer-validation skipping plus per-tenant OBO authority selection.
 
 ## Phase 7 — observability (added 2026-07-12)
 
