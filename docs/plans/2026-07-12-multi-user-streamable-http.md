@@ -170,3 +170,25 @@ stdio mode ignores all `MCP_AUTH_*` / `MCP_HTTP_*` vars.
 - OBO does not work for personal MSA in the general case — explicitly out of scope for http mode.
 - Multi-worker deployments need external `client_storage` — out of scope; documented.
 - MCPB/stdio users: zero behavior change; `authenticate_ms_profile` and disk caches untouched.
+
+## As-built deviations
+
+Minor points where the shipped implementation differs from the plan body above;
+recorded here rather than by rewriting the historical text.
+
+- **TokenProvider method name.** The `TokenProvider` protocol method is
+  `get_access_token()` (not `get_token()` as sketched in Phase 1). All providers
+  (`ProfileTokenProvider`, `OboTokenProvider`) and `GraphClient._get_headers`
+  use that name.
+- **Thread offload.** The blocking MSAL call in stdio mode runs via
+  `asyncio.to_thread(...)` (not `anyio.to_thread.run_sync`). Functionally
+  equivalent; one less indirection.
+- **Endpoint path.** The Streamable HTTP endpoint is `/mcp` (no trailing slash);
+  `/mcp/` 307-redirects to it. RFC 9728 metadata is served at
+  `/.well-known/oauth-protected-resource/mcp`.
+- **Rate limiting keys per user (post-review fix).** `RateLimitingMiddleware`
+  is constructed with a `get_client_id` callable that keys the token bucket on
+  the caller's validated `oid` (falling back to `sub`, then a shared
+  `"unauthenticated"` bucket). Without it, fastmcp keys every request under a
+  single literal `"global"` bucket, letting one user throttle all others. The
+  callable never raises.

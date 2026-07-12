@@ -64,10 +64,11 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `move_or_copy_item` — move or copy items within OneDrive
 - `delete_drive_item` — delete a file or folder (moves to recycle bin)
 
-#### SharePoint (12 tools)
+#### SharePoint (13 tools)
 
 > SharePoint tools require a work or school account (Azure AD / Entra ID). They are not available for personal Outlook.com / Live accounts, which do not support the `Sites.ReadWrite.All` Graph permission. `Sites.ReadWrite.All` requires one-time admin consent in enterprise tenants.
 
+- `search_content` — tenant-wide full-text search across content via the Microsoft Search API (KQL queries over files, list items, sites, messages, and events)
 - `search_sharepoint_sites` — search or list SharePoint sites the user can access
 - `get_sharepoint_site` — get details of a specific site
 - `list_site_libraries` — list document libraries in a site
@@ -110,6 +111,10 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `remove_ms_profile` — remove a profile and delete its cached tokens
 - `authenticate_ms_profile` — trigger interactive OAuth for a profile
 - `set_default_ms_profile` — change which profile is used when none is specified
+
+#### Service utilities (1 tool)
+
+- `list_enabled_services` — report which optional service groups (SharePoint, Teams, Teams meeting artifacts, Teams AI insights) are currently enabled
 
 ## Installation
 
@@ -220,6 +225,7 @@ Point an MCP client with OAuth support at `https://your-host/mcp`. The client di
 - **Work/school tenants only** — see above. Don't point `MCP_AUTH_TENANT_ID` at `consumers` or `common`.
 - **Single worker only.** The OAuth-proxy client store and the per-user OBO credential cache both live in this process's memory. Running more than one worker/replica splits that state and breaks sessions unpredictably. Horizontal scaling requires wiring fastmcp's external `client_storage` backend (a pluggable key-value store) in place of the in-memory default — not implemented here; treat it as a prerequisite before scaling beyond one process.
 - **Rate limiting and audit logging are on by default** in http mode (see above) — there is no equivalent in stdio mode, since stdio has exactly one caller.
+- **The built-in rate limit covers MCP tool traffic only.** `MCP_RATE_LIMIT_RPS` throttles authenticated calls to the `/mcp` endpoint (per user); it does not protect the unauthenticated OAuth endpoints (`/authorize`, `/token`, `/register`, `/auth/callback`). Throttle those at your reverse proxy.
 - **Secrets belong in the environment, not in files you commit.** `MCP_AUTH_CLIENT_SECRET` in particular; consider a secrets manager (Azure Key Vault, etc.) that injects it as an env var at deploy time rather than storing it in `.env` on disk long-term.
 
 ## Azure Setup

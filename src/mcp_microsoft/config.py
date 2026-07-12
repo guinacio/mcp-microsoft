@@ -122,6 +122,11 @@ def validate_http_config(config: AppConfig) -> list[str]:
     if not config.auth_tenant_id:
         problems.append("MCP_AUTH_TENANT_ID is required in http mode")
 
+    if not 1 <= config.http_port <= 65535:
+        problems.append(
+            f"MCP_HTTP_PORT must be between 1 and 65535 (got {config.http_port})"
+        )
+
     return problems
 
 
@@ -133,6 +138,22 @@ def get_app_config() -> AppConfig:
     if _config_cache is None:
         _config_cache = AppConfig.from_env()
     return _config_cache
+
+
+def set_app_config(config: AppConfig) -> None:
+    """Install *config* as the process-wide cached AppConfig.
+
+    This is the programmatic-embedding hook: when a host builds the server via
+    ``create_mcp_server(config=...)`` instead of the env-driven bootstrap, the
+    global cache must point at that same object. Otherwise the many call sites
+    that read ``get_app_config()`` directly (disk-tool registration gates and
+    runtime path rejections in ``tools/*`` and ``graph.get_graph`` dispatch)
+    would silently fall back to env-derived config and disagree with the
+    explicitly threaded one — e.g. an embedder passing an http-mode config
+    would get a server that skips http-mode disk gating.
+    """
+    global _config_cache
+    _config_cache = config
 
 
 def reset_app_config() -> None:

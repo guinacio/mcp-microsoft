@@ -183,6 +183,17 @@ def test_validate_http_config_rejects_invalid_transport() -> None:
     assert any("MCP_TRANSPORT" in p for p in problems)
 
 
+@pytest.mark.parametrize("bad_port", [0, -1, 65536, 99999])
+def test_validate_http_config_rejects_out_of_range_port(bad_port: int) -> None:
+    problems = validate_http_config(_http_config(http_port=bad_port))
+    assert any("MCP_HTTP_PORT" in p and "65535" in p for p in problems)
+
+
+@pytest.mark.parametrize("ok_port", [1, 8000, 65535])
+def test_validate_http_config_accepts_in_range_port(ok_port: int) -> None:
+    assert validate_http_config(_http_config(http_port=ok_port)) == []
+
+
 # --------------------------------------------------------------------------
 # server.py — build_graph_authorize_scopes helper
 # --------------------------------------------------------------------------
@@ -467,6 +478,65 @@ def test_main_rejects_incomplete_http_config(
         server_mod.main()
 
 
+def test_main_http_mode_runs_with_http_transport_kwargs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """http mode dispatches .run(transport='http', host, port, stateless_http)
+    with the values drawn from config."""
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    _set_full_http_env(
+        monkeypatch,
+        MCP_HTTP_HOST="0.0.0.0",
+        MCP_HTTP_PORT="9443",
+        MCP_HTTP_STATELESS="true",
+    )
+    reset_runtime_state()
+
+    recorded: dict[str, object] = {}
+
+    class _StubServer:
+        def run(self, **kwargs: object) -> None:
+            recorded.update(kwargs)
+
+    monkeypatch.setattr(server_mod, "get_mcp_server", lambda *a, **k: _StubServer())
+
+    server_mod.main()
+
+    assert recorded == {
+        "transport": "http",
+        "host": "0.0.0.0",
+        "port": 9443,
+        "stateless_http": True,
+    }
+
+
+def test_main_stdio_mode_runs_with_no_kwargs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """stdio mode calls .run() with no arguments (fastmcp's stdio default)."""
+    import mcp_microsoft.server as server_mod
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    reset_runtime_state()
+
+    recorded: dict[str, object] = {}
+
+    class _StubServer:
+        def run(self, *args: object, **kwargs: object) -> None:
+            recorded["args"] = args
+            recorded["kwargs"] = kwargs
+
+    monkeypatch.setattr(server_mod, "get_mcp_server", lambda *a, **k: _StubServer())
+
+    server_mod.main()
+
+    assert recorded == {"args": (), "kwargs": {}}
+
+
 # --------------------------------------------------------------------------
 # create_mcp_server — ProfileManager warm-up is stdio-only
 # --------------------------------------------------------------------------
@@ -536,6 +606,77 @@ def test_http_mode_wires_rate_limit_and_audit_middleware(
     assert len(audit_loggers) == 1
     # Rate limiting runs before audit logging in the stack.
     assert mcp.middleware.index(rate_limiters[0]) < mcp.middleware.index(audit_loggers[0])
+
+
+def test_http_mode_threads_non_default_rate_limit_rps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-default MCP_RATE_LIMIT_RPS is threaded into the middleware.
+
+    The sibling test above asserts 10.0, which coincides with the default and
+    so cannot prove the value is actually plumbed through; this uses 42.5.
+    """
+    import mcp_microsoft.server as server_mod
+    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    _set_full_http_env(monkeypatch, MCP_RATE_LIMIT_RPS="42.5")
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+
+    limiters = [mw for mw in mcp.middleware if isinstance(mw, RateLimitingMiddleware)]
+    assert len(limiters) == 1
+    assert limiters[0].max_requests_per_second == 42.5
+    # Per-client keying is wired: without get_client_id fastmcp buckets every
+    # request under the single literal "global" key (one user throttles all).
+    assert limiters[0].get_client_id is not None
+
+
+def test_rate_limit_client_id_keys_on_oid_with_unauthenticated_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The wired get_client_id returns the caller's oid, else the constant.
+
+    Exercises the callable actually attached to the middleware (proving it is
+    the derivation the limiter uses), directly rather than through a request.
+    """
+    import fastmcp.server.dependencies as deps
+
+    import mcp_microsoft.server as server_mod
+    from fastmcp.server.middleware.rate_limiting import RateLimitingMiddleware
+
+    monkeypatch.setenv("MS365_CREDENTIALS_DIR", str(tmp_path))
+    _clear_http_env(monkeypatch)
+    _set_full_http_env(monkeypatch)
+    reset_runtime_state()
+
+    mcp = server_mod.get_mcp_server(reset=True)
+    limiter = next(
+        mw for mw in mcp.middleware if isinstance(mw, RateLimitingMiddleware)
+    )
+    derive = limiter.get_client_id
+    assert derive is not None
+
+    class _Tok:
+        claims = {"oid": "user-oid-123"}
+        token = "assertion"
+
+    monkeypatch.setattr(deps, "get_access_token", lambda: _Tok())
+    # The MiddlewareContext argument is ignored by the derivation; pass a stub.
+    assert derive(object()) == "user-oid-123"
+
+    # No ambient token -> the shared unauthenticated bucket (never raises).
+    monkeypatch.setattr(deps, "get_access_token", lambda: None)
+    assert derive(object()) == server_mod._UNAUTHENTICATED_CLIENT_ID
+
+    # A raising dependency still collapses to the fallback, never propagating.
+    def _boom() -> object:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(deps, "get_access_token", _boom)
+    assert derive(object()) == server_mod._UNAUTHENTICATED_CLIENT_ID
 
 
 def test_http_mode_zero_rate_limit_disables_limiter_but_keeps_audit_log(

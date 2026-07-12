@@ -27,6 +27,21 @@ if TYPE_CHECKING:
 # calling user, matching the scopes advertised via ``additional_authorize_scopes``.
 _GRAPH_DEFAULT_SCOPE = "https://graph.microsoft.com/.default"
 
+# Serializes first-time token acquisition per profile (None = default profile).
+# Without this, two concurrent initial calls for the same profile could each
+# launch an interactive / device-code prompt. Module-level: one lock per
+# profile for the process lifetime.
+_profile_token_locks: dict[str | None, asyncio.Lock] = {}
+
+
+def _profile_token_lock(profile: str | None) -> asyncio.Lock:
+    """Return the process-wide token-acquisition lock for *profile*."""
+    lock = _profile_token_locks.get(profile)
+    if lock is None:
+        lock = asyncio.Lock()
+        _profile_token_locks[profile] = lock
+    return lock
+
 
 @runtime_checkable
 class TokenProvider(Protocol):
@@ -54,7 +69,13 @@ class ProfileTokenProvider:
         # Lazy import mirrors graph.py's circular-import avoidance.
         from mcp_microsoft.profiles import get_profile_manager
 
-        return await asyncio.to_thread(get_profile_manager().get_token, self.profile)
+        # Serialize per profile so concurrent first-time calls can't each
+        # trigger interactive/device-code auth. Once a profile is authenticated
+        # the MSAL silent (cached) path is fast, so the lock is barely held.
+        async with _profile_token_lock(self.profile):
+            return await asyncio.to_thread(
+                get_profile_manager().get_token, self.profile
+            )
 
 
 def _find_azure_provider(auth: object) -> "AzureProvider | None":

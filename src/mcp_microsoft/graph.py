@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import http.cookiejar
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -44,16 +45,35 @@ _transfer_client: httpx.AsyncClient | None = None
 _obo_graph_client: GraphClient | None = None
 
 
+class _NullCookieJar(http.cookiejar.CookieJar):
+    """Cookie jar that silently drops every ``Set-Cookie``.
+
+    Graph API calls never need cookies, and in http (multi-user) mode the two
+    AsyncClients below are shared across every user. A default httpx client
+    keeps a mutable cookie jar, so a ``Set-Cookie`` from Graph or a redirected
+    download host would be stored once and replayed on a *different* user's
+    request. Persisting nothing keeps the shared clients free of cross-user
+    cookie state (harmless in stdio mode, so applied unconditionally).
+    """
+
+    def set_cookie(self, cookie: http.cookiejar.Cookie) -> None:
+        return None
+
+
 async def initialize_http_clients() -> None:
     """Initialize shared HTTP clients for Graph API traffic."""
     global _request_client, _transfer_client
 
     if _request_client is None:
-        _request_client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
+        _request_client = httpx.AsyncClient(
+            timeout=_REQUEST_TIMEOUT,
+            cookies=_NullCookieJar(),
+        )
     if _transfer_client is None:
         _transfer_client = httpx.AsyncClient(
             timeout=_TRANSFER_TIMEOUT,
             follow_redirects=True,
+            cookies=_NullCookieJar(),
         )
 
 

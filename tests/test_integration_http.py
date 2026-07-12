@@ -159,6 +159,119 @@ async def test_authenticated_tool_call_reaches_graph_with_obo_token(
     assert "/me/mailFolders/inbox/messages" in captured["url"]
 
 
+@pytest.mark.asyncio
+async def test_error_masking_hides_sensitive_details_from_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """http mode's mask_error_details keeps internal exception text off the wire.
+
+    A tool driven to raise deep in the OBO path (a RuntimeError carrying a
+    sensitive marker) must surface only a generic error to the client -- the
+    marker must never reach the caller. Mirrors the fixture pattern of the
+    authenticated-call test above.
+    """
+    mcp = _build_http_server(monkeypatch)
+
+    async def boom(self: OboTokenProvider) -> str:
+        raise RuntimeError("SENSITIVE_XYZ")
+
+    monkeypatch.setattr(OboTokenProvider, "get_access_token", boom)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "list_emails",
+            {"params": {"folder": "inbox", "max_results": 5}},
+            raise_on_error=False,
+        )
+
+    assert result.is_error is True
+    serialized = "".join(
+        str(getattr(block, "text", block)) for block in (result.content or [])
+    )
+    serialized += str(getattr(result, "structured_content", "") or "")
+    assert "SENSITIVE_XYZ" not in serialized
+
+
+# ---------------------------------------------------------------------------
+# 1b. Real registration-path OBO resolution (no _find_azure_provider /
+#     OboTokenProvider.get_access_token patching)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_call_resolves_real_azure_provider_through_server_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove ``get_server().auth`` resolves to the REAL AzureProvider.
+
+    Unlike test #1 (which stubs ``OboTokenProvider.get_access_token`` wholesale)
+    and the isolation test below (which stubs ``_find_azure_provider``), this
+    exercises the entire un-stubbed OBO recipe against the real server build:
+
+      * the real ``OboTokenProvider.get_access_token`` runs,
+      * it calls the real ``get_server()`` -> ``.auth`` (the AzureProvider the
+        real ``create_mcp_server`` attached in http mode),
+      * the real ``_find_azure_provider`` unwraps it,
+      * only ``AzureProvider.get_obo_credential`` is patched (class-level) to
+        skip the live Entra network exchange and hand back a fake credential
+        whose Graph token is the literal ``"fake"``.
+
+    The ambient bearer is injected by patching
+    ``fastmcp.server.dependencies.get_access_token`` (OboTokenProvider imports
+    it inside the method, so the fastmcp module is the patch point) -- the
+    in-memory transport does no HTTP-layer bearer validation.
+
+    A "Bearer fake" on the outbound Graph request is only possible if every one
+    of those real seams lined up.
+    """
+    from fastmcp.server.auth.providers.azure import AzureProvider
+
+    mcp = _build_http_server(monkeypatch)
+
+    # Sanity: the real server really did attach an AzureProvider as its auth.
+    assert isinstance(mcp.auth, AzureProvider)
+
+    import fastmcp.server.dependencies as deps
+
+    monkeypatch.setattr(
+        deps,
+        "get_access_token",
+        lambda: _FakeAccessToken("user-assertion", claims={"oid": "user-1"}),
+    )
+
+    fake_credential = _FakeCredential("fake")
+
+    async def fake_get_obo_credential(self: AzureProvider, user_assertion: str):
+        return fake_credential
+
+    # Patch the class method (not _find_azure_provider): the real provider
+    # instance reached via get_server().auth is what gets this call.
+    monkeypatch.setattr(
+        AzureProvider, "get_obo_credential", fake_get_obo_credential
+    )
+
+    captured: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, json=_GRAPH_MESSAGES_PAGE)
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    monkeypatch.setattr(graph_module, "_request_client", mock_client)
+
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                "list_emails", {"params": {"folder": "inbox", "max_results": 5}}
+            )
+    finally:
+        await mock_client.aclose()
+
+    assert result.is_error is False
+    assert captured["auth"] == "Bearer fake"
+    assert fake_credential.get_token_calls == 1
+
+
 # ---------------------------------------------------------------------------
 # 2. ASGI-level protocol/auth surface
 # ---------------------------------------------------------------------------

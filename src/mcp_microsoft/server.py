@@ -35,6 +35,38 @@ _mcp_server: FastMCP | None = None
 # Azure via AzureProvider.additional_authorize_scopes.
 _GRAPH_RESOURCE = "https://graph.microsoft.com"
 
+# Shared rate-limit bucket key for any request whose caller identity cannot be
+# resolved. Kept separate from every authenticated user's per-oid bucket so an
+# unauthenticated caller can only starve other unauthenticated callers.
+_UNAUTHENTICATED_CLIENT_ID = "unauthenticated"
+
+
+def _rate_limit_client_id(_context: Any) -> str:
+    """Return the per-client rate-limit bucket key for the current request.
+
+    Passed to fastmcp's ``RateLimitingMiddleware(get_client_id=...)``. In
+    fastmcp 3.4.4 the middleware calls this with the ``MiddlewareContext`` and
+    accepts a sync ``str`` return; with no ``get_client_id`` it keys EVERY
+    request under the single literal ``"global"`` bucket, letting one user
+    throttle everyone. We instead key on the caller's validated Entra identity
+    (``oid``, falling back to ``sub``) so each user gets an independent bucket.
+
+    Must never raise — any failure reading the ambient token collapses to the
+    shared ``"unauthenticated"`` bucket. The bearer token itself is never read
+    into the key.
+    """
+    try:
+        from fastmcp.server.dependencies import get_access_token
+
+        token = get_access_token()
+        if token is None:
+            return _UNAUTHENTICATED_CLIENT_ID
+        claims = getattr(token, "claims", None) or {}
+        identity = claims.get("oid") or claims.get("sub")
+        return str(identity) if identity else _UNAUTHENTICATED_CLIENT_ID
+    except Exception:
+        return _UNAUTHENTICATED_CLIENT_ID
+
 
 def build_graph_authorize_scopes(config: AppConfig) -> list[str]:
     """Build the delegated Graph scopes for ``additional_authorize_scopes``.
@@ -85,7 +117,10 @@ def _build_http_middleware(config: AppConfig) -> list[Any]:
     stack: list[Any] = []
     if config.rate_limit_rps > 0:
         stack.append(
-            RateLimitingMiddleware(max_requests_per_second=config.rate_limit_rps)
+            RateLimitingMiddleware(
+                max_requests_per_second=config.rate_limit_rps,
+                get_client_id=_rate_limit_client_id,
+            )
         )
     stack.append(AuditLoggingMiddleware())
     return stack
@@ -138,6 +173,14 @@ async def app_lifespan(_server: FastMCP):
 
 def create_mcp_server(config: AppConfig | None = None) -> FastMCP:
     """Build a FastMCP server using the current runtime configuration."""
+    if config is not None:
+        # Programmatic-embedding path: make the global cache the SAME object we
+        # thread below, so the ~11 sites that read get_app_config() directly
+        # (disk-tool gates, runtime path rejections, graph.get_graph dispatch)
+        # can't disagree with this explicit config. See config.set_app_config.
+        from mcp_microsoft.config import set_app_config
+
+        set_app_config(config)
     runtime_config = config or get_app_config()
     http_mode = runtime_config.transport == "http"
 
