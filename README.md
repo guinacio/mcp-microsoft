@@ -9,7 +9,7 @@ Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, Contacts, and
 
 ## Overview
 
-`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers six surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, SharePoint, contacts, and Teams — **93 tools** in total.
+`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers six surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, SharePoint, contacts, and Teams — **95 tools** in stdio mode with every optional service enabled. The exact count depends on your feature flags and, since 0.8.0, on transport mode: the multi-user remote (`http`) mode omits profile-management and local-disk tools, landing at **87 tools** with everything else enabled — see [Remote server — multi-user (Streamable HTTP)](#remote-server--multi-user-streamable-http) below.
 
 The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. Teams and SharePoint require a work or school account and are gated behind feature flags (`MCP_ENABLE_TEAMS` / `MCP_ENABLE_SHAREPOINT`). On manual installs, they auto-enable for corporate-oriented tenant values (`common`, `organizations`, or a specific tenant ID). In Claude Desktop / MCPB, the installer toggles remain authoritative. You can always override the default with the environment flags to force either service on or off. Teams meeting transcripts/recordings and Copilot AI insights are separate explicit opt-ins so the server does not request those additional scopes unless you enable them.
 
@@ -19,7 +19,7 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 
 ## Features
 
-### Tools (93 total)
+### Tools (95 total in stdio mode, all optional services enabled)
 
 #### Mail (25 tools)
 
@@ -165,6 +165,62 @@ uv run mcp-microsoft
   }
 }
 ```
+
+## Remote server — multi-user (Streamable HTTP)
+
+Everything above runs `mcp-microsoft` as a single-user **stdio** server: one process, one local profile, launched directly by your MCP client. As of 0.8.0 the server also supports a second, mutually exclusive mode — a shared **remote server** that any number of people can connect to over the network, where each person signs in with their own Microsoft account and every Graph call runs under their own delegated identity. No profile configuration, no shared credentials: identity comes from a per-user **On-Behalf-Of (OBO)** token exchange derived from the OAuth token each client presents.
+
+Under the hood: Streamable HTTP per the MCP **2025-11-25** spec, served at `/mcp/`; authentication via FastMCP's `AzureProvider`, which implements the OAuth-proxy pattern Microsoft Entra ID needs since Entra doesn't support Dynamic Client Registration.
+
+### Quickstart
+
+**From source:**
+
+```bash
+export MCP_TRANSPORT=http
+export MCP_BASE_URL=https://mcp.example.com   # your public HTTPS URL (behind a reverse proxy)
+export MCP_AUTH_CLIENT_ID=your-confidential-client-id
+export MCP_AUTH_CLIENT_SECRET=your-client-secret
+export MCP_AUTH_TENANT_ID=your-tenant-id-or-organizations
+uv run mcp-microsoft
+```
+
+**With Docker:**
+
+```bash
+cp .env.template .env
+# fill in the "Remote server (http) mode" section of .env, then:
+docker compose up -d
+curl http://localhost:8000/health
+```
+
+See [`docs/azure-setup.md`](docs/azure-setup.md#app-registration-for-the-remote-http-server) for the Azure App Registration this mode requires — it is a **separate, confidential-client registration**, distinct from the public-client one used for stdio installs.
+
+### How MCP clients connect
+
+Point an MCP client with OAuth support at `https://your-host/mcp/`. The client discovers and drives the OAuth flow itself (the server advertises `/.well-known/oauth-protected-resource` per RFC 9728, as MCP 2025-11-25 authorization requires); when the user completes Microsoft sign-in, the client starts sending an Entra-derived bearer token with every request, and the server exchanges it On-Behalf-Of for a Graph token scoped to that user on each call. Clients without OAuth support (or without Streamable HTTP support) cannot use this mode — use stdio instead.
+
+### http mode vs. stdio — what's different
+
+- **Profile-management tools are not registered.** `add_ms_profile`, `list_ms_profiles`, `remove_ms_profile`, `authenticate_ms_profile`, and `set_default_ms_profile` don't exist in http mode — identity management is a server-operator/stdio concern, not something a remote caller should be able to do.
+- **The `profile` argument on every other tool is inert.** It's accepted for API compatibility but silently ignored; identity always comes from the caller's bearer token, never from a name in the request.
+- **Local-disk tools are not available.** The server's disk is not the caller's disk. `download_file`, `download_from_site`, and `teams_download_meeting_recording` are not registered at all; `upload_file` / `upload_to_site` reject `local_path` (use `content_base64`), and `download_attachment` / `get_contact_photo` reject `save_path` (you get the content/photo inline instead).
+- **Feature flags must be explicit.** `MCP_ENABLE_TEAMS`, `MCP_ENABLE_SHAREPOINT`, `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS`, and `MCP_ENABLE_TEAMS_AI_INSIGHTS` need to be set directly — the corporate-account auto-detect fallback that manual stdio installs get doesn't apply, since there's no single configured profile to inspect.
+- **The deletion kill-switch still works.** `MCP_DISABLE_DELETION_TOOLS=true` suppresses the same permanent-delete tools as in stdio mode.
+- **Work/school accounts only.** http mode targets a specific tenant GUID or `organizations`. Personal Microsoft accounts (Outlook.com/Live) remain stdio-only — OBO and custom API scopes aren't reliably supported for consumer accounts.
+- **Unauthenticated `GET /health`** is available for load balancers and container healthchecks; every other route requires a valid bearer token.
+- **Rate limiting is on by default.** `MCP_RATE_LIMIT_RPS` (default `10`) caps requests per client per second; set it to `0` or a negative number to disable.
+- **Every tool call is audit-logged**: tool name, caller `oid` and `preferred_username` (from the token's claims), duration, and outcome — never the arguments, results, or the token itself.
+- **Error details are masked** in responses sent to remote clients (internal exception messages are logged server-side but not echoed back).
+
+### Security notes
+
+- **TLS is not terminated by this server.** It speaks plain HTTP; put a reverse proxy (Traefik, Caddy, nginx, your cloud load balancer, etc.) in front of it for TLS, and set `MCP_BASE_URL` to the proxy's public HTTPS URL — not this process's bind address. See the commented example in `docker-compose.yml`.
+- **`MCP_BASE_URL` must match exactly** (scheme, host, port, path) what MCP clients connect to and what's registered as the Azure redirect URI base. A mismatch breaks the OAuth redirect and the JWT audience/issuer checks.
+- **Work/school tenants only** — see above. Don't point `MCP_AUTH_TENANT_ID` at `consumers` or `common`.
+- **Single worker only.** The OAuth-proxy client store and the per-user OBO credential cache both live in this process's memory. Running more than one worker/replica splits that state and breaks sessions unpredictably. Horizontal scaling requires wiring fastmcp's external `client_storage` backend (a pluggable key-value store) in place of the in-memory default — not implemented here; treat it as a prerequisite before scaling beyond one process.
+- **Rate limiting and audit logging are on by default** in http mode (see above) — there is no equivalent in stdio mode, since stdio has exactly one caller.
+- **Secrets belong in the environment, not in files you commit.** `MCP_AUTH_CLIENT_SECRET` in particular; consider a secrets manager (Azure Key Vault, etc.) that injects it as an env var at deploy time rather than storing it in `.env` on disk long-term.
 
 ## Azure Setup
 

@@ -172,6 +172,103 @@ After this, the server refreshes tokens silently in the background. You only nee
 
 ---
 
+## App registration for the remote (http) server
+
+> **This is a separate App Registration from the one above.** Everything in Steps 1–8 creates a **public client** (platform: "Mobile and desktop applications", no client secret) for the single-user **stdio** server (MCPB / Claude Desktop / running from source). The multi-user **remote http server** (`MCP_TRANSPORT=http`, added in 0.8.0) needs a **confidential client** instead — a different platform type, with a client secret, because it performs a server-side On-Behalf-Of (OBO) token exchange on behalf of each connecting user. You cannot reuse the stdio registration for this; create a new one (or add a second platform + secret to a fresh registration dedicated to the remote server — don't bolt this onto the public-client registration your desktop users already depend on).
+>
+> Background on *why* the server needs this: see the "Remote server — multi-user (Streamable HTTP)" section of the main [README](../README.md).
+
+### 1. Register the application
+
+1. [portal.azure.com](https://portal.azure.com) → **App registrations** → **+ New registration**.
+2. **Name**: anything identifiable, e.g. `mcp-microsoft-remote`.
+3. **Supported account types**: work/school only — either *this organizational directory only* or *any organizational directory*, depending on who should be able to sign in. Do **not** choose a personal-account option: On-Behalf-Of and custom API scopes are not reliably supported for consumer Microsoft accounts, so the remote server doesn't support them either (personal accounts stay on stdio).
+4. **Redirect URI**: platform **Web** (not "Mobile and desktop applications" — that's the stdio registration's platform), URI:
+
+   ```
+   {MCP_BASE_URL}/auth/callback
+   ```
+
+   where `{MCP_BASE_URL}` is the exact public HTTPS URL from your `.env` (e.g. `https://mcp.example.com/auth/callback`). `/auth/callback` is FastMCP's `AzureProvider` default redirect path.
+5. Click **Register**.
+
+### 2. Expose an API
+
+1. Left sidebar → **Expose an API**.
+2. **Application ID URI**: click **Add**, accept the default `api://{client_id}` (this is also `AzureProvider`'s default — no config needed on the server side if you keep it), and **Save**.
+3. **+ Add a scope**:
+   - **Scope name**: `mcp-access` (matches the server's default `MCP_AUTH_REQUIRED_SCOPE`; if you pick a different name, set `MCP_AUTH_REQUIRED_SCOPE` to match).
+   - **Who can consent**: Admins and users (or Admins only, if you want to gate access centrally).
+   - **Admin/user consent display name & description**: anything descriptive, e.g. "Access mcp-microsoft" / "Allows the MCP client to call mcp-microsoft on your behalf."
+   - **State**: Enabled.
+
+### 3. Set the access token version (manifest edit)
+
+1. Left sidebar → **Manifest**.
+2. Find `"requestedAccessTokenVersion"` and set it to `2`:
+   ```json
+   "requestedAccessTokenVersion": 2
+   ```
+3. **Save**. This is required for Azure to issue v2.0 tokens with the claim shapes (`scp`, `oid`, `preferred_username`, etc.) `AzureProvider` and the server's audit logging expect.
+
+### 4. Create a client secret
+
+1. Left sidebar → **Certificates & secrets** → **+ New client secret**.
+2. Description: anything, e.g. `mcp-microsoft-remote-prod`. Pick an expiry (Azure caps this at 24 months).
+3. Copy the secret **value** immediately — it's shown once. This becomes `MCP_AUTH_CLIENT_SECRET`.
+
+> **Rotation note:** the secret has a hard expiry — plan to rotate it before then. Create a new secret alongside the old one (both are valid simultaneously), roll `MCP_AUTH_CLIENT_SECRET` to the new value and restart the server, then delete the old secret from the App Registration once you've confirmed the new one is live. The server holds no long-lived cache of the secret itself beyond process memory, so a restart is sufficient — no data migration needed.
+
+### 5. Add delegated Graph permissions
+
+Same permission set as the stdio server (Step 5 above), added to **this** registration instead:
+
+**Base (always required):**
+
+| Permission | What it enables |
+|------------|----------------|
+| `Mail.ReadWrite` | Read, move, delete, and organise email |
+| `Mail.Send` | Send email |
+| `Calendars.ReadWrite` | Read and manage calendar events |
+| `Contacts.ReadWrite` | Read and manage contacts |
+| `Files.ReadWrite` | Read and manage OneDrive files |
+
+`offline_access` is added automatically by `AzureProvider` — no need to request it explicitly.
+
+**Optional, only if the corresponding feature flag is enabled** (see `MCP_ENABLE_*` in `.env.template`):
+
+| Flag | Permissions |
+|------|-------------|
+| `MCP_ENABLE_TEAMS` | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `Channel.Create`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `Chat.ReadWrite`, `Chat.Create`, `OnlineMeetings.ReadWrite` |
+| `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS` (requires Teams also enabled) | `OnlineMeetingTranscript.Read.All`, `OnlineMeetingRecording.Read.All` |
+| `MCP_ENABLE_TEAMS_AI_INSIGHTS` (requires Teams also enabled, plus Copilot licensing) | `OnlineMeetingAiInsight.Read.All` |
+| `MCP_ENABLE_SHAREPOINT` | `Sites.ReadWrite.All` |
+
+Only request permissions for services you're actually enabling — the server builds its OBO scope request (`https://graph.microsoft.com/.default`) from whatever's granted on this registration, gated by these same env flags, which in http mode must be set explicitly (no auto-detection).
+
+### 6. Grant admin consent
+
+Because this is a confidential-client, work/school-only registration, plan on **tenant-wide admin consent** rather than per-user consent:
+
+- If you're the tenant admin: **API permissions** → **Grant admin consent for [tenant]**.
+- Otherwise: send your IT administrator the **Application (client) ID** and ask them to grant it from the App Registration's API permissions page.
+
+`Sites.ReadWrite.All` (SharePoint) in particular will not work without admin consent in most tenants. Doing this up front for the whole permission set avoids each new user hitting an individual consent prompt they may not be able to approve themselves.
+
+### 7. Collect the values for `.env`
+
+| Azure value | Env var |
+|---|---|
+| Application (client) ID | `MCP_AUTH_CLIENT_ID` |
+| Client secret value (Step 4) | `MCP_AUTH_CLIENT_SECRET` |
+| Directory (tenant) ID, or `organizations` | `MCP_AUTH_TENANT_ID` |
+| Your reverse proxy's public HTTPS URL | `MCP_BASE_URL` |
+| The scope name from Step 2 (only if not `mcp-access`) | `MCP_AUTH_REQUIRED_SCOPE` |
+
+Fill these into `.env` (copy from `.env.template`'s "Remote server (http) mode" section) and start the server with `MCP_TRANSPORT=http` — see the README's "Remote server — multi-user (Streamable HTTP)" section for the full quickstart, including the Docker Compose path.
+
+---
+
 ## Troubleshooting
 
 ### "AADSTS50011: The redirect URI does not match"
