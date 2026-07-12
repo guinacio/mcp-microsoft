@@ -1,9 +1,10 @@
 """
 Async httpx client wrapper for the Microsoft Graph API.
 
-Each GraphClient instance is bound to a profile name.  Authentication
-headers are fetched per-request via ProfileManager so MSAL can handle
-transparent token refresh.
+Each GraphClient obtains its Bearer token from a TokenProvider, re-fetched
+per request (and per retry attempt) so MSAL can handle transparent token
+refresh.  The default provider wraps ProfileManager, preserving the original
+profile-bound behavior.
 
 Usage:
     from mcp_microsoft.graph import get_graph
@@ -19,6 +20,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+
+from mcp_microsoft.identity import ProfileTokenProvider, TokenProvider
 
 logger = logging.getLogger(__name__)
 
@@ -77,22 +80,31 @@ class GraphClient:
     """
     Thin async wrapper around httpx for Microsoft Graph REST API calls.
 
-    Each instance is optionally bound to a named profile.  The Bearer token
-    is injected from ProfileManager.get_headers(profile) on every request.
+    The Bearer token is supplied by a TokenProvider and re-fetched on every
+    request.  When no provider is given, the client defaults to a
+    ProfileTokenProvider bound to *profile*, preserving the original
+    ProfileManager-backed behavior.
     """
 
-    def __init__(self, profile: str | None = None) -> None:
+    def __init__(
+        self,
+        profile: str | None = None,
+        *,
+        token_provider: TokenProvider | None = None,
+    ) -> None:
         self._profile = profile
+        self._token_provider: TokenProvider = token_provider or ProfileTokenProvider(profile)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_headers(self) -> dict[str, str]:
-        """Fetch authenticated headers for this client's profile."""
-        from mcp_microsoft.profiles import get_profile_manager
-
-        return get_profile_manager().get_headers(self._profile)
+    async def _get_headers(self) -> dict[str, str]:
+        """Build authenticated headers from a freshly acquired access token."""
+        return {
+            "Authorization": f"Bearer {await self._token_provider.get_access_token()}",
+            "Content-Type": "application/json",
+        }
 
     async def _send_with_retry(
         self,
@@ -102,7 +114,7 @@ class GraphClient:
     ) -> httpx.Response:
         """Execute an authenticated HTTP call with shared retry handling."""
         for attempt in range(1, _MAX_RETRIES + 1):
-            response = await send(self._get_headers())
+            response = await send(await self._get_headers())
 
             if response.status_code in _RETRY_STATUSES:
                 raw_retry_after = response.headers.get("Retry-After")
