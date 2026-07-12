@@ -49,6 +49,14 @@ class AppConfig:
     # routes require this token (Bearer or HTTP Basic password). Optional — not
     # part of validate_http_config's required set.
     stats_token: str = ""
+    # Context-free file uploads via fastmcp's FileUpload app. Tri-state: an
+    # explicit MCP_ENABLE_FILE_UPLOAD wins; when unset the feature defaults ON in
+    # http mode (remote users have no local disk) and OFF in stdio mode (local
+    # users already have local_path). See feature_flags.is_file_upload_enabled.
+    enable_file_upload: bool | None = None
+    # Maximum size (MB) of any single uploaded file. Must be positive; the
+    # feature-flag resolver rejects <= 0. Applies in both transports.
+    upload_max_mb: int = 10
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -80,6 +88,8 @@ class AppConfig:
             or "mcp-access",
             rate_limit_rps=_float_env("MCP_RATE_LIMIT_RPS", 10.0),
             stats_token=os.environ.get("MCP_STATS_TOKEN", "").strip(),
+            enable_file_upload=env_flag("MCP_ENABLE_FILE_UPLOAD"),
+            upload_max_mb=_int_env("MCP_UPLOAD_MAX_MB", 10),
         )
 
 

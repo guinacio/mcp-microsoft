@@ -234,6 +234,54 @@ async def test_unknown_tool_calls_do_not_poison_metrics(
 
 
 @pytest.mark.asyncio
+async def test_file_upload_provider_tool_flows_through_middleware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A FileUpload provider tool call is audited and counted like any other.
+
+    Proves the provider's tools are NOT bypassing the http middleware stack:
+    middleware wraps ``tools/call`` dispatch (not registration), so calling the
+    provider-supplied ``list_files`` through an in-memory client both records a
+    metrics row and emits an audit log line — exactly as a static tool would.
+    """
+    import logging
+
+    from fastmcp import Client
+
+    # File upload defaults on in http mode; MCP_STATS_TOKEN wires the registry.
+    mcp = _build_server(monkeypatch, MCP_STATS_TOKEN=_TOKEN)
+    registry = get_metrics_registry()
+
+    caplog_records: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            caplog_records.append(record.getMessage())
+
+    audit_logger = logging.getLogger("mcp_microsoft.middleware")
+    handler = _Capture()
+    audit_logger.addHandler(handler)
+    audit_logger.setLevel(logging.INFO)
+    try:
+        async with Client(mcp) as client:
+            result = await client.call_tool("list_files", {})
+    finally:
+        audit_logger.removeHandler(handler)
+
+    # The provider tool ran (empty upload area for this unauthenticated caller).
+    assert result.data == []
+
+    # Metrics middleware recorded the provider tool under its real name.
+    snap = registry.snapshot()
+    tool_names = {t["name"] for t in snap["tools"]}
+    assert "list_files" in tool_names
+    assert snap["server"]["total_calls"] == 1
+
+    # Audit middleware logged the same call.
+    assert any("tool=list_files" in msg for msg in caplog_records)
+
+
+@pytest.mark.asyncio
 async def test_metrics_content_type_and_known_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

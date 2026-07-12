@@ -61,6 +61,7 @@ class UploadFileInput(ToolRequestModel):
     parent_folder_id: str | None = None
     filename: str | None = None
     content_base64: str | None = None
+    uploaded_file: str | None = None
     profile: str | None = None
 
 
@@ -287,18 +288,24 @@ async def upload_file(
     """
     Upload a file to OneDrive.
 
-    Two modes of operation:
+    Three modes of operation:
     1. **Local file**: pass local_path pointing to a file on the MCP server host.
        Files under 4 MB use simple PUT; larger files use resumable upload.
     2. **Base64 content**: pass content_base64 with the file bytes encoded as
        base64, plus filename. Use this when local filesystem access is not
        available (e.g. container/sandbox environments).
+    3. **Uploaded file**: pass uploaded_file with the name of a file previously
+       uploaded via the file-upload UI (see list_files). The file's bytes never
+       passed through the model's context window.
 
     Args:
         local_path: Optional local file path on the MCP host machine.
         parent_folder_id: Optional destination folder ID. Omit to upload to the OneDrive root.
         filename: Optional override for the uploaded filename. Required when using `content_base64`.
         content_base64: Optional base64-encoded file content when no local path is available.
+        uploaded_file: Optional name of a file previously uploaded via the
+            file-upload UI (see list_files). Mutually exclusive with local_path
+            and content_base64.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
@@ -313,13 +320,38 @@ async def upload_file(
     import base64
     import tempfile
 
+    # File-upload UI source: resolve the stored bytes by name. Mutually
+    # exclusive with the local_path / content_base64 sources.
+    uploaded_bytes: bytes | None = None
+    default_upload_name: str | None = None
+    if params.uploaded_file is not None:
+        if params.local_path is not None or params.content_base64 is not None:
+            raise ValueError(
+                "uploaded_file cannot be combined with local_path or "
+                "content_base64; provide exactly one file source."
+            )
+        from mcp_microsoft.uploads import resolve_uploaded_file
+
+        uploaded_bytes, _content_type = resolve_uploaded_file(params.uploaded_file)
+        default_upload_name = params.uploaded_file
+
     g = get_graph(params.profile)
     temp_local_path: Path | None = None
     local_path = params.local_path
 
     try:
+        # File-upload UI: stream the resolved bytes through a temp file so the
+        # existing small-PUT / chunked-session paths are reused unchanged.
+        if uploaded_bytes is not None:
+            name_for_suffix = params.filename or default_upload_name or "upload"
+            suffix = Path(name_for_suffix).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(uploaded_bytes)
+                temp_local_path = Path(tmp.name)
+            local_path = temp_local_path
+
         # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
-        if (local_path is None or not local_path.is_file()) and params.content_base64:
+        elif (local_path is None or not local_path.is_file()) and params.content_base64:
             if not params.filename:
                 return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="filename is required when using content_base64.")
             try:
@@ -338,7 +370,7 @@ async def upload_file(
         if not local_path.is_file():
             return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="File not found.")
 
-        upload_name = params.filename or local_path.name
+        upload_name = params.filename or default_upload_name or local_path.name
         encoded_name = quote(upload_name, safe="")  # percent-encode for URL path segment
         file_size = local_path.stat().st_size
 

@@ -20,10 +20,12 @@ from fastmcp import FastMCP
 
 from mcp_microsoft.config import AppConfig, get_app_config, validate_http_config
 from mcp_microsoft.feature_flags import (
+    is_file_upload_enabled,
     is_sharepoint_enabled,
     is_teams_ai_insights_enabled,
     is_teams_enabled,
     is_teams_meeting_artifacts_enabled,
+    resolve_upload_max_bytes,
 )
 from mcp_microsoft.graph import close_http_clients, initialize_http_clients
 from mcp_microsoft.profiles import get_profile_manager
@@ -533,7 +535,47 @@ def create_mcp_server(config: AppConfig | None = None) -> FastMCP:
         _log.info("Teams tools not registered (service disabled)")
 
     services.register(mcp)
+
+    _register_file_upload(mcp, runtime_config)
+
     return mcp
+
+
+def _register_file_upload(mcp: FastMCP, config: AppConfig) -> None:
+    """Wire the context-free file-upload app when the feature resolves enabled.
+
+    Constructs a bounded, per-caller-scoped :class:`ScopedFileUpload`, installs
+    it as the process-wide singleton the Graph upload tools resolve against, and
+    adds it as a provider under the default (empty) namespace — its tool names
+    (``store_files``/``list_files``/``read_file``/``file_manager``) do not
+    collide with any of our ~95 registered tools. Its tools flow through the same
+    http middleware stack (rate limiting, audit logging, metrics) as every other
+    tool, since middleware wraps ``tools/call`` dispatch, not registration.
+
+    Always logs one info line (enabled or not). Clears the singleton when the
+    feature is off so a rebuilt server never leaves a stale provider installed.
+    """
+    from mcp_microsoft.uploads import set_upload_provider
+
+    if not is_file_upload_enabled(config=config):
+        set_upload_provider(None)
+        _log.info(
+            "File-upload app not enabled (MCP_ENABLE_FILE_UPLOAD unset/false; "
+            "default is on in http mode, off in stdio)"
+        )
+        return
+
+    from mcp_microsoft.uploads import ScopedFileUpload
+
+    max_bytes = resolve_upload_max_bytes(config)
+    provider = ScopedFileUpload(max_file_size=max_bytes)
+    set_upload_provider(provider)
+    mcp.add_provider(provider)
+    _log.info(
+        "File-upload app enabled (drag-drop UI; per-file limit %d MB, "
+        "per-user quota bounded)",
+        config.upload_max_mb,
+    )
 
 
 def get_mcp_server(reset: bool = False, config: AppConfig | None = None) -> FastMCP:
