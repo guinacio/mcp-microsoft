@@ -170,7 +170,7 @@ uv run mcp-microsoft
 
 Everything above runs `mcp-microsoft` as a single-user **stdio** server: one process, one local profile, launched directly by your MCP client. As of 0.8.0 the server also supports a second, mutually exclusive mode — a shared **remote server** that any number of people can connect to over the network, where each person signs in with their own Microsoft account and every Graph call runs under their own delegated identity. No profile configuration, no shared credentials: identity comes from a per-user **On-Behalf-Of (OBO)** token exchange derived from the OAuth token each client presents.
 
-Under the hood: Streamable HTTP per the MCP **2025-11-25** spec, served at `/mcp/`; authentication via FastMCP's `AzureProvider`, which implements the OAuth-proxy pattern Microsoft Entra ID needs since Entra doesn't support Dynamic Client Registration.
+Under the hood: Streamable HTTP per the MCP **2025-11-25** spec, served at `/mcp`; authentication via FastMCP's `AzureProvider`, which implements the OAuth-proxy pattern Microsoft Entra ID needs since Entra doesn't support Dynamic Client Registration.
 
 ### Quickstart
 
@@ -198,7 +198,7 @@ See [`docs/azure-setup.md`](docs/azure-setup.md#app-registration-for-the-remote-
 
 ### How MCP clients connect
 
-Point an MCP client with OAuth support at `https://your-host/mcp/`. The client discovers and drives the OAuth flow itself (the server advertises `/.well-known/oauth-protected-resource` per RFC 9728, as MCP 2025-11-25 authorization requires); when the user completes Microsoft sign-in, the client starts sending an Entra-derived bearer token with every request, and the server exchanges it On-Behalf-Of for a Graph token scoped to that user on each call. Clients without OAuth support (or without Streamable HTTP support) cannot use this mode — use stdio instead.
+Point an MCP client with OAuth support at `https://your-host/mcp`. The client discovers and drives the OAuth flow itself (the server advertises `/.well-known/oauth-protected-resource` per RFC 9728, as MCP 2025-11-25 authorization requires); when the user completes Microsoft sign-in, the client starts sending an Entra-derived bearer token with every request, and the server exchanges it On-Behalf-Of for a Graph token scoped to that user on each call. Clients without OAuth support (or without Streamable HTTP support) cannot use this mode — use stdio instead.
 
 ### http mode vs. stdio — what's different
 

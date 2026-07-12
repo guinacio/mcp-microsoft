@@ -5,7 +5,7 @@
 # stdio mode (the default MCPB / Claude Desktop experience) is a local
 # subprocess launched by the client and has no reason to run in a container.
 # This image targets *http* transport only: it sets MCP_TRANSPORT=http and
-# exposes the Streamable HTTP endpoint on :8000/mcp/.
+# exposes the Streamable HTTP endpoint on :8000/mcp.
 #
 # You still must supply the auth/base-url configuration below at `docker run`
 # / compose time — see .env.template's "Remote server (http) mode" section
