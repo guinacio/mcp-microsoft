@@ -417,6 +417,8 @@ Toda variável `MCP_*` lida no modo http. O modo stdio ignora todos os valores `
 | `MCP_HTTP_STATELESS` | Streamable HTTP sem estado (stateless). A restrição de worker único ainda se aplica. | `false` | Não. |
 | `MCP_RATE_LIMIT_RPS` | Limite de requisições/segundo por usuário (burst = 2×). `0`/negativo desativa. | `10` | Não. |
 | `MCP_STATS_TOKEN` | Habilita as rotas de observabilidade (vazio = desativado). | *(vazio)* | Não. |
+| `MCP_ENABLE_FILE_UPLOAD` | App de upload de arquivos por arrastar-e-soltar ([§6.8](#68-upload-de-arquivos)). O valor explícito vence. | ligado no http | Não. |
+| `MCP_UPLOAD_MAX_MB` | Tamanho máx. (MB) por arquivo enviado. Inteiro positivo. | `10` | Não. |
 
 As feature flags (`MCP_ENABLE_TEAMS`, `MCP_ENABLE_SHAREPOINT`, `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS`,
 `MCP_ENABLE_TEAMS_AI_INSIGHTS`) e `MCP_DISABLE_DELETION_TOOLS` se comportam como no stdio —
@@ -548,9 +550,12 @@ HTTP não podem usar o modo http.
 | **Kill-switch de exclusão** | Funciona | Funciona identicamente. |
 | **Rate limiting / audit logging** | Nenhum (chamador local único) | Ativo por padrão. |
 | **Detalhes de erro nas respostas** | Completos | Mascarados (`mask_error_details=True`). |
+| **App de upload de arquivos** ([§6.8](#68-upload-de-arquivos)) | Desligado (usuários locais têm `local_path`) | **Ligado por padrão** — adiciona uma UI de arrastar-e-soltar mais 3 ferramentas visíveis ao modelo (`file_manager`, `list_files`, `read_file`). |
 
 A diferença de 87 vs. 95 é exatamente as **5 ferramentas de gerenciamento de perfil** mais as **3
-ferramentas de download em disco local** que o modo http omite.
+ferramentas de download em disco local** que o modo http omite. (Esses números excluem o app
+opcional de upload; quando habilitado, ele adiciona mais 3 ferramentas visíveis ao modelo — veja a
+[§6.8](#68-upload-de-arquivos).)
 
 ### 6.7 Implantação sem exclusão (no-delete)
 
@@ -586,6 +591,45 @@ esse padrão, acompanha o `docker-compose.yml`.
 Para usuários de **stdio / Claude Desktop**, o equivalente é o bundle no-delete pré-compilado
 (`mcp-microsoft-nodelete.mcpb`) ou a opção **Disable Permanent-Delete Tools** (Desativar
 ferramentas de exclusão permanente) no instalador MCPB (veja a [§5.1](#51-mcpb-claude-desktop--recomendado)).
+
+### 6.8 Upload de arquivos
+
+**O que é.** No modo http não há disco compartilhado entre o chamador e o servidor, então
+`local_path` é rejeitado e passar um arquivo como base64 força todo o seu conteúdo pela janela de
+contexto do modelo. O **app de upload de arquivos** (baseado no provider `FileUpload` do FastMCP,
+`fastmcp[apps]`) resolve isso: expõe uma UI de arrastar-e-soltar. Os arquivos que o usuário solta
+vão **direto para o servidor**, contornando o contexto do modelo, e ficam em uma área de upload por
+usuário. As ferramentas de upload então os consomem **por nome** via um novo parâmetro
+`uploaded_file` em `upload_file` (OneDrive) e `upload_to_site` (SharePoint) — mutuamente exclusivo
+com `local_path`/`content_base64`; o nome do arquivo assume por padrão o nome enviado.
+
+**Requisito do cliente.** O cliente precisa suportar **MCP Apps** (recursos de UI interativa) — por
+exemplo, o Claude Desktop. Clientes sem suporte a MCP Apps enxergam as ferramentas visíveis ao
+modelo `list_files`/`read_file`, mas não conseguem abrir a UI de arrastar-e-soltar. O recurso vem
+**ligado por padrão no modo http e desligado no stdio** (usuários locais já têm `local_path`);
+sobrescreva nos dois sentidos com `MCP_ENABLE_FILE_UPLOAD`.
+
+**Cotas e limites** (por usuário conectado; aplicados em memória, limitados contra abuso):
+
+| Limite | Valor | Observações |
+|---|---|---|
+| Tamanho máximo por arquivo | `MCP_UPLOAD_MAX_MB` (padrão **10 MB**) | Rejeitado antes do armazenamento; deve ser um inteiro positivo. |
+| Máx. de arquivos por usuário | **20** | Upload acima da cota é rejeitado com mensagem clara; sobrescrever um nome reutiliza o slot. |
+| Máx. de bytes por usuário | **100 MB** no total | A contagem de bytes usa o tamanho decodificado real, não o informado pelo cliente. |
+| Usuários distintos rastreados | **1000** | Áreas de upload menos usadas recentemente são removidas ao exceder o limite. |
+| TTL de área ociosa | **2 h** | Áreas ociosas são podadas de forma preguiçosa no próximo upload/listagem. |
+
+Os uploads vivem **apenas na memória do processo do servidor**, escopados pelo `oid` do Entra do
+chamador (estável entre reconexões e no modo stateless), e são perdidos ao reiniciar. O **conteúdo
+dos arquivos nunca é registrado em log**. As chamadas às ferramentas do provider passam pela mesma
+middleware de rate-limit / auditoria / métricas que qualquer outra ferramenta.
+
+**Configuração:**
+
+| Variável | Propósito | Padrão |
+|---|---|---|
+| `MCP_ENABLE_FILE_UPLOAD` | Habilita/desabilita o app de upload. O valor explícito vence. | ligado no http, desligado no stdio |
+| `MCP_UPLOAD_MAX_MB` | Tamanho máx. (MB) de cada arquivo enviado. Inteiro positivo. | `10` |
 
 ---
 

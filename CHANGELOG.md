@@ -7,6 +7,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.9.0] — unreleased
+
+### Added
+
+- **Context-free file uploads via FastMCP's FileUpload app** (`src/mcp_microsoft/uploads.py`, `fastmcp[apps]` → prefab-ui). Replaces the "base64 as a tool argument" pattern that forced a file's entire content through the model's context window. Users drag-and-drop files into an interactive UI (requires an MCP-Apps-capable client, e.g. Claude Desktop); the files travel **straight to the server**, into a per-user upload area, without touching the model. `upload_file` (OneDrive) and `upload_to_site` (SharePoint) gain an `uploaded_file` parameter that consumes a stored file **by name** — mutually exclusive with `local_path`/`content_base64`, filename defaulting to the uploaded name — and streams its bytes into the existing small-PUT / chunked-session upload paths unchanged.
+  - **Enabled by default in http mode, disabled in stdio** (local users already have `local_path`). Explicit `MCP_ENABLE_FILE_UPLOAD` wins either way. `MCP_UPLOAD_MAX_MB` (default `10`, positive integer) caps per-file size.
+  - **`ScopedFileUpload`** subclasses the stock provider with the two things a long-running multi-user server needs: (1) **per-caller scoping** on the validated Entra `oid` claim (stable across reconnects and stateless HTTP, where the stock `session_id` keying is not), falling back to session id then a shared default, resolved the same way the audit middleware reads identity and never raising; and (2) **bounds** on the otherwise-unbounded in-memory store — per-user file count (20) and total bytes (100 MB), a global whole-scope LRU cap (1000 users) mirroring the metrics user-cap, and idle-scope TTL pruning (2 h) mirroring the rate limiter's lazy sweep. Over-quota stores raise a clear `ValueError`; eviction/prune counters are exposed as attributes. Uploaded content lives only in process memory and is never logged.
+  - Provider tools flow through the same http middleware stack (rate limiting, audit logging, metrics) as every other tool — verified by test.
+
+### Changed
+
+- **Dependency**: `fastmcp[azure]>=3.4.4` → `fastmcp[azure,apps]>=3.4.4` (adds prefab-ui 0.20.2 for the FileUpload app).
+
+---
+
 ## [0.8.0] — 2026-07-12
 
 ### Added
