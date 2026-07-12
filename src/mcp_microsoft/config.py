@@ -34,6 +34,11 @@ class AppConfig:
     # rate limiter in http mode. stdio mode ignores this entirely. 0 disables
     # rate limiting.
     rate_limit_rps: float = 10.0
+    # Observability shared secret (http mode). Empty = disabled: the /metrics,
+    # /stats, and /dashboard routes are not registered at all. When set, those
+    # routes require this token (Bearer or HTTP Basic password). Optional — not
+    # part of validate_http_config's required set.
+    stats_token: str = ""
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -64,6 +69,7 @@ class AppConfig:
             auth_required_scope=os.environ.get("MCP_AUTH_REQUIRED_SCOPE", "mcp-access").strip()
             or "mcp-access",
             rate_limit_rps=_float_env("MCP_RATE_LIMIT_RPS", 10.0),
+            stats_token=os.environ.get("MCP_STATS_TOKEN", "").strip(),
         )
 
 

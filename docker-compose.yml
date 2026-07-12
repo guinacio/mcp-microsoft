@@ -28,6 +28,11 @@ services:
       # inside its network namespace even if omitted from .env.
       MCP_TRANSPORT: http
       MCP_HTTP_HOST: 0.0.0.0
+      # Observability is off unless MCP_STATS_TOKEN is set. Keep the token in
+      # .env (it is a secret), not here — this line is just a pointer. When
+      # set, /metrics, /stats, and /dashboard are served (token-gated). See
+      # .env.template and README.md's "Observability" subsection.
+      # MCP_STATS_TOKEN: "<set-in-.env>"
     ports:
       - "8000:8000"
     restart: unless-stopped

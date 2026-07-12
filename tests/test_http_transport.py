@@ -31,6 +31,7 @@ _HTTP_ENV_VARS = (
     "MCP_AUTH_TENANT_ID",
     "MCP_AUTH_REQUIRED_SCOPE",
     "MCP_RATE_LIMIT_RPS",
+    "MCP_STATS_TOKEN",
 )
 
 _FULL_HTTP_ENV = {
@@ -152,6 +153,23 @@ def test_from_env_invalid_rate_limit_raises_clear_error(
     monkeypatch.setenv("MCP_RATE_LIMIT_RPS", "not-a-number")
     with pytest.raises(ValueError, match="MCP_RATE_LIMIT_RPS must be a number"):
         AppConfig.from_env()
+
+
+def test_from_env_stats_token_defaults_empty_and_strips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_http_env(monkeypatch)
+    monkeypatch.delenv("MCP_STATS_TOKEN", raising=False)
+    assert AppConfig.from_env().stats_token == ""
+
+    monkeypatch.setenv("MCP_STATS_TOKEN", "  s3cret  ")
+    assert AppConfig.from_env().stats_token == "s3cret"
+
+
+def test_validate_http_config_does_not_require_stats_token() -> None:
+    # stats_token is optional observability config; its absence must not block
+    # http startup.
+    assert validate_http_config(_http_config(stats_token="")) == []
 
 
 # --------------------------------------------------------------------------

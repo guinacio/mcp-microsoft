@@ -192,3 +192,45 @@ recorded here rather than by rewriting the historical text.
   `"unauthenticated"` bucket). Without it, fastmcp keys every request under a
   single literal `"global"` bucket, letting one user throttle all others. The
   callable never raises.
+
+## Phase 7 — observability (added 2026-07-12)
+
+DevOps traffic/usage metrics for http mode, **off by default** and enabled
+only when `MCP_STATS_TOKEN` is set. stdio mode is untouched — no registry, no
+middleware, no routes.
+
+- **`src/mcp_microsoft/metrics.py` (new).** `MetricsRegistry` aggregates in
+  memory on the event loop (documented no-await/no-lock invariant): global
+  totals, a rolling 60-bucket per-minute traffic timeline (lazily
+  zero-filled), per-tool latency (a `deque(maxlen=256)` of ms → p50/p95/avg at
+  snapshot time via linear-interpolation percentile), and per-user activity in
+  an `OrderedDict` capped at 1000 with least-recently-seen eviction
+  (`users_evicted` counter). `record()` is the single write API; `snapshot()`
+  returns a JSON-able view; `render_prometheus()` hand-rolls the 0.0.4 text
+  exposition with escaped label values and **deliberately no per-user label
+  series** (unbounded-cardinality anti-pattern). Module-level
+  `get_metrics_registry()` / `reset_metrics_registry()` singleton, with the
+  reset wired into `runtime.reset_runtime_state()`.
+- **`MetricsMiddleware` (`middleware.py`).** Sibling of
+  `AuditLoggingMiddleware`; the shared identity helper `_caller_identity` was
+  lifted to module level so both use it (the old staticmethod remains as a
+  thin alias for existing callers/tests). Registered in http mode **after** the
+  audit middleware (innermost, so it times the tool itself), records in both
+  success and error paths, and wraps the registry write so it can never raise
+  into or mask the observed call.
+- **Routes (`server.py`), http mode + non-empty `stats_token` only.**
+  `config.stats_token` (env `MCP_STATS_TOKEN`, stripped, optional — not in
+  `validate_http_config`'s required set). A timing-safe auth helper accepts
+  either `Authorization: Bearer <token>` or HTTP Basic (any user, password ==
+  token) so browsers can open `/dashboard` natively; failure → 401 with
+  `WWW-Authenticate: Basic realm="mcp-microsoft stats", Bearer` and no body.
+  `GET /metrics` (Prometheus text), `GET /stats` (JSON snapshot), and
+  `GET /dashboard` (one self-contained, dependency-free HTML page polling
+  `/stats` every 10s). When `stats_token` is empty none of the three are
+  registered (info log). `/health` is unchanged.
+- **Tests.** `tests/test_metrics.py` (registry math + middleware) and
+  `tests/test_observability.py` (ASGI route gating/content), plus two
+  `stats_token` config assertions in `tests/test_http_transport.py`.
+- **No new dependencies** (stdlib + starlette responses, already transitive).
+  No tool payloads/args/results and no tokens are ever recorded or logged —
+  only `oid`/`username`, the same exposure as the audit log.

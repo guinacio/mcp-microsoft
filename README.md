@@ -228,6 +228,21 @@ Point an MCP client with OAuth support at `https://your-host/mcp`. The client di
 - **The built-in rate limit covers MCP tool traffic only.** `MCP_RATE_LIMIT_RPS` throttles authenticated calls to the `/mcp` endpoint (per user); it does not protect the unauthenticated OAuth endpoints (`/authorize`, `/token`, `/register`, `/auth/callback`). Throttle those at your reverse proxy.
 - **Secrets belong in the environment, not in files you commit.** `MCP_AUTH_CLIENT_SECRET` in particular; consider a secrets manager (Azure Key Vault, etc.) that injects it as an env var at deploy time rather than storing it in `.env` on disk long-term.
 
+### Observability
+
+http mode can expose lightweight, in-process traffic/usage metrics for DevOps. It is **off by default** and turns on only when you set `MCP_STATS_TOKEN` to a non-empty secret. When enabled, three routes are served by the same server (all requiring the token; `/health` is unaffected and stays open):
+
+| Route | Returns | Use |
+|---|---|---|
+| `GET /metrics` | Prometheus text exposition (`text/plain; version=0.0.4`) | Scrape target for Prometheus/Grafana |
+| `GET /stats` | JSON snapshot (server uptime/totals, per-minute traffic, per-tool latency p50/p95/avg, per-user activity) | Programmatic dashboards, ad-hoc `curl` |
+| `GET /dashboard` | A single self-contained HTML page (inline CSS/JS, no external requests) that polls `/stats` every 10s | Eyeball it in a browser |
+
+- **Auth**: send either `Authorization: Bearer <MCP_STATS_TOKEN>` or HTTP Basic with any username and the token as the password (so a browser can open `/dashboard` with its native login prompt). The comparison is timing-safe; the token is never logged.
+- **Prometheus scrape**: point your scraper at `https://your-host/metrics` with a `bearer_token` (or `basic_auth` password) equal to `MCP_STATS_TOKEN`. Emitted metrics: `mcp_uptime_seconds`, `mcp_calls_total`, `mcp_errors_total`, `mcp_users_tracked`, `mcp_users_evicted_total`, and per-tool `mcp_tool_calls_total`/`mcp_tool_errors_total`/`mcp_tool_duration_ms{stat="p50|p95|avg"}`. There are deliberately **no per-user label series** (that would be unbounded-cardinality — an anti-pattern); per-user detail lives in `/stats` and `/dashboard` instead.
+- **Metrics are in-memory and reset on restart** — there is no persistence. They cover only the single worker the process runs (consistent with the single-worker constraint above).
+- **Protect it at the proxy too.** The token is the only gate; treat these routes as sensitive operational data and additionally restrict them (IP allowlist / separate auth) at your reverse proxy if the server is internet-facing. Leaving `MCP_STATS_TOKEN` unset disables the routes entirely.
+
 ## Azure Setup
 
 You need an Azure App Registration to get a `client_id`. This is a one-time step.
