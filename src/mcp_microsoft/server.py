@@ -25,6 +25,7 @@ from mcp_microsoft.feature_flags import (
     is_teams_ai_insights_enabled,
     is_teams_enabled,
     is_teams_meeting_artifacts_enabled,
+    resolve_upload_global_budget_bytes,
     resolve_upload_max_bytes,
 )
 from mcp_microsoft.graph import close_http_clients, initialize_http_clients
@@ -568,13 +569,17 @@ def _register_file_upload(mcp: FastMCP, config: AppConfig) -> None:
     from mcp_microsoft.uploads import ScopedFileUpload
 
     max_bytes = resolve_upload_max_bytes(config)
-    provider = ScopedFileUpload(max_file_size=max_bytes)
+    global_budget = resolve_upload_global_budget_bytes(config)
+    provider = ScopedFileUpload(
+        max_file_size=max_bytes, global_budget_bytes=global_budget
+    )
     set_upload_provider(provider)
     mcp.add_provider(provider)
     _log.info(
         "File-upload app enabled (drag-drop UI; per-file limit %d MB, "
-        "per-user quota bounded)",
+        "per-user quota bounded, global budget %d MB)",
         config.upload_max_mb,
+        config.upload_global_budget_mb,
     )
 
 

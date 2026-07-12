@@ -419,6 +419,7 @@ Toda variável `MCP_*` lida no modo http. O modo stdio ignora todos os valores `
 | `MCP_STATS_TOKEN` | Habilita as rotas de observabilidade (vazio = desativado). | *(vazio)* | Não. |
 | `MCP_ENABLE_FILE_UPLOAD` | App de upload de arquivos por arrastar-e-soltar ([§6.8](#68-upload-de-arquivos)). O valor explícito vence. | ligado no http | Não. |
 | `MCP_UPLOAD_MAX_MB` | Tamanho máx. (MB) por arquivo enviado. Inteiro positivo. | `10` | Não. |
+| `MCP_UPLOAD_GLOBAL_BUDGET_MB` | Limite global (MB) da pegada base64 de todos os uploads entre todos os usuários. Inteiro positivo. | `1024` | Não. |
 
 As feature flags (`MCP_ENABLE_TEAMS`, `MCP_ENABLE_SHAREPOINT`, `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS`,
 `MCP_ENABLE_TEAMS_AI_INSIGHTS`) e `MCP_DISABLE_DELETION_TOOLS` se comportam como no stdio —
@@ -615,14 +616,18 @@ sobrescreva nos dois sentidos com `MCP_ENABLE_FILE_UPLOAD`.
 |---|---|---|
 | Tamanho máximo por arquivo | `MCP_UPLOAD_MAX_MB` (padrão **10 MB**) | Rejeitado antes do armazenamento; deve ser um inteiro positivo. |
 | Máx. de arquivos por usuário | **20** | Upload acima da cota é rejeitado com mensagem clara; sobrescrever um nome reutiliza o slot. |
-| Máx. de bytes por usuário | **100 MB** no total | A contagem de bytes usa o tamanho decodificado real, não o informado pelo cliente. |
+| Máx. de bytes por usuário | **100 MB** no total | A cota por usuário usa o tamanho **decodificado** real, não o informado pelo cliente. |
+| Orçamento global de upload | `MCP_UPLOAD_GLOBAL_BUDGET_MB` (padrão **1024 MB**) | Limita a pegada **codificada** (base64) entre todos os usuários; um armazenamento acima do orçamento é rejeitado mesmo que o usuário esteja dentro da própria cota. |
 | Usuários distintos rastreados | **1000** | Áreas de upload menos usadas recentemente são removidas ao exceder o limite. |
 | TTL de área ociosa | **2 h** | Áreas ociosas são podadas de forma preguiçosa no próximo upload/listagem. |
 
 Os uploads vivem **apenas na memória do processo do servidor**, escopados pelo `oid` do Entra do
-chamador (estável entre reconexões e no modo stateless), e são perdidos ao reiniciar. O **conteúdo
-dos arquivos nunca é registrado em log**. As chamadas às ferramentas do provider passam pela mesma
-middleware de rate-limit / auditoria / métricas que qualquer outra ferramenta.
+chamador (estável entre reconexões e no modo stateless), com fallback para o `sub`; uma requisição
+sem **nenhum** dos dois é recusada em vez de compartilhar um bucket. Os uploads são perdidos ao
+reiniciar. O **conteúdo dos arquivos nunca é registrado em log**. As chamadas às ferramentas do
+provider passam pela mesma middleware de rate-limit / auditoria / métricas que qualquer outra
+ferramenta — incluindo a ferramenta de backend `store_files`, que é acessível pelo seu nome com hash
+(não é exclusiva da UI) e passa pelas mesmas verificações de middleware, por arquivo e de cota.
 
 **Configuração:**
 
@@ -630,6 +635,7 @@ middleware de rate-limit / auditoria / métricas que qualquer outra ferramenta.
 |---|---|---|
 | `MCP_ENABLE_FILE_UPLOAD` | Habilita/desabilita o app de upload. O valor explícito vence. | ligado no http, desligado no stdio |
 | `MCP_UPLOAD_MAX_MB` | Tamanho máx. (MB) de cada arquivo enviado. Inteiro positivo. | `10` |
+| `MCP_UPLOAD_GLOBAL_BUDGET_MB` | Limite global (MB) da pegada base64 de todos os uploads entre todos os usuários. Inteiro positivo. | `1024` |
 
 ---
 

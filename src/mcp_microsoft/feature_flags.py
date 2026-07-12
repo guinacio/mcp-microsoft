@@ -132,6 +132,25 @@ def resolve_upload_max_bytes(config: AppConfig | None = None) -> int:
     return mb * 1024 * 1024
 
 
+def resolve_upload_global_budget_bytes(config: AppConfig | None = None) -> int:
+    """Return the global encoded-byte upload budget in bytes, validating positivity.
+
+    Bounds the total base64 footprint of all uploaded files across every scope
+    held in process memory (``uploads.ScopedFileUpload`` enforces it). Consistent
+    with :func:`resolve_upload_max_bytes`: rejects a non-positive value.
+
+    Raises:
+        ValueError: if ``upload_global_budget_mb`` is not a positive integer.
+    """
+    runtime_config = config or get_app_config()
+    mb = runtime_config.upload_global_budget_mb
+    if mb <= 0:
+        raise ValueError(
+            f"MCP_UPLOAD_GLOBAL_BUDGET_MB must be a positive integer (got {mb})."
+        )
+    return mb * 1024 * 1024
+
+
 def is_deletion_disabled(config: AppConfig | None = None) -> bool:
     """Return True when destructive hard-delete tools should NOT be registered.
 

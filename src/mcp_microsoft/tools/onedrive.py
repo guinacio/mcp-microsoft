@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 
 from pydantic import Field
@@ -312,7 +313,7 @@ async def upload_file(
         Structured upload confirmation.
     """
     if params.local_path is not None and get_app_config().transport == "http":
-        raise ValueError(
+        raise ToolError(
             "local_path is not available in multi-user http mode (the server's "
             "disk is not the caller's disk); use content_base64 instead."
         )
@@ -326,7 +327,7 @@ async def upload_file(
     default_upload_name: str | None = None
     if params.uploaded_file is not None:
         if params.local_path is not None or params.content_base64 is not None:
-            raise ValueError(
+            raise ToolError(
                 "uploaded_file cannot be combined with local_path or "
                 "content_base64; provide exactly one file source."
             )
@@ -346,8 +347,9 @@ async def upload_file(
             name_for_suffix = params.filename or default_upload_name or "upload"
             suffix = Path(name_for_suffix).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(uploaded_bytes)
+                # Record the path before writing so a write failure still cleans up.
                 temp_local_path = Path(tmp.name)
+                tmp.write(uploaded_bytes)
             local_path = temp_local_path
 
         # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
@@ -360,8 +362,9 @@ async def upload_file(
                 return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error=f"Invalid base64: {e}")
             suffix = Path(params.filename).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(raw)
+                # Record the path before writing so a write failure still cleans up.
                 temp_local_path = Path(tmp.name)
+                tmp.write(raw)
             local_path = temp_local_path
 
         if local_path is None:

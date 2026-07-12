@@ -252,7 +252,7 @@ In http mode there's no shared disk between you and the server, so passing a fil
 
 - **On by default in http mode, off in stdio** (local users already have `local_path`). Override with `MCP_ENABLE_FILE_UPLOAD` (explicit value wins).
 - **Requires an MCP-Apps-capable client** (e.g. Claude Desktop) to show the drop-zone UI. The `list_files` / `read_file` tools are model-visible regardless.
-- **Bounded, in-memory, per-user**: max `MCP_UPLOAD_MAX_MB` (default 10 MB) per file, 20 files and 100 MB per user, 1000 users tracked (LRU-evicted), 2 h idle TTL. Uploads are lost on restart and file content is never logged.
+- **Bounded, in-memory, per-user**: max `MCP_UPLOAD_MAX_MB` (default 10 MB) per file, 20 files and 100 MB (decoded) per user, a global `MCP_UPLOAD_GLOBAL_BUDGET_MB` (default 1024 MB) encoded budget across all users, 1000 users tracked (LRU-evicted), 2 h idle TTL. Uploads are lost on restart and file content is never logged.
 
 ## Azure Setup
 

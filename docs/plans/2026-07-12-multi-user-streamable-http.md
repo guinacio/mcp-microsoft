@@ -293,8 +293,12 @@ middleware, no routes.
   names (`store_files`/`list_files`/`read_file`/`file_manager`) don't collide
   with our 95 tools. Info-logged either way. Provider tools go through the
   http middleware stack (rate limit / audit / metrics) — proven by test.
-  Note: `store_files` is app-visibility-only, so it's reachable via the UI's
-  hashed CallTool, not by plain name / model listing.
+  Note: `store_files` is not model-visible (absent from model tool listing), but
+  it IS callable programmatically via its hashed backend name (the same name the
+  UI's CallTool uses) — it is not UI-only or unreachable. That is safe because
+  such calls flow through the same middleware (per-user rate limit, audit,
+  metrics), the per-file `max_file_size` check, the per-scope file/byte quotas,
+  and the global encoded-byte budget.
 - **Tool integration**: `upload_file` (onedrive) and `upload_to_site`
   (sharepoint) gain `uploaded_file: str | None` — mutually exclusive with
   `local_path`/`content_base64`, filename defaults to the stored name, bytes

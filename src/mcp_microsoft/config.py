@@ -57,6 +57,11 @@ class AppConfig:
     # Maximum size (MB) of any single uploaded file. Must be positive; the
     # feature-flag resolver rejects <= 0. Applies in both transports.
     upload_max_mb: int = 10
+    # Global ceiling (MB) on the base64-encoded footprint of ALL uploaded files
+    # across every user/scope held in process memory. Bounds total RAM even when
+    # many users each stay under their per-user quota. Must be positive; the
+    # feature-flag resolver rejects <= 0. See feature_flags.resolve_upload_global_budget_bytes.
+    upload_global_budget_mb: int = 1024
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -90,6 +95,7 @@ class AppConfig:
             stats_token=os.environ.get("MCP_STATS_TOKEN", "").strip(),
             enable_file_upload=env_flag("MCP_ENABLE_FILE_UPLOAD"),
             upload_max_mb=_int_env("MCP_UPLOAD_MAX_MB", 10),
+            upload_global_budget_mb=_int_env("MCP_UPLOAD_GLOBAL_BUDGET_MB", 1024),
         )
 
 

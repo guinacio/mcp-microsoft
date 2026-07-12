@@ -246,11 +246,20 @@ async def test_file_upload_provider_tool_flows_through_middleware(
     """
     import logging
 
+    import fastmcp.server.dependencies as deps
     from fastmcp import Client
 
     # File upload defaults on in http mode; MCP_STATS_TOKEN wires the registry.
     mcp = _build_server(monkeypatch, MCP_STATS_TOKEN=_TOKEN)
     registry = get_metrics_registry()
+
+    # http-mode upload scoping requires a stable identity (oid/sub) or it refuses
+    # (see uploads._get_scope_key). Supply an ambient oid so list_files resolves a
+    # real per-user scope rather than being rejected.
+    class _Tok:
+        claims = {"oid": "obs-user"}
+
+    monkeypatch.setattr(deps, "get_access_token", lambda: _Tok())
 
     caplog_records: list[str] = []
 

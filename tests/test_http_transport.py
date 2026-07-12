@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 from mcp_microsoft.config import AppConfig, reset_app_config, validate_http_config
 from mcp_microsoft.runtime import reset_runtime_state
@@ -819,7 +820,7 @@ async def test_onedrive_upload_file_rejects_local_path_in_http_mode(
     local_file = tmp_path / "f.txt"
     local_file.write_text("hi")
 
-    with pytest.raises(ValueError, match="not available in multi-user http mode"):
+    with pytest.raises(ToolError, match="not available in multi-user http mode"):
         await onedrive.upload_file(onedrive.UploadFileInput(local_path=local_file))
 
 
@@ -928,7 +929,7 @@ async def test_upload_to_site_rejects_local_path_in_http_mode(
     local_file = tmp_path / "f.txt"
     local_file.write_text("hi")
 
-    with pytest.raises(ValueError, match="not available in multi-user http mode"):
+    with pytest.raises(ToolError, match="not available in multi-user http mode"):
         await sharepoint.upload_to_site(
             sharepoint.UploadToSiteInput(
                 site_id="site",

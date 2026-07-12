@@ -388,6 +388,7 @@ Every `MCP_*` variable read in http mode. stdio mode ignores all `MCP_HTTP_*` / 
 | `MCP_STATS_TOKEN` | Enables the observability routes (empty = disabled). | *(empty)* | No. |
 | `MCP_ENABLE_FILE_UPLOAD` | Drag-drop file-upload app ([§6.8](#68-file-uploads)). Explicit value wins. | on in http | No. |
 | `MCP_UPLOAD_MAX_MB` | Max size (MB) per uploaded file. Positive integer. | `10` | No. |
+| `MCP_UPLOAD_GLOBAL_BUDGET_MB` | Global cap (MB) on the base64 footprint of all uploads across every user. Positive integer. | `1024` | No. |
 
 Feature flags (`MCP_ENABLE_TEAMS`, `MCP_ENABLE_SHAREPOINT`, `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS`,
 `MCP_ENABLE_TEAMS_AI_INSIGHTS`) and `MCP_DISABLE_DELETION_TOOLS` behave as in stdio — **except** the
@@ -576,14 +577,17 @@ with `MCP_ENABLE_FILE_UPLOAD`.
 |---|---|---|
 | Max size per file | `MCP_UPLOAD_MAX_MB` (default **10 MB**) | Rejected before storage; must be a positive integer. |
 | Max files per user | **20** | Over-quota upload is rejected with a clear message; overwriting a name reuses its slot. |
-| Max bytes per user | **100 MB** total | Byte accounting uses the true decoded size, not the client-reported size. |
+| Max bytes per user | **100 MB** total | Per-user quota uses the true **decoded** size, not the client-reported size. |
+| Global upload budget | `MCP_UPLOAD_GLOBAL_BUDGET_MB` (default **1024 MB**) | Caps the **encoded** (base64) footprint across all users; a store over budget is rejected even if the user is under their own quota. |
 | Distinct users tracked | **1000** | Whole least-recently-used upload areas are evicted past the cap. |
 | Idle upload-area TTL | **2 h** | Idle areas are lazily pruned on the next upload/list. |
 
 Uploads live **only in the server process's memory**, scoped to the caller's Entra `oid` (stable
-across reconnects and stateless mode), and are lost on restart. File **content is never logged**.
+across reconnects and stateless mode), falling back to `sub`; a request with **neither** is refused
+rather than sharing a bucket. Uploads are lost on restart. File **content is never logged**.
 Provider tool calls flow through the same rate-limit / audit / metrics middleware as every other
-tool.
+tool — including the drag-drop backend `store_files`, which is reachable by its hashed name (not
+UI-only) and passes through those same middleware, per-file, and quota checks.
 
 **Config:**
 
@@ -591,6 +595,7 @@ tool.
 |---|---|---|
 | `MCP_ENABLE_FILE_UPLOAD` | Enable/disable the file-upload app. Explicit value wins. | on in http, off in stdio |
 | `MCP_UPLOAD_MAX_MB` | Max size (MB) of any single uploaded file. Positive integer. | `10` |
+| `MCP_UPLOAD_GLOBAL_BUDGET_MB` | Global cap (MB) on the base64 footprint of all uploads across every user. Positive integer. | `1024` |
 
 ---
 
