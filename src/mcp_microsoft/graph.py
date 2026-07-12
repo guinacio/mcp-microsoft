@@ -1,9 +1,10 @@
 """
 Async httpx client wrapper for the Microsoft Graph API.
 
-Each GraphClient instance is bound to a profile name.  Authentication
-headers are fetched per-request via ProfileManager so MSAL can handle
-transparent token refresh.
+Each GraphClient obtains its Bearer token from a TokenProvider, re-fetched
+per request (and per retry attempt) so MSAL can handle transparent token
+refresh.  The default provider wraps ProfileManager, preserving the original
+profile-bound behavior.
 
 Usage:
     from mcp_microsoft.graph import get_graph
@@ -14,11 +15,14 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import http.cookiejar
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+
+from mcp_microsoft.identity import OboTokenProvider, ProfileTokenProvider, TokenProvider
 
 logger = logging.getLogger(__name__)
 
@@ -34,17 +38,42 @@ _TRANSFER_TIMEOUT = 120.0
 _request_client: httpx.AsyncClient | None = None
 _transfer_client: httpx.AsyncClient | None = None
 
+# Shared, per-process GraphClient for http (multi-user) transport. Safe to
+# share across all users because identity is derived per-request from the
+# ambient auth context inside OboTokenProvider — nothing user-specific is
+# stored on the client. Created lazily on first http-mode get_graph() call.
+_obo_graph_client: GraphClient | None = None
+
+
+class _NullCookieJar(http.cookiejar.CookieJar):
+    """Cookie jar that silently drops every ``Set-Cookie``.
+
+    Graph API calls never need cookies, and in http (multi-user) mode the two
+    AsyncClients below are shared across every user. A default httpx client
+    keeps a mutable cookie jar, so a ``Set-Cookie`` from Graph or a redirected
+    download host would be stored once and replayed on a *different* user's
+    request. Persisting nothing keeps the shared clients free of cross-user
+    cookie state (harmless in stdio mode, so applied unconditionally).
+    """
+
+    def set_cookie(self, cookie: http.cookiejar.Cookie) -> None:
+        return None
+
 
 async def initialize_http_clients() -> None:
     """Initialize shared HTTP clients for Graph API traffic."""
     global _request_client, _transfer_client
 
     if _request_client is None:
-        _request_client = httpx.AsyncClient(timeout=_REQUEST_TIMEOUT)
+        _request_client = httpx.AsyncClient(
+            timeout=_REQUEST_TIMEOUT,
+            cookies=_NullCookieJar(),
+        )
     if _transfer_client is None:
         _transfer_client = httpx.AsyncClient(
             timeout=_TRANSFER_TIMEOUT,
             follow_redirects=True,
+            cookies=_NullCookieJar(),
         )
 
 
@@ -77,22 +106,31 @@ class GraphClient:
     """
     Thin async wrapper around httpx for Microsoft Graph REST API calls.
 
-    Each instance is optionally bound to a named profile.  The Bearer token
-    is injected from ProfileManager.get_headers(profile) on every request.
+    The Bearer token is supplied by a TokenProvider and re-fetched on every
+    request.  When no provider is given, the client defaults to a
+    ProfileTokenProvider bound to *profile*, preserving the original
+    ProfileManager-backed behavior.
     """
 
-    def __init__(self, profile: str | None = None) -> None:
+    def __init__(
+        self,
+        profile: str | None = None,
+        *,
+        token_provider: TokenProvider | None = None,
+    ) -> None:
         self._profile = profile
+        self._token_provider: TokenProvider = token_provider or ProfileTokenProvider(profile)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_headers(self) -> dict[str, str]:
-        """Fetch authenticated headers for this client's profile."""
-        from mcp_microsoft.profiles import get_profile_manager
-
-        return get_profile_manager().get_headers(self._profile)
+    async def _get_headers(self) -> dict[str, str]:
+        """Build authenticated headers from a freshly acquired access token."""
+        return {
+            "Authorization": f"Bearer {await self._token_provider.get_access_token()}",
+            "Content-Type": "application/json",
+        }
 
     async def _send_with_retry(
         self,
@@ -102,7 +140,7 @@ class GraphClient:
     ) -> httpx.Response:
         """Execute an authenticated HTTP call with shared retry handling."""
         for attempt in range(1, _MAX_RETRIES + 1):
-            response = await send(self._get_headers())
+            response = await send(await self._get_headers())
 
             if response.status_code in _RETRY_STATUSES:
                 raw_retry_after = response.headers.get("Retry-After")
@@ -348,11 +386,28 @@ class GraphClient:
 
 def get_graph(profile: str | None = None) -> GraphClient:
     """
-    Return a GraphClient for the given profile.
+    Return a GraphClient for the current transport mode.
 
-    Uses ProfileManager's cached instances so each profile
-    gets a single reusable GraphClient.
+    stdio mode: uses ProfileManager's cached instances so each *profile* gets a
+    single reusable GraphClient (unchanged behavior).
+
+    http (multi-user) mode: returns a shared, lazily created GraphClient backed
+    by :class:`~mcp_microsoft.identity.OboTokenProvider`. The *profile* argument
+    is IGNORED — identity always comes from the caller's bearer token via the
+    per-request On-Behalf-Of exchange, so one shared client serves every user.
     """
+    from mcp_microsoft.config import get_app_config
+
+    if get_app_config().transport == "http":
+        global _obo_graph_client
+        if _obo_graph_client is None:
+            logger.debug(
+                "http transport: using shared OBO-backed GraphClient; the "
+                "profile argument is ignored (identity comes from the token)."
+            )
+            _obo_graph_client = GraphClient(token_provider=OboTokenProvider())
+        return _obo_graph_client
+
     from mcp_microsoft.profiles import get_profile_manager
 
     return get_profile_manager().get_graph(profile)

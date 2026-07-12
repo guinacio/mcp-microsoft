@@ -1,0 +1,115 @@
+# docker-compose.yml — mcp-microsoft Streamable HTTP (multi-user) server.
+#
+# Setup:
+#   1. Build or pull the image (see Dockerfile).
+#   2. cp .env.template .env, then fill in the "Remote server (http) mode"
+#      section: MCP_BASE_URL, MCP_AUTH_CLIENT_ID, MCP_AUTH_CLIENT_SECRET,
+#      MCP_AUTH_TENANT_ID (see docs/azure-setup.md for the App Registration
+#      walkthrough). .env is gitignored — never commit it.
+#   3. docker compose up -d
+#   4. curl http://localhost:8000/health
+#
+# This service only speaks plain HTTP on :8000. Put a TLS-terminating
+# reverse proxy in front of it for anything beyond local testing — see the
+# commented block at the bottom of this file.
+
+services:
+  mcp-microsoft:
+    build: .
+    image: mcp-microsoft:0.8.0
+    container_name: mcp-microsoft
+    env_file:
+      # All secrets and deployment-specific values (MCP_BASE_URL,
+      # MCP_AUTH_CLIENT_ID/SECRET/TENANT_ID, optional feature flags, rate
+      # limit, etc.) live here — see .env.template for the full list.
+      - .env
+    environment:
+      # Hardcoded (not secrets) so the container always binds correctly
+      # inside its network namespace even if omitted from .env.
+      MCP_TRANSPORT: http
+      MCP_HTTP_HOST: 0.0.0.0
+      # Observability is off unless MCP_STATS_TOKEN is set. Keep the token in
+      # .env (it is a secret), not here — this line is just a pointer. When
+      # set, /metrics, /stats, and /dashboard are served (token-gated). See
+      # .env.template and README.md's "Observability" subsection.
+      # MCP_STATS_TOKEN: "<set-in-.env>"
+      # Uncomment to make THIS instance a no-delete server (hard-delete tools
+      # never registered; recoverable trash/move variants remain). See the
+      # DevOps guide, "No-delete deployment".
+      # MCP_DISABLE_DELETION_TOOLS: "1"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # Optional second instance: a NO-DELETE server running side by side with the
+  # full one above (route users who must not hard-delete to this URL). Reuses
+  # the same App Registration — just add this instance's callback URL
+  # (e.g. https://mcp-nodelete.example.com/auth/callback) as an ADDITIONAL
+  # redirect URI on the same Web platform. Requires its own public hostname:
+  # set MCP_BASE_URL for this service to that URL (override below), and give
+  # it its own MCP_STATS_TOKEN if observability is wanted. Uncomment to use.
+  #
+  # mcp-microsoft-nodelete:
+  #   build: .
+  #   image: mcp-microsoft:0.8.0
+  #   container_name: mcp-microsoft-nodelete
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     MCP_TRANSPORT: http
+  #     MCP_HTTP_HOST: 0.0.0.0
+  #     MCP_DISABLE_DELETION_TOOLS: "1"
+  #     # Must differ from the full instance and match this instance's public
+  #     # URL exactly (scheme, host, port, path prefix):
+  #     MCP_BASE_URL: "https://mcp-nodelete.example.com"
+  #   ports:
+  #     - "8001:8000"
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test:
+  #       - "CMD"
+  #       - "python"
+  #       - "-c"
+  #       - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+  #     interval: 30s
+  #     timeout: 5s
+  #     start_period: 10s
+  #     retries: 3
+
+# ---------------------------------------------------------------------------
+# Reverse proxy / TLS termination (required for anything but local testing).
+#
+# MCP OAuth (the Entra authorization flow) and every Graph call after it
+# carry bearer tokens — they must never travel over plain HTTP in
+# production. This container never terminates TLS itself; put Traefik,
+# Caddy, nginx, or your cloud LB in front of it, and set MCP_BASE_URL (in
+# .env) to that proxy's public HTTPS URL, not this container's address.
+# MCP_BASE_URL must match the URL clients actually connect to *exactly*
+# (scheme, host, port, and any path prefix) or Azure's redirect-URI check
+# and the JWT audience/issuer checks will fail.
+#
+# Example — Traefik, via labels on this same service:
+#   labels:
+#     - "traefik.enable=true"
+#     - "traefik.http.routers.mcp-microsoft.rule=Host(`mcp.example.com`)"
+#     - "traefik.http.routers.mcp-microsoft.entrypoints=websecure"
+#     - "traefik.http.routers.mcp-microsoft.tls.certresolver=letsencrypt"
+#     - "traefik.http.services.mcp-microsoft.loadbalancer.server.port=8000"
+#
+# Example — Caddy (in a Caddyfile alongside this compose file):
+#   mcp.example.com {
+#       reverse_proxy mcp-microsoft:8000
+#   }
+#
+# Either way: MCP_BASE_URL=https://mcp.example.com in .env.
+# ---------------------------------------------------------------------------

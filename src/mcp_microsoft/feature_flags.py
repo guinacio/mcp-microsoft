@@ -60,6 +60,12 @@ def resolve_optional_service_enabled(
     if explicit is not None:
         return explicit
 
+    # http (multi-user remote) mode has no single default profile, so the
+    # corporate-account heuristic can't apply — flags must be explicit there.
+    runtime_config = config or get_app_config()
+    if runtime_config.transport == "http":
+        return False
+
     try:
         from mcp_microsoft.profiles import is_corporate_account
 
