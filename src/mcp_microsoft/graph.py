@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from mcp_microsoft.identity import ProfileTokenProvider, TokenProvider
+from mcp_microsoft.identity import OboTokenProvider, ProfileTokenProvider, TokenProvider
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,12 @@ _TRANSFER_TIMEOUT = 120.0
 
 _request_client: httpx.AsyncClient | None = None
 _transfer_client: httpx.AsyncClient | None = None
+
+# Shared, per-process GraphClient for http (multi-user) transport. Safe to
+# share across all users because identity is derived per-request from the
+# ambient auth context inside OboTokenProvider — nothing user-specific is
+# stored on the client. Created lazily on first http-mode get_graph() call.
+_obo_graph_client: GraphClient | None = None
 
 
 async def initialize_http_clients() -> None:
@@ -360,11 +366,28 @@ class GraphClient:
 
 def get_graph(profile: str | None = None) -> GraphClient:
     """
-    Return a GraphClient for the given profile.
+    Return a GraphClient for the current transport mode.
 
-    Uses ProfileManager's cached instances so each profile
-    gets a single reusable GraphClient.
+    stdio mode: uses ProfileManager's cached instances so each *profile* gets a
+    single reusable GraphClient (unchanged behavior).
+
+    http (multi-user) mode: returns a shared, lazily created GraphClient backed
+    by :class:`~mcp_microsoft.identity.OboTokenProvider`. The *profile* argument
+    is IGNORED — identity always comes from the caller's bearer token via the
+    per-request On-Behalf-Of exchange, so one shared client serves every user.
     """
+    from mcp_microsoft.config import get_app_config
+
+    if get_app_config().transport == "http":
+        global _obo_graph_client
+        if _obo_graph_client is None:
+            logger.debug(
+                "http transport: using shared OBO-backed GraphClient; the "
+                "profile argument is ignored (identity comes from the token)."
+            )
+            _obo_graph_client = GraphClient(token_provider=OboTokenProvider())
+        return _obo_graph_client
+
     from mcp_microsoft.profiles import get_profile_manager
 
     return get_profile_manager().get_graph(profile)

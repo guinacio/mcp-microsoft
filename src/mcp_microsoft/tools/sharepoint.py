@@ -67,8 +67,9 @@ from mcp_microsoft.models import (
     UpdateListItemResponse,
     UploadSiteFileResponse,
 )
+from mcp_microsoft.config import get_app_config
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.profiles import get_profile_manager
+from mcp_microsoft.profiles import _PERSONAL_TENANT_IDS, get_profile_manager
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -185,15 +186,45 @@ def _site_payload(site: GraphSite) -> SharePointSiteInfo:
 
 
 
+_CONSUMER_TENANT_ERROR = (
+    "SharePoint tools require a work or school Microsoft 365 account. "
+    "Use a profile configured for an organization tenant."
+)
+
+
+def _reject_consumer_tenant_from_token() -> None:
+    """Reject consumer tenants in http mode using the caller's token claims.
+
+    http mode has no profile to inspect, so the tenant is taken from the ``tid``
+    claim embedded in the validated FastMCP access token. When the claims are
+    unavailable or omit ``tid``, proceed — Graph itself returns 401/403 if the
+    account is unsupported.
+    """
+    from fastmcp.server.dependencies import get_access_token
+
+    access_token = get_access_token()
+    if access_token is None:
+        return
+    tid = (access_token.claims.get("tid") or "").strip().lower()
+    if tid and tid in _PERSONAL_TENANT_IDS:
+        raise ValueError(_CONSUMER_TENANT_ERROR)
+
+
 def _get_sharepoint_graph(profile: str | None):
-    """Resolve a profile and return a Graph client with a clearer consumer-tenant error."""
+    """Return a Graph client for SharePoint, rejecting consumer tenants.
+
+    stdio mode reads the tenant from the resolved profile. http mode has no
+    profile (ProfileManager may hold zero profiles), so it derives the tenant
+    from the caller's bearer-token ``tid`` claim instead.
+    """
+    if get_app_config().transport == "http":
+        _reject_consumer_tenant_from_token()
+        return get_graph(profile)
+
     cfg = get_profile_manager().resolve_profile(profile)
     tenant_id = (cfg.tenant_id or "").strip().lower()
-    if tenant_id in {"consumers", "9188040d-6c67-4c5b-b112-36a304b66dad"}:
-        raise ValueError(
-            "SharePoint tools require a work or school Microsoft 365 account. "
-            "Use a profile configured for an organization tenant."
-        )
+    if tenant_id in _PERSONAL_TENANT_IDS:
+        raise ValueError(_CONSUMER_TENANT_ERROR)
     return get_graph(profile)
 
 

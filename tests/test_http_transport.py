@@ -289,3 +289,94 @@ async def test_http_mode_disables_corporate_profile_teams_fallback(
 
     assert "teams_list_joined" not in names
     assert "search_sharepoint_sites" not in names
+
+
+# --------------------------------------------------------------------------
+# sharepoint._get_sharepoint_graph — transport-aware consumer-tenant guard
+# --------------------------------------------------------------------------
+
+
+def _http_only_config() -> AppConfig:
+    return _http_config()
+
+
+def test_sharepoint_http_mode_rejects_consumer_tid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """http mode: a consumer ``tid`` claim raises the work/school ValueError."""
+    import fastmcp.server.dependencies as deps
+
+    from mcp_microsoft.tools import sharepoint
+
+    monkeypatch.setattr(sharepoint, "get_app_config", lambda: _http_only_config())
+
+    class _Tok:
+        # The well-known consumer-tenant GUID (== profiles._PERSONAL_TENANT_IDS).
+        claims = {"tid": "9188040d-6c67-4c5b-b112-36a304b66dad"}
+        token = "assertion"
+
+    monkeypatch.setattr(deps, "get_access_token", lambda: _Tok())
+
+    with pytest.raises(ValueError, match="work or school"):
+        sharepoint._get_sharepoint_graph("ignored-in-http")
+
+
+def test_sharepoint_http_mode_proceeds_when_tid_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """http mode: absent ``tid`` claim is not fatal; Graph enforces support later."""
+    import fastmcp.server.dependencies as deps
+
+    from mcp_microsoft.tools import sharepoint
+
+    monkeypatch.setattr(sharepoint, "get_app_config", lambda: _http_only_config())
+
+    class _Tok:
+        claims: dict = {}  # no tid
+        token = "assertion"
+
+    monkeypatch.setattr(deps, "get_access_token", lambda: _Tok())
+    # Never consults ProfileManager; returns whatever get_graph yields.
+    sentinel = object()
+    monkeypatch.setattr(sharepoint, "get_graph", lambda profile: sentinel)
+
+    assert sharepoint._get_sharepoint_graph("ignored-in-http") is sentinel
+
+
+def test_sharepoint_http_mode_proceeds_when_unauthenticated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """http mode: no ambient token -> guard is a no-op (get_graph resolves)."""
+    import fastmcp.server.dependencies as deps
+
+    from mcp_microsoft.tools import sharepoint
+
+    monkeypatch.setattr(sharepoint, "get_app_config", lambda: _http_only_config())
+    monkeypatch.setattr(deps, "get_access_token", lambda: None)
+    sentinel = object()
+    monkeypatch.setattr(sharepoint, "get_graph", lambda profile: sentinel)
+
+    assert sharepoint._get_sharepoint_graph("ignored-in-http") is sentinel
+
+
+def test_sharepoint_stdio_mode_still_rejects_consumer_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stdio path unchanged: consumer profile tenant raises via resolve_profile."""
+    from mcp_microsoft.tools import sharepoint
+
+    monkeypatch.setattr(
+        sharepoint, "get_app_config", lambda: AppConfig(transport="stdio")
+    )
+
+    class _Cfg:
+        tenant_id = "consumers"
+
+    class _PM:
+        def resolve_profile(self, profile: str | None) -> object:
+            return _Cfg()
+
+    monkeypatch.setattr(sharepoint, "get_profile_manager", lambda *a, **k: _PM())
+
+    with pytest.raises(ValueError, match="work or school"):
+        sharepoint._get_sharepoint_graph("personal")
