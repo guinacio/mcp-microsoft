@@ -7,6 +7,8 @@
 
 Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, Contacts, and Teams via the Microsoft Graph API, with multi-account support.
 
+> **Documentation:** full setup & operations reference in [`docs/DEVOPS_GUIDE.md`](docs/DEVOPS_GUIDE.md) (English) · [`docs/DEVOPS_GUIDE.pt-BR.md`](docs/DEVOPS_GUIDE.pt-BR.md) (Guia em Português).
+
 ## Overview
 
 `mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers six surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, SharePoint, contacts, and Teams — **95 tools** in stdio mode with every optional service enabled. The exact count depends on your feature flags and, since 0.8.0, on transport mode: the multi-user remote (`http`) mode omits profile-management and local-disk tools, landing at **87 tools** with everything else enabled — see [Remote server — multi-user (Streamable HTTP)](#remote-server--multi-user-streamable-http) below.
