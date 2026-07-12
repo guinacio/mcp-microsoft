@@ -552,6 +552,41 @@ HTTP não podem usar o modo http.
 A diferença de 87 vs. 95 é exatamente as **5 ferramentas de gerenciamento de perfil** mais as **3
 ferramentas de download em disco local** que o modo http omite.
 
+### 6.7 Implantação sem exclusão (no-delete)
+
+Para equipes que precisam garantir que o assistente jamais consiga excluir nada permanentemente,
+execute o servidor com o kill-switch de exclusão:
+
+```bash
+export MCP_DISABLE_DELETION_TOOLS=1
+```
+
+Essa é a receita inteira — funciona de forma idêntica nos modos stdio e http e é aplicada no
+**momento do registro**: as ferramentas de exclusão permanente (`delete_email`,
+`bulk_delete_emails`, `delete_event`, `delete_contact`, `delete_folder`, `delete_drive_item`,
+`delete_list_item`) simplesmente não existem no servidor, então nenhum cliente, prompt ou
+comportamento do modelo consegue invocá-las. As variantes recuperáveis (`trash_email`,
+`bulk_trash_emails`, `move_or_copy_item`) permanecem disponíveis, então a limpeza do dia a dia
+continua funcionando — os itens vão para Itens Excluídos / a lixeira em vez de desaparecer.
+
+> **O switch vale para o servidor inteiro, não por usuário.** Um servidor http tem um único
+> conjunto de ferramentas para todos os usuários conectados. Se alguns usuários precisam de
+> exclusão completa e outros não podem tê-la, execute **duas instâncias** — uma completa e uma
+> no-delete — e direcione cada grupo de usuários para a URL correta.
+
+**Instâncias lado a lado (completa + no-delete)** podem compartilhar um único App Registration do
+Azure: um registro de aplicativo aceita múltiplas URIs de redirecionamento, então adicione as duas
+URLs de callback (por exemplo, `https://mcp.example.com/auth/callback` **e**
+`https://mcp-nodelete.example.com/auth/callback`) à mesma plataforma Web e reutilize o mesmo client
+ID/segredo/GUID de tenant nas duas implantações. Cada instância precisa do seu próprio
+`MCP_BASE_URL` (correspondendo exatamente à sua URL pública) e, se a observabilidade estiver
+habilitada, do seu próprio `MCP_STATS_TOKEN`. Um segundo serviço pronto para descomentar, seguindo
+esse padrão, acompanha o `docker-compose.yml`.
+
+Para usuários de **stdio / Claude Desktop**, o equivalente é o bundle no-delete pré-compilado
+(`mcp-microsoft-nodelete.mcpb`) ou a opção **Disable Permanent-Delete Tools** (Desativar
+ferramentas de exclusão permanente) no instalador MCPB (veja a [§5.1](#51-mcpb-claude-desktop--recomendado)).
+
 ---
 
 ## 7. Observabilidade

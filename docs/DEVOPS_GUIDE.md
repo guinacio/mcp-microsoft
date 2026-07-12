@@ -517,6 +517,38 @@ http mode.
 The 87 vs 95 delta is exactly the **5 profile-management tools** plus the **3 local-disk download
 tools** that http mode omits.
 
+### 6.7 No-delete deployment
+
+For teams that must guarantee the assistant can never permanently delete anything, run the server
+with the deletion kill-switch:
+
+```bash
+export MCP_DISABLE_DELETION_TOOLS=1
+```
+
+That is the entire recipe — it works identically in stdio and http mode and is enforced at
+**registration time**: the hard-delete tools (`delete_email`, `bulk_delete_emails`, `delete_event`,
+`delete_contact`, `delete_folder`, `delete_drive_item`, `delete_list_item`) simply do not exist on
+the server, so no client, prompt, or model behavior can invoke them. Recoverable variants
+(`trash_email`, `bulk_trash_emails`, `move_or_copy_item`) remain available, so day-to-day cleanup
+still works — items land in Deleted Items / the recycle bin instead of vanishing.
+
+> **The switch is server-wide, not per-user.** One http server has one tool set for all connected
+> users. If some users need full deletion and others must not have it, run **two instances** —
+> one full, one no-delete — and point each user group at the right URL.
+
+**Side-by-side full + no-delete instances** can share a single Azure App Registration: an app
+registration accepts multiple redirect URIs, so add both callback URLs (e.g.
+`https://mcp.example.com/auth/callback` **and** `https://mcp-nodelete.example.com/auth/callback`)
+to the same Web platform, and reuse the same client ID/secret/tenant GUID for both deployments.
+Each instance needs its own `MCP_BASE_URL` (matching its public URL exactly) and, if observability
+is enabled, its own `MCP_STATS_TOKEN`. A ready-to-uncomment second service for this pattern ships
+in `docker-compose.yml`.
+
+For **stdio / Claude Desktop** users the equivalent is the pre-built no-delete bundle
+(`mcp-microsoft-nodelete.mcpb`) or the **Disable Permanent-Delete Tools** toggle in the MCPB
+installer (see [§5.1](#51-mcpb-claude-desktop--recommended)).
+
 ---
 
 ## 7. Observability

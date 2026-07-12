@@ -33,6 +33,10 @@ services:
       # set, /metrics, /stats, and /dashboard are served (token-gated). See
       # .env.template and README.md's "Observability" subsection.
       # MCP_STATS_TOKEN: "<set-in-.env>"
+      # Uncomment to make THIS instance a no-delete server (hard-delete tools
+      # never registered; recoverable trash/move variants remain). See the
+      # DevOps guide, "No-delete deployment".
+      # MCP_DISABLE_DELETION_TOOLS: "1"
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -46,6 +50,41 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
+  # Optional second instance: a NO-DELETE server running side by side with the
+  # full one above (route users who must not hard-delete to this URL). Reuses
+  # the same App Registration — just add this instance's callback URL
+  # (e.g. https://mcp-nodelete.example.com/auth/callback) as an ADDITIONAL
+  # redirect URI on the same Web platform. Requires its own public hostname:
+  # set MCP_BASE_URL for this service to that URL (override below), and give
+  # it its own MCP_STATS_TOKEN if observability is wanted. Uncomment to use.
+  #
+  # mcp-microsoft-nodelete:
+  #   build: .
+  #   image: mcp-microsoft:0.8.0
+  #   container_name: mcp-microsoft-nodelete
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     MCP_TRANSPORT: http
+  #     MCP_HTTP_HOST: 0.0.0.0
+  #     MCP_DISABLE_DELETION_TOOLS: "1"
+  #     # Must differ from the full instance and match this instance's public
+  #     # URL exactly (scheme, host, port, path prefix):
+  #     MCP_BASE_URL: "https://mcp-nodelete.example.com"
+  #   ports:
+  #     - "8001:8000"
+  #   restart: unless-stopped
+  #   healthcheck:
+  #     test:
+  #       - "CMD"
+  #       - "python"
+  #       - "-c"
+  #       - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+  #     interval: 30s
+  #     timeout: 5s
+  #     start_period: 10s
+  #     retries: 3
 
 # ---------------------------------------------------------------------------
 # Reverse proxy / TLS termination (required for anything but local testing).
