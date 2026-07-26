@@ -22,6 +22,13 @@
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS builder
 
+# Apply all pending OS security patches before anything else.
+# Addresses Debian-layer CVEs reported by image scans (perl, glibc, sqlite3,
+# util-linux, etc.) that are not fixable via Python package upgrades alone.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Official static uv binary — avoids a `pip install uv` bootstrap and keeps
 # uv's own version pinned to upstream's "latest" tag rather than PyPI's.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -54,6 +61,12 @@ RUN uv sync --frozen --no-dev
 # Stage 2: runtime — slim image with just the venv, source, and a non-root user.
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS runtime
+
+# Apply OS security patches in the runtime image — this is the layer that
+# gets scanned and shipped, so patching here is what clears the findings.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
