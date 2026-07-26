@@ -16,6 +16,8 @@ import logging
 import os
 import re
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -232,6 +234,40 @@ class ProfileConfig:
 
 
 # ---------------------------------------------------------------------------
+# Device-code login session (non-blocking two-phase auth)
+# ---------------------------------------------------------------------------
+
+
+class DeviceLoginSession:
+    """A device-code sign-in in progress for one profile.
+
+    Holds the MSAL flow dict (user_code, verification_uri, message,
+    expires_at) plus the background thread that polls Entra until the user
+    completes sign-in or the flow expires.  The thread writes ``result`` /
+    ``error`` when it finishes; the acquired token lands in the profile's
+    persisted MSAL cache, so the regular silent path picks it up.
+    """
+
+    def __init__(self, profile: str, flow: dict[str, Any]) -> None:
+        self.profile = profile
+        self.flow = flow
+        self.thread: threading.Thread | None = None
+        self.result: dict[str, Any] | None = None
+        self.error: str | None = None
+
+    @property
+    def pending(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    def cancel(self) -> None:
+        """Ask MSAL to abort the polling loop on its next iteration."""
+        self.flow["expires_at"] = 0
+
+    def expires_in_seconds(self) -> int:
+        return max(0, int(self.flow.get("expires_at", 0) - time.time()))
+
+
+# ---------------------------------------------------------------------------
 # ProfileManager (singleton)
 # ---------------------------------------------------------------------------
 
@@ -249,6 +285,9 @@ class ProfileManager:
         self._base_dir: Path = self._resolve_base_dir(self._config)
         self._msal_apps: dict[str, msal.PublicClientApplication] = {}
         self._graph_clients: dict[str, Any] = {}
+        self._last_device_code_message: str | None = None
+        self._device_sessions: dict[str, DeviceLoginSession] = {}
+        self._device_sessions_lock = threading.Lock()
         self._load()
 
     # --- Base directory ---------------------------------------------------
@@ -410,10 +449,17 @@ class ProfileManager:
                 # Surface a clear error to Claude so the user knows exactly
                 # what to do, instead of the tool hanging silently while the
                 # sign-in instructions sit unseen in the server log.
+                pending = self._pending_device_message(cfg.name)
+                if pending:
+                    raise RuntimeError(
+                        f"Profile {cfg.name!r} has a device-code sign-in waiting "
+                        f"for the user to complete it. Show these instructions to "
+                        f"the user: {pending}"
+                    )
                 raise RuntimeError(
                     f"Profile {cfg.name!r} is not authenticated or the token has "
                     "expired. Call authenticate_ms_profile to sign in — it will "
-                    "return the device code URL directly in the chat."
+                    "return the sign-in URL and code directly in the chat."
                 )
 
             # Fall back to interactive browser, then device code (headless fallback)
@@ -457,6 +503,120 @@ class ProfileManager:
 
         self._save_cache(cfg, app)
         return result["access_token"]
+
+    # --- Non-blocking device-code login -----------------------------------
+
+    def _pending_device_message(self, name: str) -> str | None:
+        """Return the sign-in instructions of an in-flight device flow, if any."""
+        with self._device_sessions_lock:
+            session = self._device_sessions.get(name)
+        if session is not None and session.pending:
+            return session.flow.get("message")
+        return None
+
+    def begin_device_login(self, profile: str | None = None) -> dict[str, Any]:
+        """Start — or report progress on — a non-blocking device-code sign-in.
+
+        Unlike :meth:`get_token`, this never blocks waiting for the user.  The
+        Entra polling loop runs in a daemon thread; the acquired token is
+        written to the profile's persisted MSAL cache, after which the normal
+        silent path (and every Graph tool) works again.
+
+        Returns a status dict:
+
+        * ``{"status": "authenticated"}`` — a valid token is already available
+          (silent cache hit, or a previously started flow just completed).
+        * ``{"status": "awaiting_user", "user_code": ..., "verification_uri":
+          ..., "message": ..., "expires_in_seconds": ...}`` — the user must
+          open the URL and enter the code.  Repeat calls return the same code
+          until the flow expires.
+        * ``{"status": "error", "error": ...}`` — the previous flow failed or
+          expired.  The session is cleared; the next call starts fresh.
+        """
+        cfg = self.resolve_profile(profile)
+        app = self._get_msal_app(cfg)
+        scopes = cfg.effective_scopes
+
+        # Report on an existing session first (pending → same code; finished →
+        # success or error exactly once, then cleared).
+        with self._device_sessions_lock:
+            session = self._device_sessions.get(cfg.name)
+            if session is not None:
+                if session.pending:
+                    return {
+                        "status": "awaiting_user",
+                        "user_code": session.flow.get("user_code", ""),
+                        "verification_uri": session.flow.get("verification_uri", ""),
+                        "message": session.flow.get("message", ""),
+                        "expires_in_seconds": session.expires_in_seconds(),
+                    }
+                self._device_sessions.pop(cfg.name, None)
+                result = session.result or {}
+                if "access_token" in result:
+                    return {"status": "authenticated"}
+                error = (
+                    session.error
+                    or result.get("error_description")
+                    or result.get("error")
+                    or "Device-code sign-in expired before it was completed."
+                )
+                return {"status": "error", "error": error}
+
+        # No session — a silent hit means nothing to do.
+        accounts = app.get_accounts()
+        if accounts:
+            result = app.acquire_token_silent(scopes, account=accounts[0])
+            if result and "access_token" in result:
+                return {"status": "authenticated"}
+
+        flow = app.initiate_device_flow(scopes=scopes)
+        if "user_code" not in flow:
+            raise RuntimeError(
+                f"Could not initiate device code flow for profile {cfg.name!r}: "
+                f"{flow.get('error_description', 'unknown error')}"
+            )
+
+        session = DeviceLoginSession(profile=cfg.name, flow=flow)
+
+        def _poll() -> None:
+            try:
+                session.result = app.acquire_token_by_device_flow(flow)
+            except Exception as exc:
+                session.error = str(exc)
+
+        session.thread = threading.Thread(
+            target=_poll, name=f"msal-device-login-{cfg.name}", daemon=True
+        )
+
+        with self._device_sessions_lock:
+            existing = self._device_sessions.get(cfg.name)
+            if existing is not None and existing.pending:
+                # A concurrent call won the race while we were initiating —
+                # abandon our flow and reuse the existing one.
+                session.cancel()
+                return {
+                    "status": "awaiting_user",
+                    "user_code": existing.flow.get("user_code", ""),
+                    "verification_uri": existing.flow.get("verification_uri", ""),
+                    "message": existing.flow.get("message", ""),
+                    "expires_in_seconds": existing.expires_in_seconds(),
+                }
+            self._device_sessions[cfg.name] = session
+
+        session.thread.start()
+        self._last_device_code_message = flow.get("message")
+        logger.info(
+            "Device code sign-in started for profile %s. %s",
+            cfg.name,
+            flow.get("message", ""),
+        )
+        return {
+            "status": "awaiting_user",
+            "user_code": flow.get("user_code", ""),
+            "verification_uri": flow.get("verification_uri", ""),
+            "message": flow.get("message", ""),
+            "expires_in_seconds": session.expires_in_seconds(),
+        }
 
     def get_headers(self, profile: str | None = None) -> dict[str, str]:
         """Return authenticated HTTP headers for the given profile."""
@@ -535,6 +695,10 @@ class ProfileManager:
         cfg = self._profiles.pop(name)
         self._msal_apps.pop(name, None)
         self._graph_clients.pop(name, None)
+        with self._device_sessions_lock:
+            stale_session = self._device_sessions.pop(name, None)
+        if stale_session is not None:
+            stale_session.cancel()
 
         # Remove token cache file(s) — both encrypted and any leftover legacy file
         for stale in (cfg.cache_path, _legacy_cache_path_for(self._base_dir, name)):

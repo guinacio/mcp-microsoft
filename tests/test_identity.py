@@ -42,11 +42,13 @@ async def test_profile_token_provider_delegates_to_profile_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ProfileTokenProvider forwards the profile name to ProfileManager.get_token."""
-    seen_profiles: list[str | None] = []
+    seen_calls: list[tuple[str | None, bool]] = []
 
     class FakeManager:
-        def get_token(self, profile: str | None = None) -> str:
-            seen_profiles.append(profile)
+        def get_token(
+            self, profile: str | None = None, *, allow_interactive: bool = True
+        ) -> str:
+            seen_calls.append((profile, allow_interactive))
             return f"token-for-{profile}"
 
     monkeypatch.setattr(
@@ -56,7 +58,9 @@ async def test_profile_token_provider_delegates_to_profile_manager(
     assert await ProfileTokenProvider("work").get_access_token() == "token-for-work"
     # Default (None) profile is passed through unchanged.
     assert await ProfileTokenProvider().get_access_token() == "token-for-None"
-    assert seen_profiles == ["work", None]
+    # Tool-call paths must never fall into interactive/device-code auth: an
+    # expired token raises immediately instead of blocking the tool call.
+    assert seen_calls == [("work", False), (None, False)]
 
 
 @pytest.mark.asyncio
