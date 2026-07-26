@@ -16,7 +16,7 @@
 services:
   mcp-microsoft:
     build: .
-    image: mcp-microsoft:0.8.0
+    image: mcp-microsoft:0.9.1
     container_name: mcp-microsoft
     env_file:
       # All secrets and deployment-specific values (MCP_BASE_URL,
@@ -61,7 +61,7 @@ services:
   #
   # mcp-microsoft-nodelete:
   #   build: .
-  #   image: mcp-microsoft:0.8.0
+  #   image: mcp-microsoft:0.9.1
   #   container_name: mcp-microsoft-nodelete
   #   env_file:
   #     - .env

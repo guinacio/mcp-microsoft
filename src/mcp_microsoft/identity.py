@@ -16,8 +16,11 @@ the Graph client lets the same client serve different identity models:
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+from fastmcp.exceptions import ToolError
 
 if TYPE_CHECKING:
     from fastmcp.server.auth.providers.azure import AzureProvider
@@ -135,6 +138,10 @@ class OboTokenProvider:
             RuntimeError: if the request carries no validated access token, or
                 the configured auth provider is not an ``AzureProvider``.  The
                 token itself is never included in any error message or log.
+            ToolError: if the OBO exchange itself is refused by Entra (expired
+                or revoked session, missing consent, Conditional Access) — a
+                ``ToolError`` so the sanitized, actionable message survives
+                http-mode error masking and reaches the caller.
         """
         # Imported here (not at module scope) so stdio mode never pays the
         # fastmcp[azure] import cost, and so tests can monkeypatch these
@@ -160,5 +167,37 @@ class OboTokenProvider:
         credential = await azure_provider.get_obo_credential(
             user_assertion=access_token.token,
         )
-        result = await credential.get_token(_GRAPH_DEFAULT_SCOPE)
+        try:
+            result = await credential.get_token(_GRAPH_DEFAULT_SCOPE)
+        except Exception as exc:
+            raise ToolError(_obo_failure_message(exc)) from exc
         return result.token
+
+
+# Matches Entra error codes (e.g. "AADSTS65001") in exchange failure text.
+_AADSTS_CODE_RE = re.compile(r"AADSTS\d+")
+
+# Cap on the sanitized upstream detail included in an OBO failure message.
+_OBO_DETAIL_MAX = 500
+
+
+def _obo_failure_message(exc: Exception) -> str:
+    """Build the user-facing message for a failed On-Behalf-Of exchange.
+
+    The raw azure-identity error is Entra's own description of why *this
+    caller's* exchange was refused — safe to relay (it never contains the user
+    assertion or the client secret), but it is normalized here anyway: control
+    characters collapse to spaces (audit-log hygiene when fastmcp logs the
+    message) and the detail is capped at ``_OBO_DETAIL_MAX`` chars. A known
+    ``AADSTS`` code is called out explicitly so operators can look it up.
+    """
+    detail = re.sub(r"[\x00-\x1f\x7f]+", " ", str(exc)).strip()[:_OBO_DETAIL_MAX]
+    code_match = _AADSTS_CODE_RE.search(detail)
+    code_part = f" (Entra error {code_match.group(0)})" if code_match else ""
+    return (
+        f"Could not obtain a Microsoft Graph token for your account{code_part}. "
+        "Common causes: your session expired or was revoked, the app is missing "
+        "admin consent for a Graph permission, or a Conditional Access policy "
+        "requires re-authentication. Disconnect and reconnect the Microsoft "
+        f"integration, then try again. Details: {detail}"
+    )

@@ -103,6 +103,59 @@ async def test_audit_middleware_never_raises_on_identity_lookup_failure(
     assert "oid=-" in caplog.records[0].getMessage()
 
 
+@pytest.mark.asyncio
+async def test_audit_middleware_sanitizes_control_chars_in_logged_fields(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A tool name / username containing newlines cannot forge audit lines."""
+    import fastmcp.server.dependencies as deps
+
+    token = _FakeAccessToken(
+        {"oid": "user-oid-1", "preferred_username": "eve\nFORGED tool_call user=admin"}
+    )
+    monkeypatch.setattr(deps, "get_access_token", lambda: token)
+
+    middleware = AuditLoggingMiddleware()
+
+    async def call_next(_context: MiddlewareContext) -> str:
+        return "ok"
+
+    caplog.set_level(logging.INFO, logger="mcp_microsoft.middleware")
+    await middleware.on_call_tool(
+        _tool_call_context("bad\ntool\rname\x00"), call_next
+    )
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "\n" not in message
+    assert "\r" not in message
+    assert "\x00" not in message
+    assert "tool=bad?tool?name?" in message
+    assert "user=eve?FORGED tool_call user=admin" in message
+
+
+@pytest.mark.asyncio
+async def test_audit_middleware_caps_oversized_tool_name(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import fastmcp.server.dependencies as deps
+
+    from mcp_microsoft.middleware import _LOG_FIELD_MAX
+
+    monkeypatch.setattr(deps, "get_access_token", lambda: None)
+    middleware = AuditLoggingMiddleware()
+
+    async def call_next(_context: MiddlewareContext) -> str:
+        return "ok"
+
+    caplog.set_level(logging.INFO, logger="mcp_microsoft.middleware")
+    await middleware.on_call_tool(_tool_call_context("x" * 5000), call_next)
+
+    message = caplog.records[0].getMessage()
+    assert "x" * _LOG_FIELD_MAX in message
+    assert "x" * (_LOG_FIELD_MAX + 1) not in message
+
+
 def test_caller_identity_missing_claims_degrades_gracefully(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,6 +299,30 @@ async def test_rate_limit_refills_over_time(monkeypatch: pytest.MonkeyPatch) -> 
     # Advance 1s at 1 token/s -> one more request allowed.
     clock[0] += 1.0
     assert await mw.on_request(_req_context(), _call_next_ok) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_fractional_rps_clamps_burst_to_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rps < 0.5 must not truncate to a zero-capacity bucket that rejects
+    every request from every user; the burst floor is 1."""
+    from mcp_microsoft.middleware import UserRateLimitMiddleware
+
+    clock = [1000.0]
+    _fixed_clock(monkeypatch, clock)
+
+    mw = UserRateLimitMiddleware(max_requests_per_second=0.4)
+    assert mw.burst_capacity == 1
+
+    _set_token(monkeypatch, {"tid": "t", "oid": "A"})
+    # The first request must pass (previously: capacity 0 -> everything 429'd).
+    assert await mw.on_request(_req_context(), _call_next_ok) == "ok"
+
+    # An explicit zero burst_capacity is clamped too.
+    assert UserRateLimitMiddleware(
+        max_requests_per_second=10, burst_capacity=0
+    ).burst_capacity == 1
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,14 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp[azure,apps]>=3.4.4",
+    # Capped below the next major: this repo reaches into fastmcp internals
+    # that are not covered by semver guarantees — private helpers in
+    # fastmcp.apps.file_upload (_b64_decoded_size/_make_summary/_TEXT_EXTENSIONS,
+    # see uploads.py), NotFoundError being raised inside call_next during tool
+    # dispatch (middleware.MetricsMiddleware), and the MultiAuth/AzureProvider
+    # composition shape (identity._find_azure_provider). Re-verify those seams
+    # before raising the cap.
+    "fastmcp[azure,apps]>=3.4.4,<4",
     "msal>=1.28",
     "msal-extensions>=1.2",
     "httpx>=0.27",

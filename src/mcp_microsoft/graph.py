@@ -21,10 +21,48 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+from fastmcp.exceptions import ToolError
 
 from mcp_microsoft.identity import OboTokenProvider, ProfileTokenProvider, TokenProvider
 
 logger = logging.getLogger(__name__)
+
+
+class GraphAuthorizationError(ToolError, httpx.HTTPStatusError):
+    """A Graph 401/403 whose message must stay visible to the caller.
+
+    In http mode the server runs with ``mask_error_details=True``, which
+    replaces every non-``ToolError`` exception with a generic message — leaving
+    a user whose consent expired or whose account lacks a permission with no
+    way to self-serve. Auth denials are safe to surface (the body is Entra's
+    own error text about the caller's request), so this class is *both* a
+    ``ToolError`` (survives masking) and an ``httpx.HTTPStatusError`` (existing
+    handlers, e.g. the Teams meeting-artifact translators, still catch it).
+    """
+
+    def __init__(
+        self, message: str, *, request: httpx.Request, response: httpx.Response
+    ) -> None:
+        Exception.__init__(self, message)
+        # FastMCPError contract (fastmcp reads this when logging the error).
+        self.log_level = logging.ERROR
+        # httpx.HTTPStatusError contract.
+        self.request = request
+        self.response = response
+
+
+_AUTH_DENIED_HINTS = {
+    401: (
+        "Microsoft rejected the sign-in for this request (expired or revoked "
+        "session). Disconnect and reconnect the Microsoft integration, then try "
+        "again."
+    ),
+    403: (
+        "The signed-in account is missing a required permission or admin "
+        "consent for this operation. Ask your Microsoft 365 administrator to "
+        "grant the missing Graph permission to the app registration."
+    ),
+}
 
 _RETRY_STATUSES = frozenset({429, 503})
 _MAX_RETRIES = 3
@@ -100,6 +138,32 @@ def get_request_http_client() -> httpx.AsyncClient | None:
 def get_transfer_http_client() -> httpx.AsyncClient | None:
     """Return the shared transfer client when the server lifespan is active."""
     return _transfer_client
+
+
+def _raise_for_status_enriched(response: httpx.Response) -> None:
+    """Raise for a 4xx/5xx response with the Graph error body appended.
+
+    401/403 raise :class:`GraphAuthorizationError` (a ``ToolError`` that
+    survives http-mode error masking, still catchable as
+    ``httpx.HTTPStatusError``) with an actionable hint appended; every other
+    error status raises plain ``httpx.HTTPStatusError`` exactly as before.
+    """
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # Append Graph error body for better diagnostics
+        try:
+            body = response.json()
+            error_info = body.get("error", {})
+            msg = f"{exc} | Graph error: {error_info.get('code')} — {error_info.get('message')}"
+        except Exception:
+            msg = str(exc)
+        hint = _AUTH_DENIED_HINTS.get(response.status_code)
+        if hint is not None:
+            raise GraphAuthorizationError(
+                f"{msg} | {hint}", request=exc.request, response=exc.response
+            ) from None
+        raise httpx.HTTPStatusError(msg, request=exc.request, response=exc.response) from None
 
 
 class GraphClient:
@@ -225,17 +289,7 @@ class GraphClient:
 
         response = await self._send_with_retry(_send, operation_name=method.upper())
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            # Append Graph error body for better diagnostics
-            try:
-                body = response.json()
-                error_info = body.get("error", {})
-                msg = f"{exc} | Graph error: {error_info.get('code')} — {error_info.get('message')}"
-            except Exception:
-                msg = str(exc)
-            raise httpx.HTTPStatusError(msg, request=exc.request, response=exc.response) from None
+        _raise_for_status_enriched(response)
 
         # 204 No Content — nothing to parse
         if response.status_code == 204:
@@ -380,7 +434,7 @@ class GraphClient:
             return await client.get(url, headers=headers_from_auth)
 
         response = await self._send_with_retry(_send, operation_name="get_raw")
-        response.raise_for_status()
+        _raise_for_status_enriched(response)
         return response.content
 
 

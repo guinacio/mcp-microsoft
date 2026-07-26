@@ -13,6 +13,8 @@ Run:
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -607,9 +609,44 @@ class _MCPProxy:
 mcp = _MCPProxy()
 
 
+def _configure_logging(config: AppConfig) -> None:
+    """Configure process-wide logging for the CLI entry point.
+
+    Without this, Python's root logger stays at WARNING with only the
+    last-resort handler — which silently swallows the http-mode audit trail
+    (``AuditLoggingMiddleware`` logs at INFO) and every informational
+    registration line. Defaults: INFO in http mode (the audit log is a core
+    feature there), WARNING in stdio (matches the previous behavior of a
+    local, single-user subprocess). ``MCP_LOG_LEVEL`` overrides either.
+
+    Logs go to stderr explicitly: in stdio transport stdout carries the MCP
+    protocol stream and must never receive log lines. ``force=True`` so this
+    wins even if an imported library already installed a root handler.
+
+    Called only from :func:`main` — programmatic embedders keep full control
+    of their own logging configuration.
+    """
+    level_name = os.environ.get("MCP_LOG_LEVEL", "").strip().upper()
+    level: int | None = None
+    if level_name:
+        candidate = logging.getLevelName(level_name)
+        if isinstance(candidate, int):
+            level = candidate
+    if level is None:
+        level = logging.INFO if config.transport == "http" else logging.WARNING
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
+
+
 def main() -> None:
     """CLI entry point — starts the MCP server over stdio or Streamable HTTP."""
     config = get_app_config()
+    _configure_logging(config)
     if config.transport not in ("stdio", "http"):
         raise SystemExit(
             "Cannot start mcp-microsoft — MCP_TRANSPORT must be 'stdio' or "
