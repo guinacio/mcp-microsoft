@@ -65,15 +65,7 @@ class ProfileTokenProvider:
     profile: str | None = None
 
     async def get_access_token(self) -> str:
-        """Fetch a token for this provider's profile without blocking the loop.
-
-        Passes ``allow_interactive=False`` so that an expired or missing token
-        raises immediately with a user-facing message rather than blocking the
-        tool call on a device code prompt that would only appear in the log.
-        The user is directed to call ``authenticate_ms_profile`` explicitly,
-        which runs the interactive / device code flow and surfaces the sign-in
-        URL directly in the Claude chat.
-        """
+        """Fetch a token for this provider's profile without blocking the loop."""
         # Lazy import mirrors graph.py's circular-import avoidance.
         from mcp_microsoft.profiles import get_profile_manager
 
@@ -81,9 +73,8 @@ class ProfileTokenProvider:
         # trigger interactive/device-code auth. Once a profile is authenticated
         # the MSAL silent (cached) path is fast, so the lock is barely held.
         async with _profile_token_lock(self.profile):
-            pm = get_profile_manager()
             return await asyncio.to_thread(
-                lambda: pm.get_token(self.profile, allow_interactive=False)
+                get_profile_manager().get_token, self.profile
             )
 
 
