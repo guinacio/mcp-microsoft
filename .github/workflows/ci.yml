@@ -1,4 +1,4 @@
-name: Test Suite (137 tests)
+name: Test Suite
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: Test Suite (137 tests)
+    name: Test Suite
     runs-on: ubuntu-latest
 
     steps:
