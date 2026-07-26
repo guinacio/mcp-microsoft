@@ -42,11 +42,13 @@ async def test_profile_token_provider_delegates_to_profile_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ProfileTokenProvider forwards the profile name to ProfileManager.get_token."""
-    seen_profiles: list[str | None] = []
+    seen_calls: list[tuple[str | None, bool]] = []
 
     class FakeManager:
-        def get_token(self, profile: str | None = None) -> str:
-            seen_profiles.append(profile)
+        def get_token(
+            self, profile: str | None = None, *, allow_interactive: bool = True
+        ) -> str:
+            seen_calls.append((profile, allow_interactive))
             return f"token-for-{profile}"
 
     monkeypatch.setattr(
@@ -56,7 +58,9 @@ async def test_profile_token_provider_delegates_to_profile_manager(
     assert await ProfileTokenProvider("work").get_access_token() == "token-for-work"
     # Default (None) profile is passed through unchanged.
     assert await ProfileTokenProvider().get_access_token() == "token-for-None"
-    assert seen_profiles == ["work", None]
+    # Tool-call paths must never fall into interactive/device-code auth: an
+    # expired token raises immediately instead of blocking the tool call.
+    assert seen_calls == [("work", False), (None, False)]
 
 
 @pytest.mark.asyncio
@@ -197,6 +201,135 @@ async def test_obo_provider_exchanges_ambient_token_for_graph_token(
     assert credential.get_token_calls == [
         ("https://graph.microsoft.com/.default",)
     ]
+
+
+class _FailingCredential:
+    """Fake OnBehalfOfCredential whose exchange is refused by Entra."""
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    async def get_token(self, *scopes: str) -> _FakeAccessToken:
+        raise RuntimeError(self._message)
+
+
+@pytest.mark.asyncio
+async def test_obo_exchange_failure_raises_toolerror_with_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused OBO exchange surfaces as ToolError (survives http-mode error
+    masking) naming the AADSTS code, with control chars flattened."""
+    from fastmcp.exceptions import ToolError
+
+    credential = _FailingCredential(
+        "AADSTS65001: The user or administrator has not consented.\n"
+        "Trace ID: 0000\r\nCorrelation ID: 1111"
+    )
+    provider = _FakeAzureProvider(credential)  # type: ignore[arg-type]
+    token = _FakeAccessToken("user-assertion-abc")
+
+    _patch_fastmcp_deps(
+        monkeypatch, access_token=token, server=_FakeServer(provider)
+    )
+    monkeypatch.setattr(identity_module, "_find_azure_provider", lambda auth: provider)
+
+    with pytest.raises(ToolError) as exc_info:
+        await OboTokenProvider().get_access_token()
+
+    message = str(exc_info.value)
+    assert "AADSTS65001" in message
+    assert "reconnect" in message.lower()
+    # One-line audit-log hygiene: no control characters in the message.
+    assert "\n" not in message and "\r" not in message
+    # The user assertion never leaks into the error.
+    assert "user-assertion-abc" not in message
+
+
+# ---------------------------------------------------------------------------
+# GraphAuthorizationError — 401/403 survive http-mode error masking
+# ---------------------------------------------------------------------------
+
+
+def _mock_graph_client(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: dict
+) -> tuple[GraphClient, httpx.AsyncClient]:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
+    monkeypatch.setattr(graph_module, "_request_client", client)
+    return GraphClient(token_provider=_ConstantProvider("tok")), client
+
+
+@pytest.mark.asyncio
+async def test_graph_403_raises_masking_proof_authorization_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastmcp.exceptions import ToolError
+
+    from mcp_microsoft.graph import GraphAuthorizationError
+
+    g, client = _mock_graph_client(
+        monkeypatch,
+        403,
+        {"error": {"code": "ErrorAccessDenied", "message": "Access is denied."}},
+    )
+    try:
+        with pytest.raises(GraphAuthorizationError) as exc_info:
+            await g.get("/me")
+    finally:
+        await client.aclose()
+
+    err = exc_info.value
+    # Both natures: survives fastmcp masking AND existing httpx handlers.
+    assert isinstance(err, ToolError)
+    assert isinstance(err, httpx.HTTPStatusError)
+    assert err.response.status_code == 403
+    message = str(err)
+    assert "ErrorAccessDenied" in message
+    assert "permission" in message  # the actionable 403 hint
+
+
+@pytest.mark.asyncio
+async def test_graph_401_hint_mentions_reconnecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp_microsoft.graph import GraphAuthorizationError
+
+    g, client = _mock_graph_client(
+        monkeypatch,
+        401,
+        {"error": {"code": "InvalidAuthenticationToken", "message": "Lifetime exceeded"}},
+    )
+    try:
+        with pytest.raises(GraphAuthorizationError) as exc_info:
+            await g.get("/me")
+    finally:
+        await client.aclose()
+
+    assert "reconnect" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_graph_404_stays_a_plain_masked_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-auth Graph errors keep the existing type — masked in http mode."""
+    from fastmcp.exceptions import ToolError
+
+    g, client = _mock_graph_client(
+        monkeypatch,
+        404,
+        {"error": {"code": "ErrorItemNotFound", "message": "Not found."}},
+    )
+    try:
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await g.get("/me/messages/nope")
+    finally:
+        await client.aclose()
+
+    assert not isinstance(exc_info.value, ToolError)
+    assert "ErrorItemNotFound" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

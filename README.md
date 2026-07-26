@@ -111,7 +111,7 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `list_ms_profiles` — list all configured profiles and which is the default
 - `add_ms_profile` — add a new account (name, client_id, tenant_id)
 - `remove_ms_profile` — remove a profile and delete its cached tokens
-- `authenticate_ms_profile` — trigger interactive OAuth for a profile
+- `authenticate_ms_profile` — start or check a sign-in for a profile; returns a device code + URL to show the user in the chat (never blocks waiting for them)
 - `set_default_ms_profile` — change which profile is used when none is specified
 
 #### Service utilities (1 tool)
@@ -326,7 +326,7 @@ list_emails(folder="Inbox", profile="work")
 search_drive(query="Q1 report", profile="personal")
 ```
 
-**Authenticate** (opens a browser window for OAuth the first time):
+**Authenticate** (returns a sign-in URL + device code in the chat; open the URL, enter the code, then call the tool again to confirm):
 
 ```
 authenticate_ms_profile(profile="work")

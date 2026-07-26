@@ -126,7 +126,7 @@
     { "name": "list_ms_profiles", "description": "List all configured Microsoft 365 profiles" },
     { "name": "add_ms_profile", "description": "Add a new Microsoft 365 profile" },
     { "name": "remove_ms_profile", "description": "Remove a profile and its cached tokens" },
-    { "name": "authenticate_ms_profile", "description": "Trigger interactive authentication for a profile" },
+    { "name": "authenticate_ms_profile", "description": "Start or check Microsoft sign-in for a profile (returns a device code to show the user)" },
     { "name": "set_default_ms_profile", "description": "Change the default profile" },
     { "name": "list_enabled_services", "description": "List which Microsoft 365 service groups are currently active" }
   ],

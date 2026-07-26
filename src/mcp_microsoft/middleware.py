@@ -10,6 +10,7 @@ Never wired up in stdio mode — see server.py's ``create_mcp_server``.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import OrderedDict
 from typing import Any
@@ -31,6 +32,27 @@ _UNAUTHENTICATED_KEY = "unauthenticated"
 # these caps keep our store bounded in a long-running multi-user server.
 _LIMITER_CAP = 10_000  # max distinct keys retained (LRU eviction beyond this)
 _LIMITER_IDLE_TTL = 900.0  # seconds a bucket may sit idle before it is pruned
+
+
+# Control characters (including \r\n) in attacker-influenceable log fields.
+_LOG_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# Cap on any single sanitized field in an audit line. Tool names top out around
+# 40 chars and UPNs around 100; anything longer is hostile or broken input.
+_LOG_FIELD_MAX = 200
+
+
+def _sanitize_log_field(value: str) -> str:
+    """Neutralize *value* for inclusion in a one-line audit record.
+
+    The audit log's one-line-per-call framing is load-bearing: a tool name (or
+    a username claim) containing ``\\n`` could otherwise forge additional audit
+    lines. fastmcp resolves the tool name *after* the middleware chain starts,
+    so ``context.message.name`` here is attacker-controlled free text for
+    unknown tools. Control characters are replaced with ``?`` and the field is
+    capped at ``_LOG_FIELD_MAX`` chars.
+    """
+    return _LOG_CONTROL_CHARS_RE.sub("?", value)[:_LOG_FIELD_MAX]
 
 
 def _caller_identity() -> tuple[str, str]:
@@ -155,10 +177,13 @@ class UserRateLimitMiddleware(Middleware):
         burst_capacity: int | None = None,
     ) -> None:
         self.max_requests_per_second = max_requests_per_second
-        self.burst_capacity = (
+        # Clamped to >= 1: a fractional rps below 0.5 would otherwise truncate
+        # to a zero-capacity bucket that rejects every request from every user.
+        self.burst_capacity = max(
+            1,
             burst_capacity
             if burst_capacity is not None
-            else int(max_requests_per_second * 2)
+            else int(max_requests_per_second * 2),
         )
         self._buckets: OrderedDict[str, _TokenBucket] = OrderedDict()
 
@@ -241,8 +266,12 @@ class AuditLoggingMiddleware(Middleware):
         context: MiddlewareContext,
         call_next: CallNext,
     ) -> Any:
-        tool_name = getattr(context.message, "name", "unknown")
+        # Sanitized: for a tools/call naming a nonexistent tool, this is
+        # attacker-controlled text (fastmcp resolves the name inside call_next);
+        # the username claim is likewise caller-influenced free text.
+        tool_name = _sanitize_log_field(getattr(context.message, "name", "unknown"))
         oid, username = _caller_identity()
+        username = _sanitize_log_field(username)
         start = time.perf_counter()
 
         try:
