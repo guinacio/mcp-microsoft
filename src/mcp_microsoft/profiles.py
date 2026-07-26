@@ -381,28 +381,51 @@ class ProfileManager:
         """
         return
 
-    def get_token(self, profile: str | None = None) -> str:
-        """Acquire a valid access token for the given profile."""
+    def get_token(self, profile: str | None = None, *, allow_interactive: bool = True) -> str:
+        """Acquire a valid access token for the given profile.
+
+        Args:
+            profile: Profile name, or None for the default profile.
+            allow_interactive: When True (default), falls back to interactive
+                browser auth and then device code flow if the silent cache miss.
+                Set to False for tool-call paths: a cache miss raises immediately
+                with a user-facing message telling Claude to call
+                ``authenticate_ms_profile`` instead of blocking the tool call
+                on a device code prompt that only appears in the server log.
+        """
         cfg = self.resolve_profile(profile)
         app = self._get_msal_app(cfg)
         scopes = cfg.effective_scopes
 
-        # Try silent flow
+        # Try silent flow first (fast path — no network round-trip if cached)
         accounts = app.get_accounts()
         result = None
         if accounts:
             result = app.acquire_token_silent(scopes, account=accounts[0])
 
-        # Fall back to interactive, then device code if interactive fails
         self._last_device_code_message = None
         if not result:
+            if not allow_interactive:
+                # Called from a regular tool — refuse to block on device code.
+                # Surface a clear error to Claude so the user knows exactly
+                # what to do, instead of the tool hanging silently while the
+                # sign-in instructions sit unseen in the server log.
+                raise RuntimeError(
+                    f"Profile {cfg.name!r} is not authenticated or the token has "
+                    "expired. Call authenticate_ms_profile to sign in — it will "
+                    "return the device code URL directly in the chat."
+                )
+
+            # Fall back to interactive browser, then device code (headless fallback)
             try:
                 result = app.acquire_token_interactive(scopes=scopes)
             except Exception:
                 result = None
 
             if not result or "access_token" not in result:
-                # Device code flow — works headless (MCPB, SSH, containers)
+                # Device code flow — works headless (MCPB, SSH, containers).
+                # The message is stored so authenticate_ms_profile can return
+                # it to Claude as a structured response field.
                 flow = app.initiate_device_flow(scopes=scopes)
                 if "user_code" not in flow:
                     raise RuntimeError(
@@ -410,10 +433,7 @@ class ProfileManager:
                         f"{flow.get('error_description', 'unknown error')}"
                     )
                 self._last_device_code_message = flow["message"]
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Interactive auth unavailable. %s", flow["message"]
-                )
+                logger.warning("Interactive auth unavailable. %s", flow["message"])
                 result = app.acquire_token_by_device_flow(flow)
 
         if "access_token" not in result:
