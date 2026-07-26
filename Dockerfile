@@ -11,8 +11,8 @@
 # / compose time — see .env.template's "Remote server (http) mode" section
 # and docs/azure-setup.md.
 #
-# Build:  docker build -t mcp-microsoft:0.8.0 .
-# Run:    docker run --rm -p 8000:8000 --env-file .env mcp-microsoft:0.8.0
+# Build:  docker build -t mcp-microsoft:0.9.1 .
+# Run:    docker run --rm -p 8000:8000 --env-file .env mcp-microsoft:0.9.1
 # Or:     docker compose up -d   (see docker-compose.yml)
 
 # ---------------------------------------------------------------------------

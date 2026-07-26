@@ -7,6 +7,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.9.1] — 2026-07-25
+
+### Security
+
+- **Python package upgrades** — addressed all Critical and High CVEs identified in Docker image scan:
+  - `mcp` 1.26.0 → 1.28.1 (CVE-2026-52869, CVE-2026-52870 HIGH — session hijacking via SSE/Streamable HTTP and task cross-session access; CVE-2026-59950 HIGH — WebSocket transport missing Origin validation)
+  - `cryptography` 46.0.6 → 48.0.1 (CVE-2026-39892 CRITICAL — buffer overflow with non-contiguous buffers; GHSA-537c-gmf6-5ccf HIGH — bundled OpenSSL)
+  - `click` 8.3.1 → 8.4.2 (CVE-2026-7246 HIGH — command injection in `click.edit()`)
+  - `pyjwt` 2.12.1 → 2.13.0 (CVE-2026-48526 HIGH — algorithm confusion; CVE-2026-48522/23/25 MEDIUM — SSRF via JWKS, algorithm allow-list bypass, unauthenticated DoS)
+  - `urllib3` 2.6.3 → 2.7.0 (CVE-2026-44432 HIGH — excessive decompression; CVE-2026-44431 MEDIUM — sensitive header forwarding on cross-origin redirects)
+  - `idna` 3.11 → 3.18 (CVE-2026-45409 MEDIUM — ReDoS via `valid_contexto`)
+- **Dockerfile** — added `apt-get upgrade` to both builder and runtime stages to apply all pending Debian OS-layer security patches (covers `perl`, `glibc`, `sqlite3`, `util-linux` CVEs reported by image scan).
+
+---
+
 ## [0.9.0] — 2026-07-12
 
 ### Added

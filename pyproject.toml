@@ -1,6 +1,6 @@
 [project]
 name = "mcp-microsoft"
-version = "0.9.0"
+version = "0.9.1"
 description = "Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, Contacts, and Teams via Microsoft Graph API for personal (Outlook.com/Live) and enterprise (Azure AD/Entra) accounts"
 readme = "README.md"
 authors = [
