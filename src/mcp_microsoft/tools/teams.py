@@ -41,10 +41,10 @@ Implemented:
   - teams_list_meetings      — list meetings (date-range filtered)
 
 NOTE on throttling: Graph Teams APIs impose stricter rate limits than Mail/Calendar
-(e.g. 4 req/s for channel message POSTs). The GraphClient raises httpx.HTTPStatusError
-on 429 responses with the Retry-After value included in the message. Callers should
-handle this exception and retry after the indicated delay. A future improvement would
-be to add automatic retry-with-backoff to GraphClient._request().
+(e.g. 4 req/s for channel message POSTs). GraphClient automatically retries 429 and
+503 responses, honors Retry-After, and caps both the retry count and delay. Callers
+issuing many Teams requests in a tight loop may still need to pace requests on top of
+the built-in retry behavior.
 """
 
 from __future__ import annotations
