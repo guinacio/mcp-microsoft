@@ -146,7 +146,42 @@ async def test_list_events_filter_start_adds_odata_filter(monkeypatch: pytest.Mo
 
     assert "$filter" in captured["params"]
     assert "start/dateTime ge" in captured["params"]["$filter"]
-    assert "2026-04-01T00:00:00" in captured["params"]["$filter"]
+    assert captured["params"]["$filter"] == "start/dateTime ge '2026-04-01T00:00:00Z'"
+
+
+@pytest.mark.asyncio
+async def test_list_events_filter_start_normalizes_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, dict] = {}
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None):
+            captured["params"] = params or {}
+            return {"value": []}
+
+    monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
+    await calendar.list_events(
+        calendar.ListEventsInput(filter_start="2026-04-01T03:00:00+03:00")
+    )
+
+    assert captured["params"]["$filter"] == "start/dateTime ge '2026-04-01T00:00:00Z'"
+
+
+@pytest.mark.asyncio
+async def test_list_events_filter_start_rejects_invalid_datetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None):
+            raise AssertionError("Graph must not be called for an invalid filter")
+
+    monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
+
+    with pytest.raises(ValueError, match="filter_start must be a valid ISO 8601"):
+        await calendar.list_events(
+            calendar.ListEventsInput(filter_start="2026-04-01' or subject ne '")
+        )
 
 
 @pytest.mark.asyncio

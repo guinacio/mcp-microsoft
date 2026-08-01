@@ -19,6 +19,7 @@ Implemented:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Union
 from pydantic import model_validator
 
@@ -63,6 +64,22 @@ from mcp_microsoft.graph import get_graph
 
 BodyType = Literal["text", "html"]
 RsvpResponse = Literal["accept", "decline", "tentativelyAccept"]
+
+
+def _normalize_filter_datetime(value: str) -> str:
+    """Validate and normalize a caller-supplied datetime for an OData filter."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "filter_start must be a valid ISO 8601 datetime like "
+            "2026-04-01T00:00:00Z."
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class ListCalendarsInput(ToolRequestModel):
@@ -306,8 +323,7 @@ async def list_events(
         "$orderby": "start/dateTime",
     }
     if params.filter_start:
-        # Sanitize: strip quotes to prevent OData injection
-        safe_start = params.filter_start.replace("'", "")
+        safe_start = _normalize_filter_datetime(params.filter_start)
         query["$filter"] = f"start/dateTime ge '{safe_start}'"
 
     if params.calendar_id:
