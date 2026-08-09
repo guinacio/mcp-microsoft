@@ -41,14 +41,15 @@ Implemented:
   - teams_list_meetings      — list meetings (date-range filtered)
 
 NOTE on throttling: Graph Teams APIs impose stricter rate limits than Mail/Calendar
-(e.g. 4 req/s for channel message POSTs). The GraphClient raises httpx.HTTPStatusError
-on 429 responses with the Retry-After value included in the message. Callers should
-handle this exception and retry after the indicated delay. A future improvement would
-be to add automatic retry-with-backoff to GraphClient._request().
+(e.g. 4 req/s for channel message POSTs). GraphClient automatically retries 429 and
+503 responses, honors Retry-After, and caps both the retry count and delay. Callers
+issuing many Teams requests in a tight loop may still need to pace requests on top of
+the built-in retry behavior.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -58,6 +59,7 @@ import httpx
 from mcp_microsoft.common.formatting import format_datetime_display, format_size_display
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.tooling import READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.config import get_app_config
 from mcp_microsoft.feature_flags import (
     is_teams_ai_insights_enabled,
     is_teams_meeting_artifacts_enabled,
@@ -123,6 +125,8 @@ from mcp_microsoft.models import (
 )
 
 ContentType = Literal["text", "html"]
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -1569,7 +1573,13 @@ def register(server) -> None:
         register_tool(server, teams_list_meeting_transcripts, annotations=READ_ONLY_TOOL)
         register_tool(server, teams_get_meeting_transcript, annotations=READ_ONLY_TOOL)
         register_tool(server, teams_list_meeting_recordings, annotations=READ_ONLY_TOOL)
-        register_tool(server, teams_download_meeting_recording, annotations=WRITE_TOOL)
+        if get_app_config().transport == "http":
+            _log.info(
+                "teams_download_meeting_recording not registered (http "
+                "transport; server disk is not the caller's disk)"
+            )
+        else:
+            register_tool(server, teams_download_meeting_recording, annotations=WRITE_TOOL)
     if is_teams_ai_insights_enabled():
         register_tool(server, teams_list_meeting_ai_insights, annotations=READ_ONLY_TOOL)
         register_tool(server, teams_get_meeting_ai_insight, annotations=READ_ONLY_TOOL)

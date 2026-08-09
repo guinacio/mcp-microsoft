@@ -725,7 +725,13 @@ class AuthenticateProfileResponse(ActionResult):
     profile: str | None = None
     tenant_id: str = ""
     cache_path: str = ""
+    # "authenticated" | "awaiting_user" | "error"
+    status: str = ""
+    user_code: str | None = None
+    verification_uri: str | None = None
+    expires_in_seconds: int | None = None
     device_code_message: str | None = None
+    instructions: str | None = None
 
 
 class SetDefaultProfileResponse(ActionResult):

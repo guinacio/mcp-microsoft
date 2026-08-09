@@ -1,0 +1,25 @@
+# Keep the Docker build context small and avoid ever baking secrets/dev
+# artifacts (venvs, MCPB bundles, credentials) into an image layer.
+
+.git/
+.github/
+.venv/
+venv/
+dist/
+*.mcpb
+.env
+.env.*
+!.env.template
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+
+.claude/
+.vscode/
+.idea/
+
+tests/
+docs/

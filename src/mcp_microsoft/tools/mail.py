@@ -233,12 +233,14 @@ class BulkTrashEmailsInput(ToolRequestModel):
     message_ids: list[str] | None = None
     folder: str | None = None
     profile: str | None = None
+    confirm: bool = False
 
 
 class BulkDeleteEmailsInput(ToolRequestModel):
     message_ids: list[str] | None = None
     folder: str | None = None
     profile: str | None = None
+    confirm: bool = False
 
 
 def _body_text(body: GraphItemBody) -> str:
@@ -1039,6 +1041,44 @@ async def _collect_folder_message_ids(g: Any, folder: str) -> list[str]:
     return ids
 
 
+async def _bulk_confirmation_error(
+    *,
+    confirm: bool,
+    ctx: Context | None,
+    message_count: int,
+    folder: str | None,
+    permanent: bool,
+) -> str | None:
+    """Return an error unless a required bulk-operation confirmation succeeds."""
+    folder_mode = folder is not None
+    if folder_mode and not confirm:
+        action = "permanent deletion" if permanent else "trashing"
+        return (
+            f"Folder-wide {action} requires confirm=True so the message count "
+            "can be shown to the user before continuing."
+        )
+    if not confirm:
+        return None
+    if ctx is None:
+        return (
+            "confirm=True requires an MCP host that supports elicitation. "
+            "The bulk operation was not performed."
+        )
+
+    scope = f" from '{folder}'" if folder else ""
+    if permanent:
+        prompt = (
+            f"Permanently delete {message_count} messages{scope}? "
+            "This action is IRREVERSIBLE."
+        )
+    else:
+        prompt = f"Move {message_count} messages{scope} to Deleted Items?"
+    result = await ctx.elicit(prompt, response_type=_Confirmation)
+    if result.action != "accept" or not result.data.confirmed:
+        return "Cancelled by user."
+    return None
+
+
 async def bulk_move_emails(
     params: BulkMoveEmailsInput,
 ) -> BulkMoveEmailsResponse:
@@ -1112,6 +1152,7 @@ async def bulk_move_emails(
 
 async def bulk_trash_emails(
     params: BulkTrashEmailsInput,
+    ctx: Context | None = None,
 ) -> BulkTrashEmailsResponse:
     """
     Move multiple messages to Deleted Items (soft delete / recoverable).
@@ -1128,6 +1169,8 @@ async def bulk_trash_emails(
         folder: Trash all messages from this folder instead of specifying IDs.
             Well-known names: inbox, sentitems, drafts, junkemail, archive.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
+        confirm: Required for folder-wide operations. Prompts with the target
+            count before moving any messages.
 
     Returns:
         Summary with success/failure counts, new message IDs, and failure details.
@@ -1140,6 +1183,23 @@ async def bulk_trash_emails(
 
     if not message_ids:
         return BulkTrashEmailsResponse(success=True, action="bulk_trash", total=0, succeeded=0, failed=0)
+
+    confirmation_error = await _bulk_confirmation_error(
+        confirm=params.confirm,
+        ctx=ctx,
+        message_count=len(message_ids),
+        folder=params.folder if params.folder and not params.message_ids else None,
+        permanent=False,
+    )
+    if confirmation_error:
+        return BulkTrashEmailsResponse(
+            success=False,
+            action="bulk_trash",
+            total=len(message_ids),
+            succeeded=0,
+            failed=0,
+            error=confirmation_error,
+        )
 
     plan = _build_batch_requests(
         message_ids,
@@ -1178,6 +1238,7 @@ async def bulk_trash_emails(
 
 async def bulk_delete_emails(
     params: BulkDeleteEmailsInput,
+    ctx: Context | None = None,
 ) -> BulkDeleteEmailsResponse:
     """
     Permanently delete multiple messages from the mailbox. This action is IRREVERSIBLE.
@@ -1197,6 +1258,8 @@ async def bulk_delete_emails(
             specifying IDs. Well-known names: inbox, sentitems, drafts,
             deleteditems, junkemail, archive.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
+        confirm: Required for folder-wide operations. Prompts with the target
+            count and irreversible-action warning before deleting anything.
 
     Returns:
         Summary with success/failure counts and failure details.
@@ -1209,6 +1272,24 @@ async def bulk_delete_emails(
 
     if not message_ids:
         return BulkDeleteEmailsResponse(success=True, action="bulk_permanent_delete", total=0, succeeded=0, failed=0, irreversible=True)
+
+    confirmation_error = await _bulk_confirmation_error(
+        confirm=params.confirm,
+        ctx=ctx,
+        message_count=len(message_ids),
+        folder=params.folder if params.folder and not params.message_ids else None,
+        permanent=True,
+    )
+    if confirmation_error:
+        return BulkDeleteEmailsResponse(
+            success=False,
+            action="bulk_permanent_delete",
+            total=len(message_ids),
+            succeeded=0,
+            failed=0,
+            irreversible=True,
+            error=confirmation_error,
+        )
 
     plan = _build_batch_requests(
         message_ids,

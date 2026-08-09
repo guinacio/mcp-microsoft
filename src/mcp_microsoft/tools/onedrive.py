@@ -18,11 +18,13 @@ Implemented:
 from __future__ import annotations
 
 import asyncio
+import logging
 import httpx
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 
 from pydantic import Field
@@ -31,6 +33,7 @@ from mcp_microsoft.common.formatting import drive_item_payload, format_datetime_
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.transfer import upload_large_file_via_session
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.config import get_app_config
 from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph_types import GraphDriveItem, graph_identity_display, parse_graph_collection
 from mcp_microsoft.models import (
@@ -45,6 +48,8 @@ from mcp_microsoft.models import (
 )
 from mcp_microsoft.graph import get_graph, get_transfer_http_client
 
+_log = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -57,6 +62,7 @@ class UploadFileInput(ToolRequestModel):
     parent_folder_id: str | None = None
     filename: str | None = None
     content_base64: str | None = None
+    uploaded_file: str | None = None
     profile: str | None = None
 
 
@@ -283,33 +289,71 @@ async def upload_file(
     """
     Upload a file to OneDrive.
 
-    Two modes of operation:
+    Three modes of operation:
     1. **Local file**: pass local_path pointing to a file on the MCP server host.
        Files under 4 MB use simple PUT; larger files use resumable upload.
     2. **Base64 content**: pass content_base64 with the file bytes encoded as
        base64, plus filename. Use this when local filesystem access is not
        available (e.g. container/sandbox environments).
+    3. **Uploaded file**: pass uploaded_file with the name of a file previously
+       uploaded via the file-upload UI (see list_files). The file's bytes never
+       passed through the model's context window.
 
     Args:
         local_path: Optional local file path on the MCP host machine.
         parent_folder_id: Optional destination folder ID. Omit to upload to the OneDrive root.
         filename: Optional override for the uploaded filename. Required when using `content_base64`.
         content_base64: Optional base64-encoded file content when no local path is available.
+        uploaded_file: Optional name of a file previously uploaded via the
+            file-upload UI (see list_files). Mutually exclusive with local_path
+            and content_base64.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured upload confirmation.
     """
+    if params.local_path is not None and get_app_config().transport == "http":
+        raise ToolError(
+            "local_path is not available in multi-user http mode (the server's "
+            "disk is not the caller's disk); use content_base64 instead."
+        )
+
     import base64
     import tempfile
+
+    # File-upload UI source: resolve the stored bytes by name. Mutually
+    # exclusive with the local_path / content_base64 sources.
+    uploaded_bytes: bytes | None = None
+    default_upload_name: str | None = None
+    if params.uploaded_file is not None:
+        if params.local_path is not None or params.content_base64 is not None:
+            raise ToolError(
+                "uploaded_file cannot be combined with local_path or "
+                "content_base64; provide exactly one file source."
+            )
+        from mcp_microsoft.uploads import resolve_uploaded_file
+
+        uploaded_bytes, _content_type = resolve_uploaded_file(params.uploaded_file)
+        default_upload_name = params.uploaded_file
 
     g = get_graph(params.profile)
     temp_local_path: Path | None = None
     local_path = params.local_path
 
     try:
+        # File-upload UI: stream the resolved bytes through a temp file so the
+        # existing small-PUT / chunked-session paths are reused unchanged.
+        if uploaded_bytes is not None:
+            name_for_suffix = params.filename or default_upload_name or "upload"
+            suffix = Path(name_for_suffix).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                # Record the path before writing so a write failure still cleans up.
+                temp_local_path = Path(tmp.name)
+                tmp.write(uploaded_bytes)
+            local_path = temp_local_path
+
         # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
-        if (local_path is None or not local_path.is_file()) and params.content_base64:
+        elif (local_path is None or not local_path.is_file()) and params.content_base64:
             if not params.filename:
                 return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="filename is required when using content_base64.")
             try:
@@ -318,8 +362,9 @@ async def upload_file(
                 return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error=f"Invalid base64: {e}")
             suffix = Path(params.filename).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(raw)
+                # Record the path before writing so a write failure still cleans up.
                 temp_local_path = Path(tmp.name)
+                tmp.write(raw)
             local_path = temp_local_path
 
         if local_path is None:
@@ -328,7 +373,7 @@ async def upload_file(
         if not local_path.is_file():
             return UploadFileResponse(success=False, action="upload_file", path=str(local_path), error="File not found.")
 
-        upload_name = params.filename or local_path.name
+        upload_name = params.filename or default_upload_name or local_path.name
         encoded_name = quote(upload_name, safe="")  # percent-encode for URL path segment
         file_size = local_path.stat().st_size
 
@@ -609,7 +654,13 @@ def register(server) -> None:
     register_tool(server, search_drive, annotations=READ_ONLY_TOOL)
     register_tool(server, create_drive_folder, annotations=WRITE_TOOL)
     register_tool(server, upload_file, annotations=WRITE_TOOL)
-    register_tool(server, download_file, annotations=WRITE_TOOL)
+    if get_app_config().transport == "http":
+        _log.info(
+            "download_file not registered (http transport; server disk is "
+            "not the caller's disk)"
+        )
+    else:
+        register_tool(server, download_file, annotations=WRITE_TOOL)
     register_tool(server, move_or_copy_item, annotations=WRITE_TOOL)
     if not is_deletion_disabled():
         register_tool(server, delete_drive_item, annotations=DESTRUCTIVE_TOOL)

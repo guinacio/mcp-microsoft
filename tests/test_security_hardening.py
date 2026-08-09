@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from mcp_microsoft.config import reset_app_config
 from mcp_microsoft.runtime import reset_runtime_state
 from mcp_microsoft.tools import mail
-from mcp_microsoft.tools.mail import DeleteEmailInput, delete_email
+from mcp_microsoft.tools.mail import (
+    BulkDeleteEmailsInput,
+    BulkTrashEmailsInput,
+    DeleteEmailInput,
+    bulk_delete_emails,
+    bulk_trash_emails,
+    delete_email,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +65,117 @@ async def test_delete_email_with_confirm_false_still_deletes(monkeypatch: pytest
 
     assert result.success is True
     assert captured["path"] == "/me/messages/msg-2/permanentDelete"
+
+
+class _BulkGraph:
+    def __init__(self) -> None:
+        self.batch_called = False
+
+    async def get(self, path: str, params: dict | None = None):
+        return {"value": [{"id": "msg-1"}, {"id": "msg-2"}]}
+
+    async def batch(self, requests: list[dict]):
+        self.batch_called = True
+        return [
+            {"id": request["id"], "status": 204}
+            for request in requests
+        ]
+
+
+class _AcceptingContext:
+    def __init__(self) -> None:
+        self.prompt = ""
+
+    async def elicit(self, prompt: str, response_type):
+        self.prompt = prompt
+        return SimpleNamespace(
+            action="accept",
+            data=SimpleNamespace(confirmed=True),
+        )
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_folder_without_confirmation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = _BulkGraph()
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: graph)
+
+    result = await bulk_delete_emails(BulkDeleteEmailsInput(folder="inbox"))
+
+    assert result.success is False
+    assert result.total == 2
+    assert "requires confirm=True" in (result.error or "")
+    assert graph.batch_called is False
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_folder_prompts_with_count_before_deleting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = _BulkGraph()
+    ctx = _AcceptingContext()
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: graph)
+
+    result = await bulk_delete_emails(
+        BulkDeleteEmailsInput(folder="inbox", confirm=True),
+        ctx=ctx,
+    )
+
+    assert result.success is True
+    assert result.succeeded == 2
+    assert "Permanently delete 2 messages from 'inbox'" in ctx.prompt
+    assert "IRREVERSIBLE" in ctx.prompt
+    assert graph.batch_called is True
+
+
+@pytest.mark.asyncio
+async def test_bulk_trash_folder_without_confirmation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = _BulkGraph()
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: graph)
+
+    result = await bulk_trash_emails(BulkTrashEmailsInput(folder="junkemail"))
+
+    assert result.success is False
+    assert "requires confirm=True" in (result.error or "")
+    assert graph.batch_called is False
+
+
+@pytest.mark.asyncio
+async def test_bulk_trash_folder_confirm_without_context_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = _BulkGraph()
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: graph)
+
+    result = await bulk_trash_emails(
+        BulkTrashEmailsInput(folder="junkemail", confirm=True),
+        ctx=None,
+    )
+
+    assert result.success is False
+    assert result.total == 2
+    assert "supports elicitation" in (result.error or "")
+    assert graph.batch_called is False
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_explicit_ids_can_bypass_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = _BulkGraph()
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: graph)
+
+    result = await bulk_delete_emails(
+        BulkDeleteEmailsInput(message_ids=["msg-1"], confirm=False),
+        ctx=None,
+    )
+
+    assert result.success is True
+    assert result.succeeded == 1
+    assert graph.batch_called is True
 
 
 @pytest.mark.asyncio

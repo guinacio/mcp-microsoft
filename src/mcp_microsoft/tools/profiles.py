@@ -14,6 +14,8 @@ Implemented:
 
 from __future__ import annotations
 
+import asyncio
+
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.tooling import (
     LOCAL_DESTRUCTIVE_TOOL,
@@ -178,40 +180,80 @@ async def remove_ms_profile(params: ProfileNameInput) -> RemoveProfileResponse:
 
 async def authenticate_ms_profile(params: AuthenticateProfileInput) -> AuthenticateProfileResponse:
     """
-    Trigger authentication for a profile.
+    Start or check a sign-in for a profile (non-blocking device-code flow).
 
-    Tries interactive browser auth first. If no browser is available
-    (e.g. MCPB, SSH, containers), falls back to device code flow and
-    returns instructions to sign in at https://microsoft.com/devicelogin.
+    First call: starts the sign-in and returns immediately with status
+    "awaiting_user", a verification_uri and a user_code. IMPORTANT: show the
+    URL and code to the user in the chat — they must open the URL in a browser
+    and enter the code. This tool never waits for them.
+
+    Follow-up calls: report progress. Status stays "awaiting_user" (same code)
+    until the user finishes; it becomes "authenticated" once sign-in completes.
+    Tokens are then cached on disk and refreshed silently, so all other
+    Microsoft 365 tools work without further sign-ins.
 
     Args:
         profile: Profile name to authenticate. Omit to use the default profile.
 
     Returns:
-        Structured authentication result. Check device_code_message for
-        sign-in instructions when running headless.
+        Structured authentication state. When status is "awaiting_user", relay
+        verification_uri and user_code to the user, then call this tool again
+        after they confirm they signed in. When status is "error", calling
+        again starts a fresh sign-in.
     """
     pm = get_profile_manager()
     try:
         cfg = pm.resolve_profile(params.profile)
-        # Force token acquisition (will trigger interactive or device code)
-        pm.get_token(cfg.name)
+        # begin_device_login does network I/O (silent probe / flow initiation)
+        # but never waits for the user; to_thread keeps the event loop free.
+        info = await asyncio.to_thread(pm.begin_device_login, cfg.name)
     except (ValueError, RuntimeError) as exc:
         return AuthenticateProfileResponse(
             success=False,
             action="authenticate_profile",
             profile=params.profile,
+            status="error",
             error=str(exc),
-            device_code_message=getattr(pm, "_last_device_code_message", None),
+        )
+
+    if info["status"] == "authenticated":
+        return AuthenticateProfileResponse(
+            success=True,
+            action="authenticate_profile",
+            profile=cfg.name,
+            tenant_id=cfg.tenant_id,
+            cache_path=str(cfg.cache_path),
+            status="authenticated",
+            instructions="Signed in. All Microsoft 365 tools are ready to use.",
+        )
+
+    if info["status"] == "awaiting_user":
+        return AuthenticateProfileResponse(
+            success=True,
+            action="authenticate_profile",
+            profile=cfg.name,
+            tenant_id=cfg.tenant_id,
+            cache_path=str(cfg.cache_path),
+            status="awaiting_user",
+            user_code=info["user_code"],
+            verification_uri=info["verification_uri"],
+            expires_in_seconds=info["expires_in_seconds"],
+            device_code_message=info["message"],
+            instructions=(
+                "Show verification_uri and user_code to the user now and ask "
+                "them to complete the sign-in in their browser. After they "
+                "confirm, call authenticate_ms_profile again to verify."
+            ),
         )
 
     return AuthenticateProfileResponse(
-        success=True,
+        success=False,
         action="authenticate_profile",
         profile=cfg.name,
         tenant_id=cfg.tenant_id,
-        cache_path=str(cfg.cache_path),
-        device_code_message=getattr(pm, "_last_device_code_message", None),
+        status="error",
+        error=info.get("error", "Authentication failed."),
+        instructions="Call authenticate_ms_profile again to start a fresh sign-in.",
     )
 
 

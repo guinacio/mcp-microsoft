@@ -25,10 +25,12 @@ Implemented:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 
 from mcp_microsoft.common.formatting import drive_item_payload, format_datetime_display, format_size_display
@@ -67,8 +69,11 @@ from mcp_microsoft.models import (
     UpdateListItemResponse,
     UploadSiteFileResponse,
 )
+from mcp_microsoft.config import get_app_config
 from mcp_microsoft.graph import get_graph
-from mcp_microsoft.profiles import get_profile_manager
+from mcp_microsoft.profiles import _PERSONAL_TENANT_IDS, get_profile_manager
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -84,6 +89,7 @@ class UploadToSiteInput(ToolRequestModel):
     folder_id: str | None = None
     filename: str | None = None
     content_base64: str | None = None
+    uploaded_file: str | None = None
     profile: str | None = None
 
 
@@ -185,15 +191,45 @@ def _site_payload(site: GraphSite) -> SharePointSiteInfo:
 
 
 
+_CONSUMER_TENANT_ERROR = (
+    "SharePoint tools require a work or school Microsoft 365 account. "
+    "Use a profile configured for an organization tenant."
+)
+
+
+def _reject_consumer_tenant_from_token() -> None:
+    """Reject consumer tenants in http mode using the caller's token claims.
+
+    http mode has no profile to inspect, so the tenant is taken from the ``tid``
+    claim embedded in the validated FastMCP access token. When the claims are
+    unavailable or omit ``tid``, proceed — Graph itself returns 401/403 if the
+    account is unsupported.
+    """
+    from fastmcp.server.dependencies import get_access_token
+
+    access_token = get_access_token()
+    if access_token is None:
+        return
+    tid = (access_token.claims.get("tid") or "").strip().lower()
+    if tid and tid in _PERSONAL_TENANT_IDS:
+        raise ValueError(_CONSUMER_TENANT_ERROR)
+
+
 def _get_sharepoint_graph(profile: str | None):
-    """Resolve a profile and return a Graph client with a clearer consumer-tenant error."""
+    """Return a Graph client for SharePoint, rejecting consumer tenants.
+
+    stdio mode reads the tenant from the resolved profile. http mode has no
+    profile (ProfileManager may hold zero profiles), so it derives the tenant
+    from the caller's bearer-token ``tid`` claim instead.
+    """
+    if get_app_config().transport == "http":
+        _reject_consumer_tenant_from_token()
+        return get_graph(profile)
+
     cfg = get_profile_manager().resolve_profile(profile)
     tenant_id = (cfg.tenant_id or "").strip().lower()
-    if tenant_id in {"consumers", "9188040d-6c67-4c5b-b112-36a304b66dad"}:
-        raise ValueError(
-            "SharePoint tools require a work or school Microsoft 365 account. "
-            "Use a profile configured for an organization tenant."
-        )
+    if tenant_id in _PERSONAL_TENANT_IDS:
+        raise ValueError(_CONSUMER_TENANT_ERROR)
     return get_graph(profile)
 
 
@@ -453,6 +489,10 @@ async def upload_to_site(
     local filesystem access is not available (e.g. container environments).
     When using content_base64, filename is required.
 
+    You may also pass uploaded_file with the name of a file previously uploaded
+    via the file-upload UI (see list_files); its bytes never passed through the
+    model's context window.
+
     Args:
         site_id: The SharePoint site ID.
         drive_id: The document library (drive) ID.
@@ -460,21 +500,56 @@ async def upload_to_site(
         folder_id: Optional destination folder ID inside the document library.
         filename: Optional upload filename override. Required when using `content_base64`.
         content_base64: Optional base64-encoded file content when no local path is available.
+        uploaded_file: Optional name of a file previously uploaded via the
+            file-upload UI (see list_files). Mutually exclusive with local_path
+            and content_base64.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
         Structured upload confirmation.
     """
+    if params.local_path is not None and get_app_config().transport == "http":
+        raise ToolError(
+            "local_path is not available in multi-user http mode (the server's "
+            "disk is not the caller's disk); use content_base64 instead."
+        )
+
     import base64
     import tempfile
+
+    # File-upload UI source: resolve the stored bytes by name. Mutually
+    # exclusive with the local_path / content_base64 sources.
+    uploaded_bytes: bytes | None = None
+    default_upload_name: str | None = None
+    if params.uploaded_file is not None:
+        if params.local_path is not None or params.content_base64 is not None:
+            raise ToolError(
+                "uploaded_file cannot be combined with local_path or "
+                "content_base64; provide exactly one file source."
+            )
+        from mcp_microsoft.uploads import resolve_uploaded_file
+
+        uploaded_bytes, _content_type = resolve_uploaded_file(params.uploaded_file)
+        default_upload_name = params.uploaded_file
 
     g = _get_sharepoint_graph(params.profile)
     temp_local_path: Path | None = None
     local_path = params.local_path
 
     try:
+        # File-upload UI: stream the resolved bytes through a temp file so the
+        # existing small-PUT / chunked-session paths are reused unchanged.
+        if uploaded_bytes is not None:
+            name_for_suffix = params.filename or default_upload_name or "upload"
+            suffix = Path(name_for_suffix).suffix
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                # Record the path before writing so a write failure still cleans up.
+                temp_local_path = Path(tmp.name)
+                tmp.write(uploaded_bytes)
+            local_path = temp_local_path
+
         # Base64 fallback: decode into a generated temp file instead of trusting the caller's path.
-        if (local_path is None or not local_path.is_file()) and params.content_base64:
+        elif (local_path is None or not local_path.is_file()) and params.content_base64:
             if not params.filename:
                 return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="filename is required when using content_base64.")
             try:
@@ -483,8 +558,9 @@ async def upload_to_site(
                 return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error=f"Invalid base64: {e}")
             suffix = Path(params.filename).suffix
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(raw)
+                # Record the path before writing so a write failure still cleans up.
                 temp_local_path = Path(tmp.name)
+                tmp.write(raw)
             local_path = temp_local_path
 
         if local_path is None:
@@ -493,7 +569,7 @@ async def upload_to_site(
         if not local_path.is_file():
             return UploadSiteFileResponse(success=False, action="upload_to_site", path=str(local_path), error="File not found.")
 
-        upload_name = params.filename or local_path.name
+        upload_name = params.filename or default_upload_name or local_path.name
         encoded_name = quote(upload_name, safe="")
         file_size = local_path.stat().st_size
 
@@ -1015,7 +1091,13 @@ def register(server) -> None:
     register_tool(server, list_site_files, annotations=READ_ONLY_TOOL)
     register_tool(server, get_site_file, annotations=READ_ONLY_TOOL)
     register_tool(server, upload_to_site, annotations=WRITE_TOOL)
-    register_tool(server, download_from_site, annotations=WRITE_TOOL)
+    if get_app_config().transport == "http":
+        _log.info(
+            "download_from_site not registered (http transport; server disk "
+            "is not the caller's disk)"
+        )
+    else:
+        register_tool(server, download_from_site, annotations=WRITE_TOOL)
     register_tool(server, list_site_lists, annotations=READ_ONLY_TOOL)
     register_tool(server, get_list_items, annotations=READ_ONLY_TOOL)
     register_tool(server, create_list_item, annotations=WRITE_TOOL)

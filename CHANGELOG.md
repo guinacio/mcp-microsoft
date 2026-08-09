@@ -7,6 +7,70 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.9.1] — 2026-07-25
+
+### Security
+
+- **Python package upgrades** — addressed all Critical and High CVEs identified in Docker image scan:
+  - `mcp` 1.26.0 → 1.28.1 (CVE-2026-52869, CVE-2026-52870 HIGH — session hijacking via SSE/Streamable HTTP and task cross-session access; CVE-2026-59950 HIGH — WebSocket transport missing Origin validation)
+  - `cryptography` 46.0.6 → 48.0.1 (CVE-2026-39892 CRITICAL — buffer overflow with non-contiguous buffers; GHSA-537c-gmf6-5ccf HIGH — bundled OpenSSL)
+  - `click` 8.3.1 → 8.4.2 (CVE-2026-7246 HIGH — command injection in `click.edit()`)
+  - `pyjwt` 2.12.1 → 2.13.0 (CVE-2026-48526 HIGH — algorithm confusion; CVE-2026-48522/23/25 MEDIUM — SSRF via JWKS, algorithm allow-list bypass, unauthenticated DoS)
+  - `urllib3` 2.6.3 → 2.7.0 (CVE-2026-44432 HIGH — excessive decompression; CVE-2026-44431 MEDIUM — sensitive header forwarding on cross-origin redirects)
+  - `idna` 3.11 → 3.18 (CVE-2026-45409 MEDIUM — ReDoS via `valid_contexto`)
+- **Dockerfile** — added `apt-get upgrade` to both builder and runtime stages to apply all pending Debian OS-layer security patches (covers `perl`, `glibc`, `sqlite3`, `util-linux` CVEs reported by image scan).
+
+---
+
+## [0.9.0] — 2026-07-12
+
+### Added
+
+- **Context-free file uploads via FastMCP's FileUpload app** (`src/mcp_microsoft/uploads.py`, `fastmcp[apps]` → prefab-ui). Replaces the "base64 as a tool argument" pattern that forced a file's entire content through the model's context window. Users drag-and-drop files into an interactive UI (requires an MCP-Apps-capable client, e.g. Claude Desktop); the files travel **straight to the server**, into a per-user upload area, without touching the model. `upload_file` (OneDrive) and `upload_to_site` (SharePoint) gain an `uploaded_file` parameter that consumes a stored file **by name** — mutually exclusive with `local_path`/`content_base64`, filename defaulting to the uploaded name — and streams its bytes into the existing small-PUT / chunked-session upload paths unchanged.
+  - **Enabled by default in http mode, disabled in stdio** (local users already have `local_path`). Explicit `MCP_ENABLE_FILE_UPLOAD` wins either way. `MCP_UPLOAD_MAX_MB` (default `10`, positive integer) caps per-file size.
+  - **`ScopedFileUpload`** subclasses the stock provider with the two things a long-running multi-user server needs: (1) **per-caller scoping** on the validated Entra `oid` claim (stable across reconnects and stateless HTTP, where the stock `session_id` keying is not), falling back to session id then a shared default, resolved the same way the audit middleware reads identity and never raising; and (2) **bounds** on the otherwise-unbounded in-memory store — per-user file count (20) and total bytes (100 MB), a global whole-scope LRU cap (1000 users) mirroring the metrics user-cap, and idle-scope TTL pruning (2 h) mirroring the rate limiter's lazy sweep. Over-quota stores raise a clear `ValueError`; eviction/prune counters are exposed as attributes. Uploaded content lives only in process memory and is never logged.
+  - Provider tools flow through the same http middleware stack (rate limiting, audit logging, metrics) as every other tool — verified by test.
+
+### Changed
+
+- **Dependency**: `fastmcp[azure]>=3.4.4` → `fastmcp[azure,apps]>=3.4.4` (adds prefab-ui 0.20.2 for the FileUpload app).
+
+---
+
+## [0.8.0] — 2026-07-12
+
+### Added
+
+- **Multi-user Streamable HTTP server mode** (`MCP_TRANSPORT=http`), alongside the existing single-user `stdio` mode (default, unchanged). Any number of users connect concurrently over MCP Streamable HTTP (spec 2025-11-25, `/mcp`) and each authenticates with their own Microsoft work/school account via Microsoft Entra ID OAuth; every Graph call then runs under that user's delegated identity.
+  - **Auth**: FastMCP's `AzureProvider` (OAuth-proxy pattern, bridging Entra's lack of Dynamic Client Registration for MCP clients) plus a per-user **On-Behalf-Of** token exchange for Microsoft Graph (`src/mcp_microsoft/identity.py`: `TokenProvider` protocol, `ProfileTokenProvider` for stdio, `OboTokenProvider` for http). `graph.get_graph()` is now transport-aware; the `profile` argument on every Graph tool is silently ignored in http mode — identity always comes from the caller's bearer token.
+  - **New config surface** (`config.py`): `MCP_TRANSPORT`, `MCP_HTTP_HOST` (default `127.0.0.1`), `MCP_HTTP_PORT` (default `8000`), `MCP_HTTP_STATELESS` (default `false`), `MCP_BASE_URL`, `MCP_AUTH_CLIENT_ID`/`MCP_AUTH_CLIENT_SECRET`/`MCP_AUTH_TENANT_ID`, `MCP_AUTH_REQUIRED_SCOPE` (default `mcp-access`), `MCP_RATE_LIMIT_RPS` (default `10`). `validate_http_config()` fails startup fast and clearly when http mode is missing required auth config; stdio mode ignores all of it.
+  - **Tool registration differences in http mode**: profile-management tools (`add_ms_profile`, `list_ms_profiles`, `remove_ms_profile`, `authenticate_ms_profile`, `set_default_ms_profile`) are not registered — identity management is a server-operator/stdio concern, not something a remote user should be able to do. Feature flags (`MCP_ENABLE_TEAMS`, `MCP_ENABLE_SHAREPOINT`, `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS`, `MCP_ENABLE_TEAMS_AI_INSIGHTS`) must be set explicitly in http mode — the corporate-account auto-detect fallback used by manual stdio installs doesn't apply (there's no single profile to inspect).
+  - **Audience**: http mode targets a single work/school tenant. `MCP_AUTH_TENANT_ID` must be the concrete **tenant GUID** — pseudo-tenants (`organizations`, `common`, `consumers`) and verified domains (`contoso.onmicrosoft.com`) are rejected at startup, because fastmcp's `AzureProvider` pins the accepted token issuer to a literal URL built from this value and real Entra tokens carry the concrete GUID in `iss`, so only the GUID validates. Personal Microsoft accounts remain stdio-only — On-Behalf-Of and custom API scopes aren't reliably supported for consumer accounts. Multi-tenant deployments are future work (issuer-skip + per-tenant OBO authority).
+
+### Security
+
+- **Local-disk tool gating in http mode** (`tools/onedrive.py`, `tools/sharepoint.py`, `tools/teams.py`, `tools/attachments.py`, `tools/contacts.py`). The server's local disk is not the caller's disk in a multi-user deployment: `download_file`, `download_from_site`, and `teams_download_meeting_recording` are not registered at all in http mode, and `upload_file`/`upload_to_site` (`local_path`), `download_attachment` (`save_path`), and `get_contact_photo` (`save_path`) reject those parameters at call time with an explanatory error instead of touching the filesystem.
+- **Rate limiting** (`middleware.py`: `UserRateLimitMiddleware`) — bounded per-user (`tid`+`oid`) token-bucket limit, `MCP_RATE_LIMIT_RPS` (default 10 req/s, burst 2×); set to `0` or negative to disable. Replaces fastmcp's `RateLimitingMiddleware`, which keyed every request under one shared `"global"` bucket (one user could throttle all) and backed its per-client limiters with a `defaultdict` that never evicted; ours keys per user and bounds memory (LRU cap of 10,000 keys + idle-TTL pruning). Client-visible behavior is unchanged (same token-bucket semantics; over-limit raises the same `RateLimitError`).
+- **Audit logging** (`middleware.py`: `AuditLoggingMiddleware`) — one line per tool call in http mode: tool name, caller `oid` + `preferred_username` (from the validated bearer token's claims), duration, and success/error outcome. Arguments, results, and the token itself are never logged.
+- **Error masking** — `mask_error_details=True` in http mode so internal exception details never leak to remote clients (stdio mode is unaffected).
+- **Unauthenticated `GET /health`** (`server.py`) for load balancers/container healthchecks — returns `200 {"status": "ok", "transport": "http"}` without a bearer token, since it's mounted outside FastMCP's auth-wrapped MCP route.
+- **Token-gated observability** (`metrics.py`, `middleware.py`, `server.py`) — DevOps traffic/usage metrics for http mode, **off by default** and enabled only when `MCP_STATS_TOKEN` is set. An in-process `MetricsRegistry` aggregates global totals, a rolling 60-minute per-minute traffic timeline, per-tool latency (p50/p95/avg over the last 256 calls), and per-user activity (capped at 1000 identities with least-recently-seen eviction). A `MetricsMiddleware` (registered after audit logging) feeds it without ever affecting the observed call. Three same-server routes require the token (Bearer or HTTP Basic password, timing-safe comparison, never logged): `GET /metrics` (Prometheus text exposition — `mcp_uptime_seconds`, `mcp_calls_total`, `mcp_errors_total`, `mcp_users_tracked`, `mcp_users_evicted_total`, and per-tool `mcp_tool_calls_total`/`mcp_tool_errors_total`/`mcp_tool_duration_ms`, with **no per-user label series** to avoid unbounded cardinality), `GET /stats` (JSON snapshot), and `GET /dashboard` (one self-contained HTML page, no external requests, polling `/stats` every 10s). Metrics are in-memory and reset on restart; no tool arguments, results, or tokens are ever recorded — only `oid`/`username`, the same exposure as the audit log. When `MCP_STATS_TOKEN` is unset the routes are not registered at all. stdio mode is entirely unaffected.
+- The existing deletion kill-switch (`MCP_DISABLE_DELETION_TOOLS`) and Teams/SharePoint feature gating both continue to work identically in http mode.
+- **Single-worker constraint, documented**: the OAuth-proxy client store and the per-user OBO credential cache both live in-process memory. Run exactly one worker in http mode; horizontal scaling needs fastmcp's external `client_storage` backend, which is not wired up here (documented as future work in README.md).
+
+### Changed
+
+- Dependency floor: `fastmcp[azure]>=3.4.4` (pulls in `azure-identity` for the OBO exchange).
+- `docs/azure-setup.md` — added a new "App registration for the remote (http) server" walkthrough: confidential client, Web platform, redirect URI, Expose an API / `mcp-access` scope, `requestedAccessTokenVersion: 2`, client secret, delegated Graph permissions, admin consent. This is explicitly a **separate** App Registration from the stdio public-client one (different platform type).
+- `README.md` — new "Remote server — multi-user (Streamable HTTP)" section: what it is, quickstart, how MCP clients connect, the full list of http-mode behavioral differences, and a security-notes subsection.
+- Added `Dockerfile`, `docker-compose.yml`, and an expanded `.env.template` for running the http server (image runs as a non-root user; healthcheck against `/health`; compose file documents TLS termination via a reverse proxy — `MCP_BASE_URL` must equal the proxy's public HTTPS URL).
+
+### Compatibility
+
+- **stdio mode (MCPB / Claude Desktop / from-source) is unchanged.** No new required configuration, no behavior change, no new dependencies pulled onto the request path. `manifest.json` and the MCPB bundles remain stdio-only.
+
+---
+
 ## [0.7.0] — 2026-05-26
 
 ### Security

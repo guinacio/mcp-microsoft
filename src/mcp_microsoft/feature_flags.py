@@ -60,6 +60,12 @@ def resolve_optional_service_enabled(
     if explicit is not None:
         return explicit
 
+    # http (multi-user remote) mode has no single default profile, so the
+    # corporate-account heuristic can't apply — flags must be explicit there.
+    runtime_config = config or get_app_config()
+    if runtime_config.transport == "http":
+        return False
+
     try:
         from mcp_microsoft.profiles import is_corporate_account
 
@@ -93,6 +99,56 @@ def is_teams_ai_insights_enabled(config: AppConfig | None = None) -> bool:
     if not is_teams_enabled(config=runtime_config):
         return False
     return bool(runtime_config.enable_teams_ai_insights)
+
+
+def is_file_upload_enabled(config: AppConfig | None = None) -> bool:
+    """Return True when the context-free file-upload app should be registered.
+
+    Tri-state resolution mirroring the other optional-service flags, but with a
+    transport-aware default rather than a corporate-account fallback: an explicit
+    ``MCP_ENABLE_FILE_UPLOAD`` (truthy or falsy) always wins; when unset the
+    feature is ON in http mode (remote callers have no local disk to pass via
+    ``local_path``) and OFF in stdio mode (local users already have ``local_path``).
+    """
+    runtime_config = config or get_app_config()
+    explicit = runtime_config.enable_file_upload
+    if explicit is not None:
+        return explicit
+    return runtime_config.transport == "http"
+
+
+def resolve_upload_max_bytes(config: AppConfig | None = None) -> int:
+    """Return the per-file upload size limit in bytes, validating it is positive.
+
+    Raises:
+        ValueError: if ``upload_max_mb`` is not a positive integer.
+    """
+    runtime_config = config or get_app_config()
+    mb = runtime_config.upload_max_mb
+    if mb <= 0:
+        raise ValueError(
+            f"MCP_UPLOAD_MAX_MB must be a positive integer (got {mb})."
+        )
+    return mb * 1024 * 1024
+
+
+def resolve_upload_global_budget_bytes(config: AppConfig | None = None) -> int:
+    """Return the global encoded-byte upload budget in bytes, validating positivity.
+
+    Bounds the total base64 footprint of all uploaded files across every scope
+    held in process memory (``uploads.ScopedFileUpload`` enforces it). Consistent
+    with :func:`resolve_upload_max_bytes`: rejects a non-positive value.
+
+    Raises:
+        ValueError: if ``upload_global_budget_mb`` is not a positive integer.
+    """
+    runtime_config = config or get_app_config()
+    mb = runtime_config.upload_global_budget_mb
+    if mb <= 0:
+        raise ValueError(
+            f"MCP_UPLOAD_GLOBAL_BUDGET_MB must be a positive integer (got {mb})."
+        )
+    return mb * 1024 * 1024
 
 
 def is_deletion_disabled(config: AppConfig | None = None) -> bool:
