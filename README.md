@@ -3,7 +3,7 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 ![MCP](https://img.shields.io/badge/MCP-compatible-purple)
-[![Tests](https://github.com/guilhermeinacio/mcp-microsoft/actions/workflows/ci.yml/badge.svg)](https://github.com/guilhermeinacio/mcp-microsoft/actions/workflows/ci.yml)
+[![Tests](https://github.com/guinacio/mcp-microsoft/actions/workflows/ci.yml/badge.svg)](https://github.com/guinacio/mcp-microsoft/actions/workflows/ci.yml)
 [![SafeSkill 91/100](https://img.shields.io/badge/SafeSkill-91%2F100_Verified%20Safe-brightgreen)](https://safeskill.dev/scan/guinacio-mcp-microsoft)
 
 Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, Contacts, and Teams via the Microsoft Graph API, with multi-account support.
@@ -144,7 +144,7 @@ A `default` profile is created automatically from these values.
 ### Option B: From Source
 
 ```bash
-git clone https://github.com/guilhermeinacio/mcp-microsoft.git
+git clone https://github.com/guinacio/mcp-microsoft.git
 cd mcp-microsoft
 uv sync
 export MS365_CLIENT_ID=your-client-id
