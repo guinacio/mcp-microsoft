@@ -355,7 +355,10 @@ async def list_emails(
         "$orderby": order,
     }
     if params.unread_only:
-        query["$filter"] = "isRead eq false"
+        # Graph requires an $orderby property to appear first in $filter.
+        query["$filter"] = (
+            "receivedDateTime ge 1900-01-01T00:00:00Z and isRead eq false"
+        )
     if params.skip_token is not None:
         query["$skiptoken"] = params.skip_token
 
@@ -471,8 +474,15 @@ async def search_emails(
         Structured search results.
     """
     g = get_graph(params.profile)
+    search_query = params.query.strip()
+    # Graph requires simple search text to be quoted, but callers may supply a
+    # complete KQL expression containing quoted terms or phrases. Wrapping such
+    # an expression again produces invalid KQL.
+    if '"' not in search_query:
+        search_query = f'"{search_query}"'
+
     query_params: dict[str, Any] = {
-        "$search": f'"{params.query}"',
+        "$search": search_query,
         "$top": min(params.max_results, 25),
         "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
     }
@@ -541,7 +551,15 @@ async def filter_emails(
         "$orderby": order,
     }
 
-    # Build OData $filter clauses
+    # Graph requires the $orderby property to appear first in $filter.
+    date_clauses: list[str] = []
+    if params.received_after:
+        ts = params.received_after if "T" in params.received_after else f"{params.received_after}T00:00:00Z"
+        date_clauses.append(f"receivedDateTime ge {ts}")
+    if params.received_before:
+        ts = params.received_before if "T" in params.received_before else f"{params.received_before}T23:59:59Z"
+        date_clauses.append(f"receivedDateTime lt {ts}")
+
     clauses: list[str] = []
     if params.from_address:
         safe = params.from_address.replace("'", "''")
@@ -552,20 +570,15 @@ async def filter_emails(
     if params.subject_contains:
         safe = params.subject_contains.replace("'", "''")
         clauses.append(f"contains(subject, '{safe}')")
-    if params.received_after:
-        # Append time component if only a date was given
-        ts = params.received_after if "T" in params.received_after else f"{params.received_after}T00:00:00Z"
-        clauses.append(f"receivedDateTime ge {ts}")
-    if params.received_before:
-        ts = params.received_before if "T" in params.received_before else f"{params.received_before}T23:59:59Z"
-        clauses.append(f"receivedDateTime lt {ts}")
     if params.has_attachments is not None:
         clauses.append(f"hasAttachments eq {str(params.has_attachments).lower()}")
     if params.importance:
         clauses.append(f"importance eq '{params.importance}'")
 
-    if clauses:
-        query["$filter"] = " and ".join(clauses)
+    if clauses or date_clauses:
+        if not date_clauses:
+            date_clauses.append("receivedDateTime ge 1900-01-01T00:00:00Z")
+        query["$filter"] = " and ".join(date_clauses + clauses)
 
     if params.skip_token is not None:
         query["$skiptoken"] = params.skip_token
