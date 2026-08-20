@@ -474,6 +474,10 @@ _MAIL_KQL_PROPERTIES = frozenset(
         "to",
     }
 )
+_SUBJECT_SEARCH_PATTERN = re.compile(
+    r'^subject\s*:\s*"(?P<subject>(?:\\.|[^"\\])*)"$',
+    flags=re.IGNORECASE,
+)
 
 
 def _normalize_email_search_query(query: str) -> str:
@@ -513,6 +517,15 @@ def _normalize_email_search_query(query: str) -> str:
     return "".join(normalized)
 
 
+def _subject_search_filter(query: str) -> str | None:
+    """Convert a standalone subject phrase to Graph's supported OData filter."""
+    match = _SUBJECT_SEARCH_PATTERN.fullmatch(query.strip())
+    if not match:
+        return None
+    subject = match.group("subject").replace(r'\"', '"').replace("'", "''")
+    return f"contains(subject, '{subject}')"
+
+
 async def search_emails(
     params: SearchEmailsInput,
 ) -> SearchEmailsResponse:
@@ -533,13 +546,15 @@ async def search_emails(
         Structured search results.
     """
     g = get_graph(params.profile)
-    search_query = _normalize_email_search_query(params.query)
-
     query_params: dict[str, Any] = {
-        "$search": search_query,
         "$top": min(params.max_results, 25),
         "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
     }
+    subject_filter = _subject_search_filter(params.query)
+    if subject_filter:
+        query_params["$filter"] = subject_filter
+    else:
+        query_params["$search"] = _normalize_email_search_query(params.query)
 
     if params.folder:
         path = f"/me/mailFolders/{params.folder}/messages"
