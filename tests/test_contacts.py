@@ -341,17 +341,17 @@ async def test_search_contacts_matches_names_and_emails_locally(
 async def test_search_contacts_stops_after_bounded_page_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[dict] = []
+    calls: list[tuple[str, dict | None]] = []
 
     class DummyGraph:
         async def get(self, path: str, params: dict = None, headers: dict = None):
-            calls.append(params.copy())
+            calls.append((path, params.copy() if params else None))
             token = f"page-{len(calls)}"
             return {
                 "value": [{"id": token, "displayName": "No match", "emailAddresses": []}],
                 "@odata.nextLink": (
                     "https://graph.microsoft.com/v1.0/me/contacts?"
-                    f"%24skiptoken={token}"
+                    f"%24top=100&%24skiptoken={token}&%24orderby=displayName"
                 ),
             }
 
@@ -362,55 +362,91 @@ async def test_search_contacts_stops_after_bounded_page_budget(
     assert result.contacts == []
     assert result.pages_scanned == contacts._CONTACT_SEARCH_MAX_PAGES
     assert result.has_more is True
-    assert result.next_page_token == "page-5"
-    assert all(call["$top"] == 25 for call in calls)
+    assert result.next_page_token is not None
+    assert calls[0][1]["$top"] == contacts._CONTACT_SEARCH_SCAN_PAGE_SIZE
+    assert all(params is None for _, params in calls[1:])
+    assert calls[1][0].endswith("%24top=100&%24skiptoken=page-1&%24orderby=displayName")
 
 
 @pytest.mark.asyncio
-async def test_search_contacts_paginates_without_exceeding_top(
+async def test_search_contacts_small_top_finds_late_matches_and_resumes_within_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[dict] = []
+    calls: list[tuple[str, dict | None]] = []
 
     class DummyGraph:
         async def get(self, path: str, params: dict = None, headers: dict = None):
-            calls.append(params.copy())
-            if "$skiptoken" not in params:
+            calls.append((path, params.copy() if params else None))
+            return {
+                "value": [
+                    {"id": "1", "displayName": "Bob", "emailAddresses": []},
+                    {"id": "2", "displayName": "Carol", "emailAddresses": []},
+                    {"id": "3", "displayName": "Dan", "emailAddresses": []},
+                    {"id": "4", "displayName": "Alice A", "emailAddresses": []},
+                    {"id": "5", "displayName": "Alice B", "emailAddresses": []},
+                ]
+            }
+
+    monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
+    first = await contacts.search_contacts(
+        contacts.SearchContactsInput(query="Alice", top=1)
+    )
+    second = await contacts.search_contacts(
+        contacts.SearchContactsInput(
+            query="Alice",
+            top=1,
+            skip_token=first.next_page_token,
+        )
+    )
+
+    assert [contact.id for contact in first.contacts] == ["4"]
+    assert first.has_more is True
+    assert first.next_page_token is not None
+    assert [contact.id for contact in second.contacts] == ["5"]
+    assert second.has_more is False
+    assert second.next_page_token is None
+    assert all(params["$top"] == contacts._CONTACT_SEARCH_SCAN_PAGE_SIZE for _, params in calls)
+
+
+@pytest.mark.asyncio
+async def test_search_contacts_replays_the_entire_graph_next_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict | None]] = []
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None, headers: dict = None):
+            calls.append((path, params.copy() if params else None))
+            if len(calls) == 1:
                 return {
                     "value": [
-                        {"id": "1", "displayName": "Alice A", "emailAddresses": []},
-                        {"id": "x", "displayName": "Bob", "emailAddresses": []},
-                        {"id": "y", "displayName": "Carol", "emailAddresses": []},
+                        {"id": "1", "displayName": "Bob", "emailAddresses": []}
                     ],
                     "@odata.nextLink": (
-                        "https://graph.microsoft.com/v1.0/me/contacts?%24skiptoken=page-2"
+                        "https://graph.microsoft.com/v1.0/me/contacts?"
+                        "%24top=100&%24skiptoken=opaque%2Bvalue%3D&%24orderby=displayName"
                     ),
                 }
             return {
                 "value": [
-                    {"id": "2", "displayName": "Alice B", "emailAddresses": []},
-                    {"id": "3", "displayName": "Alice C", "emailAddresses": []},
-                ],
-                "@odata.nextLink": (
-                    "https://graph.microsoft.com/v1.0/me/contacts?%24skiptoken=page-3"
-                ),
+                    {"id": "2", "displayName": "Alice B", "emailAddresses": []}
+                ]
             }
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
     result = await contacts.search_contacts(
-        contacts.SearchContactsInput(query="Alice", top=3)
+        contacts.SearchContactsInput(query="Alice", top=1)
     )
 
-    assert [contact.id for contact in result.contacts] == ["1", "2", "3"]
-    assert result.next_page_token == "page-3"
-    assert result.has_more is True
-    assert [call["$top"] for call in calls] == [3, 2]
-    assert "$skiptoken" not in calls[0]
-    assert calls[1]["$skiptoken"] == "page-2"
+    assert [contact.id for contact in result.contacts] == ["2"]
+    assert calls[1] == (
+        "/me/contacts?%24top=100&%24skiptoken=opaque%2Bvalue%3D&%24orderby=displayName",
+        None,
+    )
 
 
 @pytest.mark.asyncio
-async def test_search_contacts_uses_returned_graph_cursor(
+async def test_list_contacts_small_top_has_complete_opaque_pagination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict] = []
@@ -420,25 +456,82 @@ async def test_search_contacts_uses_returned_graph_cursor(
             calls.append(params.copy())
             return {
                 "value": [
-                    {"id": "2", "displayName": "Alice B", "emailAddresses": []}
-                ],
-                "@odata.nextLink": (
-                    "https://graph.microsoft.com/v1.0/me/contacts?%24skiptoken=page-3"
-                ),
+                    {"id": str(index), "displayName": f"Contact {index}", "emailAddresses": []}
+                    for index in range(1, 6)
+                ]
             }
 
     monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
-    result = await contacts.search_contacts(
-        contacts.SearchContactsInput(
-            query="Alice",
-            top=1,
-            skip_token="page-2",
-        )
+    first = await contacts.list_contacts(contacts.ListContactsInput(top=2))
+    second = await contacts.list_contacts(
+        contacts.ListContactsInput(top=2, skip_token=first.next_page_token)
+    )
+    third = await contacts.list_contacts(
+        contacts.ListContactsInput(top=2, skip_token=second.next_page_token)
     )
 
-    assert [contact.id for contact in result.contacts] == ["2"]
-    assert calls[0]["$skiptoken"] == "page-2"
-    assert result.next_page_token == "page-3"
+    assert [contact.id for contact in first.contacts] == ["1", "2"]
+    assert [contact.id for contact in second.contacts] == ["3", "4"]
+    assert [contact.id for contact in third.contacts] == ["5"]
+    assert first.has_more is True
+    assert second.has_more is True
+    assert third.has_more is False
+    assert first.next_page_token and first.next_page_token.startswith("c1.")
+    assert all(call["$top"] == contacts._CONTACT_SEARCH_SCAN_PAGE_SIZE for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_search_cursor_is_bound_to_query_and_contact_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None, headers: dict = None):
+            return {
+                "value": [
+                    {"id": "1", "displayName": "Alice", "emailAddresses": []},
+                    {"id": "2", "displayName": "Alice B", "emailAddresses": []},
+                ]
+            }
+
+    monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
+    first = await contacts.search_contacts(
+        contacts.SearchContactsInput(query="Alice", top=1)
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        await contacts.search_contacts(
+            contacts.SearchContactsInput(
+                query="Bob",
+                top=1,
+                skip_token=first.next_page_token,
+            )
+        )
+
+    with pytest.raises(ValueError, match="does not match"):
+        await contacts.list_contacts(
+            contacts.ListContactsInput(
+                folder_id="folder-1",
+                search="Alice",
+                top=1,
+                skip_token=first.next_page_token,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_graph_next_link_outside_expected_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None, headers: dict = None):
+            return {
+                "value": [{"id": "1", "displayName": "Bob", "emailAddresses": []}],
+                "@odata.nextLink": "https://example.com/v1.0/me/contacts?%24skiptoken=x",
+            }
+
+    monkeypatch.setattr(contacts, "get_graph", lambda _profile: DummyGraph())
+    with pytest.raises(ValueError, match="continuation link"):
+        await contacts.search_contacts(contacts.SearchContactsInput(query="Alice"))
 
 
 @pytest.mark.asyncio
