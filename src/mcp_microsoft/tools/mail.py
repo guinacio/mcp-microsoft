@@ -23,6 +23,7 @@ Implemented:
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Literal, Optional
 
 from fastmcp.server.context import Context
@@ -355,7 +356,10 @@ async def list_emails(
         "$orderby": order,
     }
     if params.unread_only:
-        query["$filter"] = "isRead eq false"
+        # Graph requires an $orderby property to appear first in $filter.
+        query["$filter"] = (
+            "receivedDateTime ge 1900-01-01T00:00:00Z and isRead eq false"
+        )
     if params.skip_token is not None:
         query["$skiptoken"] = params.skip_token
 
@@ -451,6 +455,77 @@ async def read_email(
 # ---------------------------------------------------------------------------
 
 
+_KQL_OPERATORS = frozenset({"AND", "OR", "NOT"})
+_MAIL_KQL_PROPERTIES = frozenset(
+    {
+        "attachment",
+        "bcc",
+        "body",
+        "cc",
+        "from",
+        "hasattachment",
+        "importance",
+        "isread",
+        "kind",
+        "participants",
+        "received",
+        "sent",
+        "subject",
+        "to",
+    }
+)
+_SUBJECT_SEARCH_PATTERN = re.compile(
+    r'^subject\s*:\s*"(?P<subject>(?:\\.|[^"\\])*)"$',
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_email_search_query(query: str) -> str:
+    """Preserve structured KQL while quoting punctuation-bearing operands."""
+    query = query.strip()
+    is_structured = bool(
+        '"' in query
+        or "(" in query
+        or ")" in query
+        or re.search(r"\b(?:AND|OR|NOT)\b", query, flags=re.IGNORECASE)
+        or re.search(r"\b[A-Za-z][A-Za-z0-9]*:", query)
+    )
+    if not is_structured:
+        return f'"{query}"'
+
+    parts = re.split(r'("(?:\\.|[^"\\])*"|[()\s]+)', query)
+    normalized: list[str] = []
+    for part in parts:
+        if (
+            not part
+            or part.isspace()
+            or part in {"(", ")"}
+            or (part.startswith('"') and part.endswith('"'))
+            or part.upper() in _KQL_OPERATORS
+        ):
+            normalized.append(part)
+            continue
+
+        property_name, separator, value = part.partition(":")
+        if separator and property_name.casefold() in _MAIL_KQL_PROPERTIES:
+            if value and any(character in value for character in ".@"):
+                part = f'{property_name}:"{value}"'
+        elif any(character in part for character in ".@"):
+            part = f'"{part}"'
+        normalized.append(part)
+
+    return "".join(normalized)
+
+
+def _subject_search_filter(query: str) -> str | None:
+    """Convert a standalone subject phrase to Graph's supported OData filter."""
+    match = _SUBJECT_SEARCH_PATTERN.fullmatch(query.strip())
+    if not match:
+        return None
+    subject = match.group("subject").replace(r'\"', '"').replace("'", "''")
+    return f"contains(subject, '{subject}')"
+
+
 async def search_emails(
     params: SearchEmailsInput,
 ) -> SearchEmailsResponse:
@@ -472,10 +547,14 @@ async def search_emails(
     """
     g = get_graph(params.profile)
     query_params: dict[str, Any] = {
-        "$search": f'"{params.query}"',
         "$top": min(params.max_results, 25),
         "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
     }
+    subject_filter = _subject_search_filter(params.query)
+    if subject_filter:
+        query_params["$filter"] = subject_filter
+    else:
+        query_params["$search"] = _normalize_email_search_query(params.query)
 
     if params.folder:
         path = f"/me/mailFolders/{params.folder}/messages"
@@ -541,7 +620,15 @@ async def filter_emails(
         "$orderby": order,
     }
 
-    # Build OData $filter clauses
+    # Graph requires the $orderby property to appear first in $filter.
+    date_clauses: list[str] = []
+    if params.received_after:
+        ts = params.received_after if "T" in params.received_after else f"{params.received_after}T00:00:00Z"
+        date_clauses.append(f"receivedDateTime ge {ts}")
+    if params.received_before:
+        ts = params.received_before if "T" in params.received_before else f"{params.received_before}T23:59:59Z"
+        date_clauses.append(f"receivedDateTime lt {ts}")
+
     clauses: list[str] = []
     if params.from_address:
         safe = params.from_address.replace("'", "''")
@@ -552,20 +639,15 @@ async def filter_emails(
     if params.subject_contains:
         safe = params.subject_contains.replace("'", "''")
         clauses.append(f"contains(subject, '{safe}')")
-    if params.received_after:
-        # Append time component if only a date was given
-        ts = params.received_after if "T" in params.received_after else f"{params.received_after}T00:00:00Z"
-        clauses.append(f"receivedDateTime ge {ts}")
-    if params.received_before:
-        ts = params.received_before if "T" in params.received_before else f"{params.received_before}T23:59:59Z"
-        clauses.append(f"receivedDateTime lt {ts}")
     if params.has_attachments is not None:
         clauses.append(f"hasAttachments eq {str(params.has_attachments).lower()}")
     if params.importance:
         clauses.append(f"importance eq '{params.importance}'")
 
-    if clauses:
-        query["$filter"] = " and ".join(clauses)
+    if clauses or date_clauses:
+        if not date_clauses:
+            date_clauses.append("receivedDateTime ge 1900-01-01T00:00:00Z")
+        query["$filter"] = " and ".join(date_clauses + clauses)
 
     if params.skip_token is not None:
         query["$skiptoken"] = params.skip_token
