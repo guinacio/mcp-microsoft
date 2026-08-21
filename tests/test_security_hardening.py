@@ -61,6 +61,31 @@ async def test_send_email_with_confirm_true_and_no_ctx_fails_closed() -> None:
     assert "confirm=True requires" in (result.error or "")
 
 
+@pytest.mark.asyncio
+async def test_send_email_without_confirmation_does_not_require_elicitation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def post(self, path: str, json: dict | None = None):
+            captured["path"] = path
+
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: DummyGraph())
+
+    result = await mail.send_email(
+        mail.SendEmailInput(
+            to="recipient@example.com",
+            subject="Test",
+            body="Body",
+        ),
+        ctx=None,
+    )
+
+    assert result.success is True
+    assert captured["path"] == "/me/sendMail"
+
+
 class _EmailConfirmationContext:
     def __init__(self, *, supported: bool, result=None, error: Exception | None = None):
         elicitation = None

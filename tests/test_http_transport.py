@@ -901,9 +901,6 @@ async def test_download_attachment_http_schema_omits_save_path(
         for tool in await mcp.list_tools(run_middleware=False)
         if tool.name == "download_attachment"
     )
-    names = {tool.name for tool in await mcp.list_tools(run_middleware=False)}
-
-    assert "read_attachment" in names
     input_properties = tool.parameters["$defs"]["DownloadAttachmentHttpInput"][
         "properties"
     ]
@@ -916,9 +913,7 @@ async def test_download_attachment_http_schema_omits_save_path(
 
 
 @pytest.mark.asyncio
-async def test_send_email_http_schema_preserves_elicitation_confirmation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_send_email_http_schema_preserves_elicitation_confirmation() -> None:
     from fastmcp import FastMCP
 
     from mcp_microsoft.tools import mail

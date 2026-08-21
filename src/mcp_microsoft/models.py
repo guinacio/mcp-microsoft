@@ -260,16 +260,6 @@ class DownloadAttachmentResponse(ActionResult):
     content_type: str = ""
 
 
-class ReadAttachmentResponse(MCPModel):
-    message_id: str = ""
-    attachment_id: str = ""
-    filename: str = ""
-    content_type: str = ""
-    text: str = ""
-    page_count: int = 0
-    truncated: bool = False
-
-
 class CalendarInfo(MCPModel):
     id: str = ""
     name: str = ""
