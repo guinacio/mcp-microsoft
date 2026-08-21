@@ -53,6 +53,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
@@ -177,7 +178,19 @@ def _escape_odata_string(value: str) -> str:
 
 
 def _build_join_web_url_filter(join_web_url: str) -> str:
-    return f"joinWebUrl eq '{_escape_odata_string(join_web_url)}'"
+    return f"JoinWebUrl eq '{_escape_odata_string(join_web_url)}'"
+
+
+def _next_link_request(next_link: str) -> tuple[str, dict[str, str]]:
+    """Convert a Graph nextLink into the relative path expected by GraphClient."""
+    parsed = urlsplit(next_link)
+    path = parsed.path.removeprefix("/v1.0")
+    return path, dict(parse_qsl(parsed.query, keep_blank_values=True))
+
+
+def _calendar_event_join_url(event: dict[str, Any]) -> str:
+    online_meeting = event.get("onlineMeeting") or {}
+    return online_meeting.get("joinUrl") or event.get("onlineMeetingUrl") or ""
 
 
 def _meeting_detail_response(meeting: GraphOnlineMeetingDetail) -> MeetingDetailResponse:
@@ -623,14 +636,9 @@ async def teams_list_joined(
         Each team has id, displayName, description, visibility, webUrl.
     """
     g = get_graph(params.profile)
-    result = await g.get(
-        "/me/joinedTeams",
-        params={
-            "$top": params.top,
-            "$select": "id,displayName,description,visibility,webUrl",
-        },
-    )
-    teams = parse_graph_collection(result, GraphTeam)
+    # /me/joinedTeams does not support OData query parameters.
+    result = await g.get("/me/joinedTeams")
+    teams = parse_graph_collection(result, GraphTeam)[: max(1, params.top)]
     return TeamsListJoinedResponse(
         count=len(teams),
         teams=[_team_info(team) for team in teams],
@@ -678,14 +686,10 @@ async def teams_list_channels(
         Each channel has id, displayName, description, channelType, webUrl.
     """
     g = get_graph(params.profile)
-    result = await g.get(
-        f"/teams/{params.team_id}/channels",
-        params={
-            "$top": params.top,
-            "$select": "id,displayName,description,channelType,webUrl,isFavoriteByDefault",
-        },
-    )
-    channels = parse_graph_collection(result, GraphChannel)
+    # Graph rejects channelType in $select for some tenants even though the
+    # property is present in the default channel representation.
+    result = await g.get(f"/teams/{params.team_id}/channels")
+    channels = parse_graph_collection(result, GraphChannel)[: max(1, params.top)]
     return TeamsListChannelsResponse(
         team_id=params.team_id,
         count=len(channels),
@@ -794,8 +798,7 @@ async def teams_list_channel_messages(
     result = await g.get(
         f"/teams/{params.team_id}/channels/{params.channel_id}/messages",
         params={
-            "$top": params.top,
-            "$select": "id,createdDateTime,lastModifiedDateTime,from,body,subject,webUrl,replyToId,importance",
+            "$top": min(max(1, params.top), 50),
         },
     )
     messages = parse_graph_collection(result, GraphChatMessage)
@@ -926,8 +929,7 @@ async def teams_list_message_replies(
     result = await g.get(
         f"/teams/{params.team_id}/channels/{params.channel_id}/messages/{params.message_id}/replies",
         params={
-            "$top": params.top,
-            "$select": "id,createdDateTime,from,body,webUrl,importance",
+            "$top": min(max(1, params.top), 50),
         },
     )
     replies = parse_graph_collection(result, GraphChatMessage)
@@ -963,20 +965,33 @@ async def teams_list_chats(
         Each chat has id, chatType, topic, createdDateTime, lastUpdatedDateTime, webUrl.
     """
     g = get_graph(params.profile)
+    limit = min(max(1, params.top), 50)
     query: dict[str, Any] = {
-        "$top": params.top,
-        "$select": "id,chatType,topic,createdDateTime,lastUpdatedDateTime,webUrl",
-        "$orderby": "lastUpdatedDateTime desc",
+        # A filtered request may need several pages before enough matching
+        # chats are found, so request the largest supported page in that case.
+        "$top": 50 if params.chat_type else limit,
+        "$orderby": "lastMessagePreview/createdDateTime desc",
     }
-    if params.chat_type:
-        query["$filter"] = f"chatType eq '{params.chat_type}'"
+    path = "/me/chats"
+    chats: list[GraphChat] = []
+    next_link: str | None = None
+    while len(chats) < limit:
+        result = await g.get(path, params=query)
+        page = parse_graph_collection(result, GraphChat)
+        if params.chat_type:
+            page = [chat for chat in page if chat.chat_type == params.chat_type]
+        chats.extend(page)
 
-    result = await g.get("/me/chats", params=query)
-    chats = parse_graph_collection(result, GraphChat)
+        next_link = result.get("@odata.nextLink")
+        if len(chats) >= limit or not next_link:
+            break
+        path, query = _next_link_request(next_link)
+
+    chats = chats[:limit]
     return TeamsListChatsResponse(
         count=len(chats),
         chats=[_chat_info(chat) for chat in chats],
-        next_link=result.get("@odata.nextLink"),
+        next_link=next_link,
     )
 
 
@@ -1022,8 +1037,7 @@ async def teams_list_chat_messages(
     result = await g.get(
         f"/me/chats/{params.chat_id}/messages",
         params={
-            "$top": params.top,
-            "$select": "id,createdDateTime,lastModifiedDateTime,from,body,webUrl,importance",
+            "$top": min(max(1, params.top), 50),
         },
     )
     messages = parse_graph_collection(result, GraphChatMessage)
@@ -1219,11 +1233,7 @@ async def teams_find_meeting_by_url(
     g = get_graph(params.profile)
     result = await g.get(
         "/me/onlineMeetings",
-        params={
-            "$filter": _build_join_web_url_filter(params.join_web_url),
-            "$top": 2,
-            "$select": "id",
-        },
+        params={"$filter": _build_join_web_url_filter(params.join_web_url)},
     )
     meetings = parse_graph_collection(result, GraphOnlineMeetingDetail)
     if not meetings:
@@ -1248,9 +1258,10 @@ async def teams_list_meetings(
     """
     List Teams online meetings within a date range.
 
-    IMPORTANT: GET /me/onlineMeetings without a filter returns a Graph API error.
-    This tool always applies a startDateTime range filter. The default window is
-    today ± 7 days when no explicit dates are provided.
+    Graph v1.0 cannot enumerate online meetings by date. This tool therefore
+    reads calendar events in the requested window and resolves their Teams join
+    URLs to online-meeting objects. Standalone meetings that have no calendar
+    event cannot be enumerated by Graph v1.0.
 
     Args:
         start_after: ISO 8601 datetime — only meetings starting at or after this
@@ -1268,27 +1279,74 @@ async def teams_list_meetings(
 
     start_after = _normalize_filter_datetime(params.start_after, now - timedelta(days=7))
     start_before = _normalize_filter_datetime(params.start_before, now + timedelta(days=7))
-
-    filter_str = (
-        f"startDateTime ge '{start_after}' and startDateTime le '{start_before}'"
-    )
+    limit = min(max(1, params.top), 50)
 
     g = get_graph(params.profile)
-    result = await g.get(
-        "/me/onlineMeetings",
-        params={
-            "$filter": filter_str,
-            "$top": params.top,
-            "$select": "id,subject,startDateTime,endDateTime,joinWebUrl,createdDateTime",
-        },
-    )
-    meetings = parse_graph_collection(result, GraphOnlineMeetingDetail)
+    path = "/me/calendarView"
+    query: dict[str, Any] = {
+        "startDateTime": start_after,
+        "endDateTime": start_before,
+        "$top": 50,
+        "$select": (
+            "id,subject,start,end,isOnlineMeeting,onlineMeeting,"
+            "onlineMeetingUrl,createdDateTime"
+        ),
+    }
+    meetings: list[GraphOnlineMeetingDetail] = []
+    meeting_ids: set[str] = set()
+    skipped_by_status: dict[int, int] = {}
+    next_link: str | None = None
+
+    while len(meetings) < limit:
+        result = await g.get(path, params=query)
+        for event in result.get("value", []):
+            join_url = _calendar_event_join_url(event)
+            if not event.get("isOnlineMeeting") or not join_url:
+                continue
+            try:
+                resolved = await g.get(
+                    "/me/onlineMeetings",
+                    params={"$filter": _build_join_web_url_filter(join_url)},
+                )
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status not in {403, 404}:
+                    raise
+                skipped_by_status[status] = skipped_by_status.get(status, 0) + 1
+                _log.warning(
+                    "Skipping inaccessible calendar-backed online meeting "
+                    "during enumeration (Graph returned %s).",
+                    status,
+                )
+                continue
+            matches = parse_graph_collection(resolved, GraphOnlineMeetingDetail)
+            if matches and matches[0].id not in meeting_ids:
+                meetings.append(matches[0])
+                meeting_ids.add(matches[0].id)
+            if len(meetings) >= limit:
+                break
+
+        next_link = result.get("@odata.nextLink")
+        if len(meetings) >= limit or not next_link:
+            break
+        path, query = _next_link_request(next_link)
+
+    skipped_count = sum(skipped_by_status.values())
+    warnings = [
+        (
+            f"Skipped {count} calendar-backed online meeting(s) because "
+            f"Microsoft Graph returned {status}."
+        )
+        for status, count in sorted(skipped_by_status.items())
+    ]
     return TeamsListMeetingsResponse(
         start_after=start_after,
         start_before=start_before,
         count=len(meetings),
         meetings=[_meeting_info(meeting) for meeting in meetings],
-        next_link=result.get("@odata.nextLink"),
+        skipped_count=skipped_count,
+        warnings=warnings,
+        next_link=next_link,
     )
 
 
