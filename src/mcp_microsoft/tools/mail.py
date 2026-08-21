@@ -27,6 +27,8 @@ import re
 from typing import Any, Callable, Literal, Optional
 
 from fastmcp.server.context import Context
+from mcp import types as mcp_types
+from mcp.shared.exceptions import McpError
 from pydantic import BaseModel, Field
 
 from mcp_microsoft.common.mail_utils import (
@@ -82,6 +84,17 @@ from mcp_microsoft.graph import get_graph
 
 class _Confirmation(BaseModel):
     confirmed: bool
+
+
+def _supports_form_elicitation(ctx: Context) -> bool:
+    """Return whether the active MCP session negotiated form elicitation."""
+    try:
+        client_params = ctx.session.client_params
+    except (AttributeError, RuntimeError):
+        return False
+    if client_params is None or client_params.capabilities.elicitation is None:
+        return False
+    return client_params.capabilities.elicitation.form is not None
 
 
 class _BatchRequestEntry(BaseModel):
@@ -699,17 +712,38 @@ async def send_email(
     Returns:
         Structured send confirmation.
     """
-    if params.confirm and ctx:
+    if params.confirm:
+        if ctx is None or not _supports_form_elicitation(ctx):
+            return SendEmailResponse(
+                success=False,
+                action="send_email",
+                error=(
+                    "confirm=True requires an MCP host that negotiated form elicitation. "
+                    "The email was not sent."
+                ),
+            )
         to_display = params.to if isinstance(params.to, str) else ", ".join(params.to)
         preview = (
             f"To: {to_display}\n"
             f"Subject: {params.subject}\n\n"
             f"{params.body[:200]}{'...' if len(params.body) > 200 else ''}"
         )
-        result = await ctx.elicit(
-            f"Send this email?\n\n{preview}",
-            response_type=_Confirmation,
-        )
+        try:
+            result = await ctx.elicit(
+                f"Send this email?\n\n{preview}",
+                response_type=_Confirmation,
+            )
+        except McpError as exc:
+            if exc.error.code != mcp_types.METHOD_NOT_FOUND:
+                raise
+            return SendEmailResponse(
+                success=False,
+                action="send_email",
+                error=(
+                    "The MCP client advertised elicitation but did not implement it. "
+                    "The email was not sent."
+                ),
+            )
         if result.action != "accept" or not result.data.confirmed:
             return SendEmailResponse(success=False, action="send_email", error="Cancelled by user.")
 

@@ -511,7 +511,7 @@ http mode.
 | **Tool count** (all optional services on) | **95** | **87** |
 | **Profile-management tools** | Registered | **Not registered** — `add_ms_profile`, `list_ms_profiles`, `remove_ms_profile`, `authenticate_ms_profile`, `set_default_ms_profile` do not exist. |
 | **`profile` argument** | Honored | **Inert** — accepted for compatibility, silently ignored; identity always comes from the bearer token. |
-| **Local-disk tools** | Available | `download_file`, `download_from_site`, `teams_download_meeting_recording` are **not registered**. `upload_file`/`upload_to_site` reject `local_path` (use `content_base64`); `download_attachment`/`get_contact_photo` reject `save_path` (content returned inline). |
+| **Local-disk tools** | Available | `download_file`, `download_from_site`, `teams_download_meeting_recording` are **not registered**. `upload_file`/`upload_to_site` reject `local_path` (use `content_base64`); `download_attachment` omits `save_path` and returns content inline; `get_contact_photo` rejects `save_path` (content returned inline). |
 | **Feature flags** | Env or corporate auto-detect | Env **only** (explicit). |
 | **Deletion kill-switch** | Works | Works identically. |
 | **Rate limiting / audit logging** | None (single local caller) | On by default. |
@@ -841,8 +841,9 @@ Counts assume all optional services enabled.
 `download_from_site`, `teams_download_meeting_recording` (local-disk downloads).
 
 **Tools that reject disk parameters in http mode** (but remain registered): `upload_file` /
-`upload_to_site` reject `local_path` (use `content_base64`); `download_attachment` /
-`get_contact_photo` reject `save_path` (content returned inline).
+`upload_to_site` reject `local_path` (use `content_base64`); `download_attachment`
+omits `save_path` in http mode (content returned inline); `get_contact_photo` rejects
+`save_path` (content returned inline).
 
 ---
 

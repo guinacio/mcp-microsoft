@@ -546,7 +546,7 @@ HTTP não podem usar o modo http.
 | **Quantidade de ferramentas** (todos os serviços opcionais ativos) | **95** | **87** |
 | **Ferramentas de gerenciamento de perfil** | Registradas | **Não registradas** — `add_ms_profile`, `list_ms_profiles`, `remove_ms_profile`, `authenticate_ms_profile`, `set_default_ms_profile` não existem. |
 | **Argumento `profile`** | Respeitado | **Inerte** — aceito por compatibilidade, mas silenciosamente ignorado; a identidade sempre vem do bearer token. |
-| **Ferramentas de disco local** | Disponíveis | `download_file`, `download_from_site`, `teams_download_meeting_recording` **não são registradas**. `upload_file`/`upload_to_site` rejeitam `local_path` (use `content_base64`); `download_attachment`/`get_contact_photo` rejeitam `save_path` (o conteúdo é retornado inline). |
+| **Ferramentas de disco local** | Disponíveis | `download_file`, `download_from_site`, `teams_download_meeting_recording` **não são registradas**. `upload_file`/`upload_to_site` rejeitam `local_path` (use `content_base64`); `download_attachment` omite `save_path` e retorna o arquivo inline; `get_contact_photo` rejeita `save_path` (a foto é retornada inline). |
 | **Feature flags** | Env ou auto-detecção corporativa | Env **apenas** (explícito). |
 | **Kill-switch de exclusão** | Funciona | Funciona identicamente. |
 | **Rate limiting / audit logging** | Nenhum (chamador local único) | Ativo por padrão. |
@@ -901,7 +901,8 @@ local).
 
 **Ferramentas que rejeitam parâmetros de disco no modo http** (mas permanecem registradas):
 `upload_file` / `upload_to_site` rejeitam `local_path` (use `content_base64`);
-`download_attachment` / `get_contact_photo` rejeitam `save_path` (o conteúdo é retornado inline).
+`download_attachment` omite `save_path` e retorna o arquivo inline;
+`get_contact_photo` rejeita `save_path` (a foto é retornada inline).
 
 ---
 
