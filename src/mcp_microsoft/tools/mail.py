@@ -23,13 +23,17 @@ Implemented:
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
 import re
 from typing import Any, Callable, Literal, Optional
 
 from fastmcp.server.context import Context
 from mcp import types as mcp_types
 from mcp.shared.exceptions import McpError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mcp_microsoft.common.mail_utils import (
     format_mail_datetime,
@@ -167,8 +171,20 @@ class SearchEmailsInput(ToolRequestModel):
 
 
 class FilterEmailsInput(ToolRequestModel):
+    model_config = ConfigDict(extra="forbid")
+
     from_address: str | None = None
-    to_address: str | None = None
+    to_address: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=320,
+        pattern=r'^[^\s"():<>]+@[^\s"():<>]+$',
+        description=(
+            "Recipient email address. Uses Microsoft Graph's documented to: search "
+            "rather than OData filtering and cannot be combined with other filter "
+            "criteria. Up to 1,000 matching messages can be paged."
+        ),
+    )
     subject_contains: str | None = None
     received_after: str | None = None
     received_before: str | None = None
@@ -179,6 +195,25 @@ class FilterEmailsInput(ToolRequestModel):
     sort_order: Literal["newest", "oldest"] = "newest"
     skip_token: str | None = None
     profile: str | None = None
+
+    @model_validator(mode="after")
+    def validate_recipient_search(self) -> FilterEmailsInput:
+        if self.to_address and any(
+            value is not None
+            for value in (
+                self.from_address,
+                self.subject_contains,
+                self.received_after,
+                self.received_before,
+                self.has_attachments,
+                self.importance,
+            )
+        ):
+            raise ValueError(
+                "to_address cannot be combined with other filter criteria; "
+                "Microsoft Graph does not support combining message $search and $filter"
+            )
+        return self
 
 
 class SendEmailInput(ToolRequestModel):
@@ -468,66 +503,54 @@ async def read_email(
 # ---------------------------------------------------------------------------
 
 
-_KQL_OPERATORS = frozenset({"AND", "OR", "NOT"})
-_MAIL_KQL_PROPERTIES = frozenset(
-    {
-        "attachment",
-        "bcc",
-        "body",
-        "cc",
-        "from",
-        "hasattachment",
-        "importance",
-        "isread",
-        "kind",
-        "participants",
-        "received",
-        "sent",
-        "subject",
-        "to",
-    }
-)
+_QUOTED_SEARCH_TERM_PATTERN = re.compile(r'"(?P<value>(?:\\.|[^"\\])*)"')
 _SUBJECT_SEARCH_PATTERN = re.compile(
     r'^subject\s*:\s*"(?P<subject>(?:\\.|[^"\\])*)"$',
     flags=re.IGNORECASE,
 )
+_RECIPIENT_SEARCH_MAX_RESULTS = 1_000
+_RECIPIENT_SEARCH_CURSOR_PREFIX = "m1."
+_RECIPIENT_SEARCH_CURSOR_MAX_LENGTH = 1_024
+
+
+class _RecipientSearchCursorState(BaseModel):
+    """Versioned state for paging a bounded recipient search."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    offset: int = Field(ge=1, le=_RECIPIENT_SEARCH_MAX_RESULTS)
 
 
 def _normalize_email_search_query(query: str) -> str:
-    """Preserve structured KQL while quoting punctuation-bearing operands."""
+    """Build the quoted message-search expression required by Graph."""
     query = query.strip()
-    is_structured = bool(
-        '"' in query
-        or "(" in query
-        or ")" in query
-        or re.search(r"\b(?:AND|OR|NOT)\b", query, flags=re.IGNORECASE)
-        or re.search(r"\b[A-Za-z][A-Za-z0-9]*:", query)
-    )
-    if not is_structured:
-        return f'"{query}"'
+    if not query or any(ord(character) < 0x20 for character in query):
+        raise ValueError("email search query must contain printable text")
 
-    parts = re.split(r'("(?:\\.|[^"\\])*"|[()\s]+)', query)
-    normalized: list[str] = []
-    for part in parts:
-        if (
-            not part
-            or part.isspace()
-            or part in {"(", ")"}
-            or (part.startswith('"') and part.endswith('"'))
-            or part.upper() in _KQL_OPERATORS
-        ):
-            normalized.append(part)
-            continue
+    # Graph documents one enclosing quote pair for message $search values,
+    # including property restrictions such as ``to:alias@example.com``.
+    # A caller that already supplied that complete envelope can pass it through.
+    complete_envelope = _QUOTED_SEARCH_TERM_PATTERN.fullmatch(query)
+    if complete_envelope:
+        if not complete_envelope.group("value"):
+            raise ValueError("email search query must not be empty")
+        return query
 
-        property_name, separator, value = part.partition(":")
-        if separator and property_name.casefold() in _MAIL_KQL_PROPERTIES:
-            if value and any(character in value for character in ".@"):
-                part = f'{property_name}:"{value}"'
-        elif any(character in part for character in ".@"):
-            part = f'"{part}"'
-        normalized.append(part)
+    def _unquote_atomic_term(match: re.Match[str]) -> str:
+        value = match.group("value")
+        if not value or "\\" in value or any(character.isspace() for character in value):
+            raise ValueError(
+                "nested quoted phrases are not supported in Graph message searches; "
+                "use an unquoted KQL term or filter_emails"
+            )
+        return value
 
-    return "".join(normalized)
+    normalized = _QUOTED_SEARCH_TERM_PATTERN.sub(_unquote_atomic_term, query)
+    if '"' in normalized:
+        raise ValueError("email search query contains unbalanced quotes")
+    return f'"{normalized}"'
 
 
 def _subject_search_filter(query: str) -> str | None:
@@ -539,6 +562,97 @@ def _subject_search_filter(query: str) -> str | None:
     return f"contains(subject, '{subject}')"
 
 
+def _recipient_search_fingerprint(params: FilterEmailsInput) -> str:
+    material = "\0".join(
+        (
+            params.folder.casefold(),
+            (params.to_address or "").casefold(),
+            params.sort_order,
+            params.profile or "",
+        )
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _encode_recipient_search_cursor(*, fingerprint: str, offset: int) -> str:
+    state = _RecipientSearchCursorState(fingerprint=fingerprint, offset=offset)
+    payload = base64.urlsafe_b64encode(state.model_dump_json().encode()).rstrip(b"=")
+    cursor = f"{_RECIPIENT_SEARCH_CURSOR_PREFIX}{payload.decode('ascii')}"
+    if len(cursor) > _RECIPIENT_SEARCH_CURSOR_MAX_LENGTH:
+        raise ValueError("recipient search cursor is too large")
+    return cursor
+
+
+def _decode_recipient_search_cursor(cursor: str, *, fingerprint: str) -> int:
+    try:
+        if (
+            len(cursor) > _RECIPIENT_SEARCH_CURSOR_MAX_LENGTH
+            or not cursor.startswith(_RECIPIENT_SEARCH_CURSOR_PREFIX)
+        ):
+            raise ValueError
+        encoded = cursor.removeprefix(_RECIPIENT_SEARCH_CURSOR_PREFIX)
+        padding = "=" * (-len(encoded) % 4)
+        payload = base64.b64decode(
+            f"{encoded}{padding}",
+            altchars=b"-_",
+            validate=True,
+        )
+        state = _RecipientSearchCursorState.model_validate_json(payload)
+    except (binascii.Error, UnicodeError, ValidationError, ValueError):
+        raise ValueError("recipient search cursor is invalid or expired") from None
+
+    if not hmac.compare_digest(state.fingerprint, fingerprint):
+        raise ValueError("recipient search cursor does not match this query or folder")
+    return state.offset
+
+
+async def _filter_emails_by_recipient(
+    params: FilterEmailsInput,
+) -> ListEmailsResponse:
+    """Run the documented recipient KQL search and page its bounded result set."""
+    fingerprint = _recipient_search_fingerprint(params)
+    offset = 0
+    if params.skip_token:
+        offset = _decode_recipient_search_cursor(
+            params.skip_token,
+            fingerprint=fingerprint,
+        )
+
+    g = get_graph(params.profile)
+    query = {
+        "$top": _RECIPIENT_SEARCH_MAX_RESULTS,
+        "$select": (
+            "id,subject,from,receivedDateTime,isRead,bodyPreview,"
+            "hasAttachments,importance"
+        ),
+        "$search": _normalize_email_search_query(f"to:{params.to_address}"),
+    }
+    result = await g.get(f"/me/mailFolders/{params.folder}/messages", params=query)
+    messages = parse_graph_collection(result, GraphMessage)
+    messages.sort(
+        key=lambda message: message.received_date_time or "",
+        reverse=params.sort_order == "newest",
+    )
+
+    page_size = min(max(1, params.max_results), 100)
+    page = messages[offset : offset + page_size]
+    next_offset = offset + len(page)
+    next_page_token = None
+    if next_offset < len(messages):
+        next_page_token = _encode_recipient_search_cursor(
+            fingerprint=fingerprint,
+            offset=next_offset,
+        )
+
+    return ListEmailsResponse(
+        folder=params.folder,
+        count=len(page),
+        messages=[_message_summary(message) for message in page],
+        next_page_token=next_page_token,
+        has_more=next_page_token is not None,
+    )
+
+
 async def search_emails(
     params: SearchEmailsInput,
 ) -> SearchEmailsResponse:
@@ -546,12 +660,17 @@ async def search_emails(
     Search messages using Graph KQL $search syntax.
 
     Note: Graph $search and $filter cannot be combined in the same request.
-    The Graph API caps $search results at 25 regardless of the value requested.
+    This tool returns at most 25 results per request.
 
     Args:
-        query: KQL search string, e.g. 'from:alice@example.com' or 'project update'.
+        query: KQL search string, e.g. 'from:alias@example.com' or
+            'to:alias@example.com', 'recipients:alias@example.com', or
+            'project update'. Use ``to:`` for To recipients and
+            ``recipients:`` for To, Cc, or Bcc recipients. Do not quote
+            individual atomic property values; use filter_emails for an exact
+            multiword subject phrase.
         max_results: Maximum number of results (1-25). Values above 25 are
-            silently capped by the Graph API. Defaults to 10.
+            capped by this tool. Defaults to 10.
         folder: Optional well-known folder name or folder ID to restrict the search.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
@@ -567,6 +686,8 @@ async def search_emails(
     if subject_filter:
         query_params["$filter"] = subject_filter
     else:
+        # Microsoft Graph requires the complete message-search expression to
+        # be enclosed in one pair of double quotes.
         query_params["$search"] = _normalize_email_search_query(params.query)
 
     if params.folder:
@@ -594,19 +715,25 @@ async def filter_emails(
     params: FilterEmailsInput,
 ) -> ListEmailsResponse:
     """
-    Find emails matching specific criteria using OData $filter.
+    Find emails using supported Microsoft Graph filtering or recipient search.
 
     Unlike search_emails (which is limited to 25 results), this tool
     supports up to 100 results per page with full pagination — ideal for
     finding all emails from a sender, within a date range, or matching
-    a subject.
+    a subject. Recipient lookup uses Graph's documented ``to:`` search,
+    scans at most 1,000 matches, and exposes those matches through opaque
+    local pagination because Graph does not support filtering the message
+    ``toRecipients`` collection with OData.
 
-    All filter parameters are combined with AND logic. Omitted parameters
-    are not filtered on.
+    OData filter parameters are combined with AND logic. ``to_address``
+    cannot be combined with those parameters because Microsoft Graph does
+    not support combining ``$search`` and ``$filter`` on messages.
 
     Args:
         from_address: Filter by sender email address (exact match).
-        to_address: Filter by recipient email address (exact match).
+        to_address: Search the To field for this email address. This is
+            mutually exclusive with the other filter criteria and returns at
+            most 1,000 Graph matches across local pages.
         subject_contains: Filter by subject containing this text (case-insensitive).
         received_after: Only messages received on or after this date.
             ISO 8601 format: '2026-01-01' or '2026-01-01T00:00:00Z'.
@@ -625,6 +752,9 @@ async def filter_emails(
     Returns:
         Structured message summaries with pagination metadata.
     """
+    if params.to_address:
+        return await _filter_emails_by_recipient(params)
+
     g = get_graph(params.profile)
     order = "receivedDateTime asc" if params.sort_order == "oldest" else "receivedDateTime desc"
     query: dict[str, Any] = {
@@ -646,9 +776,6 @@ async def filter_emails(
     if params.from_address:
         safe = params.from_address.replace("'", "''")
         clauses.append(f"from/emailAddress/address eq '{safe}'")
-    if params.to_address:
-        safe = params.to_address.replace("'", "''")
-        clauses.append(f"toRecipients/any(r:r/emailAddress/address eq '{safe}')")
     if params.subject_contains:
         safe = params.subject_contains.replace("'", "''")
         clauses.append(f"contains(subject, '{safe}')")
