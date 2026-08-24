@@ -134,6 +134,116 @@ async def test_filter_emails_uses_supported_sender_filter(
     assert "toRecipients" not in str(captured["$filter"])
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("folder", "expected_path"),
+    [
+        (None, "/me/messages"),
+        ("inbox", "/me/mailFolders/inbox/messages"),
+    ],
+)
+async def test_filter_emails_defaults_to_mailbox_wide_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    folder: str | None,
+    expected_path: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict | None = None):
+            captured["path"] = path
+            return {"value": []}
+
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: DummyGraph())
+    result = await mail.filter_emails(
+        mail.FilterEmailsInput(folder=folder, subject_contains="status")
+    )
+
+    assert captured["path"] == expected_path
+    assert result.folder == folder
+
+
+@pytest.mark.asyncio
+async def test_filter_emails_preserves_validated_graph_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict | None]] = []
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict | None = None):
+            calls.append((path, params))
+            if len(calls) == 1:
+                return {
+                    "value": [{"id": "first"}],
+                    "@odata.nextLink": (
+                        "https://graph.microsoft.com/v1.0/me/messages?"
+                        "%24filter=subject%20eq%20%27status%27&%24skip=2"
+                    ),
+                }
+            return {"value": [{"id": "second"}]}
+
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: DummyGraph())
+    first = await mail.filter_emails(
+        mail.FilterEmailsInput(subject_contains="status", max_results=1)
+    )
+    second = await mail.filter_emails(
+        mail.FilterEmailsInput(
+            subject_contains="status",
+            max_results=1,
+            skip_token=first.next_page_token,
+        )
+    )
+
+    assert first.next_page_token and first.next_page_token.startswith("mf1.")
+    assert first.has_more is True
+    assert calls[1] == (
+        "/me/messages?%24filter=subject%20eq%20%27status%27&%24skip=2",
+        None,
+    )
+    assert [message.id for message in second.messages] == ["second"]
+    assert second.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_filter_emails_rejects_untrusted_or_mismatched_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnsafeGraph:
+        async def get(self, _path: str, params: dict | None = None):
+            return {
+                "value": [],
+                "@odata.nextLink": "https://example.com/v1.0/me/messages?$skip=2",
+            }
+
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: UnsafeGraph())
+    with pytest.raises(ValueError, match="invalid mail continuation"):
+        await mail.filter_emails(mail.FilterEmailsInput(subject_contains="status"))
+
+    safe_link = "https://graph.microsoft.com/v1.0/me/messages?$skip=2"
+    cursor = mail._encode_mail_filter_cursor(
+        fingerprint=mail._mail_filter_fingerprint(
+            mail.FilterEmailsInput(subject_contains="status")
+        ),
+        page_link=safe_link,
+        expected_path="/me/messages",
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        await mail.filter_emails(
+            mail.FilterEmailsInput(
+                subject_contains="different",
+                skip_token=cursor,
+            )
+        )
+
+    with pytest.raises(ValueError, match="invalid or expired"):
+        await mail.filter_emails(
+            mail.FilterEmailsInput(
+                subject_contains="status",
+                skip_token="mf1.not-valid-base64",
+            )
+        )
+
+
 def test_filter_emails_rejects_recipient_search_combined_with_odata_filter() -> None:
     with pytest.raises(ValidationError, match="cannot be combined"):
         mail.FilterEmailsInput(
