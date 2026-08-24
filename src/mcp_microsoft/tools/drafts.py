@@ -5,6 +5,7 @@ All tools use the Microsoft Graph API via the async graph client.
 
 Implemented:
   - create_draft
+  - create_reply_draft
   - list_drafts
   - get_draft
   - update_draft
@@ -15,6 +16,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import Field
+
 from mcp_microsoft.common.mail_utils import format_mail_datetime, parse_recipients, recipient_values
 from mcp_microsoft.common.text import strip_html
 from mcp_microsoft.common.request_model import ToolRequestModel
@@ -22,6 +25,7 @@ from mcp_microsoft.common.tooling import READ_ONLY_TOOL, WRITE_TOOL, register_to
 from mcp_microsoft.graph_types import GraphMessage, parse_graph_collection
 from mcp_microsoft.models import (
     CreateDraftResponse,
+    CreateReplyDraftResponse,
     DraftDetailResponse,
     DraftSummary,
     ListDraftsResponse,
@@ -43,6 +47,27 @@ class CreateDraftInput(ToolRequestModel):
     body: str
     cc: str | list[str] | None = None
     body_type: BodyType = "text"
+    profile: str | None = None
+
+
+class CreateReplyDraftInput(ToolRequestModel):
+    message_id: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Graph message ID to reply to.",
+    )
+    body: str | None = Field(
+        default=None,
+        description="Optional initial reply body. Omit to create an empty reply draft.",
+    )
+    reply_all: bool = Field(
+        default=False,
+        description="Create a reply-all draft when true; otherwise reply only to the sender.",
+    )
+    body_type: BodyType = Field(
+        default="text",
+        description="Format of body when supplied: text or html.",
+    )
     profile: str | None = None
 
 
@@ -112,6 +137,71 @@ async def create_draft(
         to=[addr.get("emailAddress", {}).get("address", "") for addr in message["toRecipients"]],
         cc=[addr.get("emailAddress", {}).get("address", "") for addr in message.get("ccRecipients", [])],
         subject=params.subject,
+        body_type=params.body_type,
+    )
+
+
+# ---------------------------------------------------------------------------
+# create_reply_draft
+# ---------------------------------------------------------------------------
+
+
+async def create_reply_draft(
+    params: CreateReplyDraftInput,
+) -> CreateReplyDraftResponse:
+    """
+    Create an unsent reply draft linked to an existing email thread.
+
+    The draft is saved in the Drafts folder and is not sent. Use get_draft or
+    update_draft to review or edit it, then send_draft when ready. Requires the
+    delegated Microsoft Graph ``Mail.ReadWrite`` permission.
+
+    Args:
+        message_id: Graph message ID to reply to.
+        body: Optional initial reply body. Omit to create an empty reply draft.
+        reply_all: Create a reply-all draft when True. Defaults to False.
+        body_type: 'text' or 'html'. Used only when body is supplied.
+        profile: Microsoft 365 profile to use. Omit to use the default profile.
+
+    Returns:
+        Structured confirmation containing the new draft ID.
+    """
+    g = get_graph(params.profile)
+    endpoint = "createReplyAll" if params.reply_all else "createReply"
+    payload: dict = {}
+    if params.body is not None:
+        if params.body_type == "html":
+            payload["message"] = {
+                "body": {
+                    "contentType": "HTML",
+                    "content": params.body,
+                }
+            }
+        else:
+            payload["comment"] = params.body
+
+    raw_created = await g.post(
+        f"/me/messages/{params.message_id}/{endpoint}",
+        json=payload,
+    )
+    created = GraphMessage.model_validate(raw_created or {})
+    if not created.id or not created.is_draft:
+        return CreateReplyDraftResponse(
+            success=False,
+            action="create_reply_draft",
+            error="Microsoft Graph did not return a valid reply draft.",
+            draft_id=created.id,
+            original_message_id=params.message_id,
+            reply_all=params.reply_all,
+            body_type=params.body_type,
+        )
+
+    return CreateReplyDraftResponse(
+        success=True,
+        action="create_reply_draft",
+        draft_id=created.id,
+        original_message_id=params.message_id,
+        reply_all=params.reply_all,
         body_type=params.body_type,
     )
 
@@ -295,6 +385,7 @@ async def send_draft(params: SendDraftInput) -> SendDraftResponse:
 def register(server) -> None:
     """Register all draft tools with the given FastMCP server instance."""
     register_tool(server, create_draft, annotations=WRITE_TOOL)
+    register_tool(server, create_reply_draft, annotations=WRITE_TOOL)
     register_tool(server, list_drafts, annotations=READ_ONLY_TOOL)
     register_tool(server, get_draft, annotations=READ_ONLY_TOOL)
     register_tool(server, update_draft, annotations=WRITE_TOOL)

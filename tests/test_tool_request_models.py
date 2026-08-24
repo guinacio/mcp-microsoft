@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from fastmcp import FastMCP
 
-from mcp_microsoft.tools import contacts, mail, onedrive, profiles, services, sharepoint
+from mcp_microsoft.tools import contacts, drafts, mail, onedrive, profiles, services, sharepoint
 
 
 def _inner_params_schema(tool) -> dict:
@@ -44,6 +44,41 @@ async def test_send_email_tool_hides_ctx_and_uses_params_object() -> None:
     params_schema = _inner_params_schema(tool)
     assert set(params_schema["required"]) == {"to", "subject", "body"}
     assert "confirm" in params_schema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_create_reply_draft_schema_and_annotations() -> None:
+    mcp = FastMCP("test-server")
+    drafts.register(mcp)
+
+    tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+    tool = tools["create_reply_draft"]
+    params_schema = _inner_params_schema(tool)
+
+    assert params_schema["required"] == ["message_id"]
+    assert set(params_schema["properties"]) == {
+        "message_id",
+        "body",
+        "reply_all",
+        "body_type",
+        "profile",
+    }
+    assert params_schema["properties"]["body"]["default"] is None
+    assert params_schema["properties"]["reply_all"]["default"] is False
+    assert set(tool.output_schema["properties"]) == {
+        "success",
+        "action",
+        "error",
+        "draft_id",
+        "original_message_id",
+        "reply_all",
+        "body_type",
+    }
+    assert set(tool.output_schema["required"]) == {"success", "action"}
+    assert "Mail.ReadWrite" in tool.description
+    assert "not sent" in tool.description
+    assert tool.annotations.destructiveHint is False
+    assert tool.annotations.readOnlyHint is not True
 
 
 @pytest.mark.asyncio

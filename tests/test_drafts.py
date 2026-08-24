@@ -14,6 +14,7 @@ import pytest
 from mcp_microsoft.graph_types import GraphEmailAddress, GraphRecipient
 from mcp_microsoft.models import (
     CreateDraftResponse,
+    CreateReplyDraftResponse,
     DraftDetailResponse,
     ListDraftsResponse,
     SendDraftResponse,
@@ -38,6 +39,7 @@ async def test_draft_tools_are_registered() -> None:
     """Verify all draft tools are registered with the MCP server."""
     tool_names = {tool.name for tool in await server.mcp.list_tools(run_middleware=False)}
     assert "create_draft" in tool_names
+    assert "create_reply_draft" in tool_names
     assert "list_drafts" in tool_names
     assert "get_draft" in tool_names
     assert "update_draft" in tool_names
@@ -135,6 +137,124 @@ async def test_create_draft_comma_separated_to(monkeypatch: pytest.MonkeyPatch) 
     assert result.success is True
     body = captured["json"]
     assert len(body["toRecipients"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# create_reply_draft
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_empty_reply_draft(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def post(self, path: str, json: dict = None):
+            captured["path"] = path
+            captured["json"] = json
+            return {"id": "reply-draft", "isDraft": True}
+
+    monkeypatch.setattr(drafts, "get_graph", lambda _profile: DummyGraph())
+    result = await drafts.create_reply_draft(
+        drafts.CreateReplyDraftInput(message_id="original-message")
+    )
+
+    assert isinstance(result, CreateReplyDraftResponse)
+    assert result.success is True
+    assert result.action == "create_reply_draft"
+    assert result.draft_id == "reply-draft"
+    assert result.original_message_id == "original-message"
+    assert result.reply_all is False
+    assert result.body_type == "text"
+    assert captured == {
+        "path": "/me/messages/original-message/createReply",
+        "json": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_text_reply_draft_uses_comment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def post(self, path: str, json: dict = None):
+            captured["json"] = json
+            return {"id": "reply-draft", "isDraft": True}
+
+    monkeypatch.setattr(drafts, "get_graph", lambda _profile: DummyGraph())
+    await drafts.create_reply_draft(
+        drafts.CreateReplyDraftInput(
+            message_id="original-message",
+            body="Thanks for the update.",
+        )
+    )
+
+    assert captured["json"] == {"comment": "Thanks for the update."}
+
+
+@pytest.mark.asyncio
+async def test_create_html_reply_all_draft_uses_message_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def post(self, path: str, json: dict = None):
+            captured["path"] = path
+            captured["json"] = json
+            return {"id": "reply-all-draft", "isDraft": True}
+
+    monkeypatch.setattr(drafts, "get_graph", lambda _profile: DummyGraph())
+    result = await drafts.create_reply_draft(
+        drafts.CreateReplyDraftInput(
+            message_id="original-message",
+            body="<p>Thanks everyone.</p>",
+            body_type="html",
+            reply_all=True,
+        )
+    )
+
+    assert result.reply_all is True
+    assert result.body_type == "html"
+    assert captured["path"] == "/me/messages/original-message/createReplyAll"
+    assert captured["json"] == {
+        "message": {
+            "body": {
+                "contentType": "HTML",
+                "content": "<p>Thanks everyone.</p>",
+            }
+        }
+    }
+    assert "comment" not in captured["json"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "graph_response",
+    [
+        {"isDraft": True},
+        {"id": "not-a-draft", "isDraft": False},
+    ],
+)
+async def test_create_reply_draft_rejects_invalid_graph_response(
+    monkeypatch: pytest.MonkeyPatch,
+    graph_response: dict,
+) -> None:
+    class DummyGraph:
+        async def post(self, path: str, json: dict = None):
+            return graph_response
+
+    monkeypatch.setattr(drafts, "get_graph", lambda _profile: DummyGraph())
+    result = await drafts.create_reply_draft(
+        drafts.CreateReplyDraftInput(message_id="original-message")
+    )
+
+    assert result.success is False
+    assert result.action == "create_reply_draft"
+    assert result.error == "Microsoft Graph did not return a valid reply draft."
+    assert result.original_message_id == "original-message"
 
 
 # ---------------------------------------------------------------------------
