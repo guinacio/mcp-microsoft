@@ -201,7 +201,7 @@ class ListDraftsResponse(MCPModel):
     drafts: list[DraftSummary] = Field(default_factory=list)
 
 
-class DraftDetailResponse(MCPModel):
+class DraftDetailResponse(ActionResult):
     id: str = ""
     subject: str = ""
     to: list[Address] = Field(default_factory=list)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import httpx
 from pydantic import Field
 
 from mcp_microsoft.common.mail_utils import format_mail_datetime, parse_recipients, recipient_values
@@ -58,7 +59,10 @@ class CreateReplyDraftInput(ToolRequestModel):
     )
     body: str | None = Field(
         default=None,
-        description="Optional initial reply body. Omit to create an empty reply draft.",
+        description=(
+            "Optional initial reply body, inserted above the quoted conversation "
+            "history. Omit to create an empty reply draft."
+        ),
     )
     reply_all: bool = Field(
         default=False,
@@ -158,7 +162,8 @@ async def create_reply_draft(
 
     Args:
         message_id: Graph message ID to reply to.
-        body: Optional initial reply body. Omit to create an empty reply draft.
+        body: Optional initial reply body, inserted above the quoted conversation
+            history. Omit to create an empty reply draft.
         reply_all: Create a reply-all draft when True. Defaults to False.
         body_type: 'text' or 'html'. Used only when body is supplied.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
@@ -170,15 +175,10 @@ async def create_reply_draft(
     endpoint = "createReplyAll" if params.reply_all else "createReply"
     payload: dict = {}
     if params.body is not None:
-        if params.body_type == "html":
-            payload["message"] = {
-                "body": {
-                    "contentType": "HTML",
-                    "content": params.body,
-                }
-            }
-        else:
-            payload["comment"] = params.body
+        # Graph composes ``comment`` above the quoted original. Supplying
+        # ``message.body`` instead replaces the generated reply body and drops
+        # the conversation history.
+        payload["comment"] = params.body
 
     raw_created = await g.post(
         f"/me/messages/{params.message_id}/{endpoint}",
@@ -265,7 +265,8 @@ async def get_draft(params: GetDraftInput) -> DraftDetailResponse:
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Structured draft details.
+        Structured draft details, or a safe structured failure when the draft
+        no longer exists. Other Graph failures are propagated normally.
     """
     g = get_graph(params.profile)
     query = {
@@ -275,7 +276,22 @@ async def get_draft(params: GetDraftInput) -> DraftDetailResponse:
         ),
     }
 
-    draft = GraphMessage.model_validate(await g.get(f"/me/messages/{params.draft_id}", params=query))
+    try:
+        raw_draft = await g.get(f"/me/messages/{params.draft_id}", params=query)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise
+        return DraftDetailResponse(
+            success=False,
+            action="get_draft",
+            error=(
+                "Draft not found. It may have been deleted or sent, or the "
+                "draft ID may no longer be valid."
+            ),
+            is_draft=False,
+        )
+
+    draft = GraphMessage.model_validate(raw_draft)
 
     subject = draft.subject or "(no subject)"
     modified = format_mail_datetime(draft.last_modified_date_time)
@@ -289,6 +305,8 @@ async def get_draft(params: GetDraftInput) -> DraftDetailResponse:
         body_text = raw_body
 
     return DraftDetailResponse(
+        success=True,
+        action="get_draft",
         id=params.draft_id,
         subject=subject,
         to=recipient_values(draft.to_recipients),

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 
 from mcp_microsoft.graph_types import GraphEmailAddress, GraphRecipient
@@ -195,7 +196,7 @@ async def test_create_text_reply_draft_uses_comment(
 
 
 @pytest.mark.asyncio
-async def test_create_html_reply_all_draft_uses_message_body(
+async def test_create_html_reply_all_draft_uses_comment_to_preserve_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -219,15 +220,8 @@ async def test_create_html_reply_all_draft_uses_message_body(
     assert result.reply_all is True
     assert result.body_type == "html"
     assert captured["path"] == "/me/messages/original-message/createReplyAll"
-    assert captured["json"] == {
-        "message": {
-            "body": {
-                "contentType": "HTML",
-                "content": "<p>Thanks everyone.</p>",
-            }
-        }
-    }
-    assert "comment" not in captured["json"]
+    assert captured["json"] == {"comment": "<p>Thanks everyone.</p>"}
+    assert "message" not in captured["json"]
 
 
 @pytest.mark.asyncio
@@ -357,6 +351,8 @@ async def test_get_draft_returns_full_details(monkeypatch: pytest.MonkeyPatch) -
     result = await drafts.get_draft(drafts.GetDraftInput(draft_id="draft-xyz"))
 
     assert isinstance(result, DraftDetailResponse)
+    assert result.success is True
+    assert result.action == "get_draft"
     assert result.id == "draft-xyz"
     assert result.subject == "My Draft"
     assert result.body == "Draft body text."
@@ -418,6 +414,59 @@ async def test_get_draft_uses_correct_path(monkeypatch: pytest.MonkeyPatch) -> N
     await drafts.get_draft(drafts.GetDraftInput(draft_id="draft-path"))
 
     assert captured["path"] == "/me/messages/draft-path"
+
+
+@pytest.mark.asyncio
+async def test_get_draft_returns_structured_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("GET", "https://graph.microsoft.com/v1.0/me/messages/missing")
+    response = httpx.Response(404, request=request)
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None):
+            raise httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+
+    monkeypatch.setattr(drafts, "get_graph", lambda _profile: DummyGraph())
+    result = await drafts.get_draft(drafts.GetDraftInput(draft_id="missing"))
+
+    assert isinstance(result, DraftDetailResponse)
+    assert result.success is False
+    assert result.action == "get_draft"
+    assert result.error == (
+        "Draft not found. It may have been deleted or sent, or the draft ID "
+        "may no longer be valid."
+    )
+    assert result.id == ""
+    assert result.is_draft is False
+
+
+@pytest.mark.asyncio
+async def test_get_draft_does_not_mask_other_graph_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("GET", "https://graph.microsoft.com/v1.0/me/messages/forbidden")
+    response = httpx.Response(403, request=request)
+    error = httpx.HTTPStatusError(
+        "403 Forbidden",
+        request=request,
+        response=response,
+    )
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict = None):
+            raise error
+
+    monkeypatch.setattr(drafts, "get_graph", lambda _profile: DummyGraph())
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await drafts.get_draft(drafts.GetDraftInput(draft_id="forbidden"))
+
+    assert exc_info.value is error
 
 
 # ---------------------------------------------------------------------------

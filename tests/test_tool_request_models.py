@@ -80,6 +80,24 @@ async def test_create_reply_draft_schema_and_annotations() -> None:
     assert tool.annotations.destructiveHint is False
     assert tool.annotations.readOnlyHint is not True
 
+    get_draft_tool = tools["get_draft"]
+    assert set(get_draft_tool.output_schema["properties"]) == {
+        "success",
+        "action",
+        "error",
+        "id",
+        "subject",
+        "to",
+        "cc",
+        "bcc",
+        "last_modified_at",
+        "last_modified_at_display",
+        "body",
+        "body_content_type",
+        "is_draft",
+    }
+    assert set(get_draft_tool.output_schema["required"]) == {"success", "action"}
+
 
 @pytest.mark.asyncio
 async def test_move_or_copy_item_tool_preserves_copy_field_name() -> None:
