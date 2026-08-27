@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from fastmcp import FastMCP
 
-from mcp_microsoft.tools import contacts, mail, onedrive, profiles, services, sharepoint
+from mcp_microsoft.tools import contacts, drafts, mail, onedrive, profiles, services, sharepoint
 
 
 def _inner_params_schema(tool) -> dict:
@@ -44,6 +44,102 @@ async def test_send_email_tool_hides_ctx_and_uses_params_object() -> None:
     params_schema = _inner_params_schema(tool)
     assert set(params_schema["required"]) == {"to", "subject", "body"}
     assert "confirm" in params_schema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_filter_emails_schema_exposes_safe_recipient_search() -> None:
+    mcp = FastMCP("test-server")
+    mail.register(mcp)
+
+    tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+    params_schema = _inner_params_schema(tools["filter_emails"])
+
+    recipient_schema = params_schema["properties"]["to_address"]
+    string_schema = next(
+        variant
+        for variant in recipient_schema["anyOf"]
+        if variant.get("type") == "string"
+    )
+    assert string_schema["maxLength"] == 320
+    assert "documented to: search" in recipient_schema["description"]
+    assert params_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_mail_search_schemas_default_to_entire_mailbox() -> None:
+    mcp = FastMCP("test-server")
+    mail.register(mcp)
+
+    tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+    for tool_name in ("search_emails", "filter_emails"):
+        folder_schema = _inner_params_schema(tools[tool_name])["properties"]["folder"]
+        assert folder_schema["default"] is None
+        assert "entire mailbox" in folder_schema["description"]
+
+    output_folder_schema = tools["filter_emails"].output_schema["properties"][
+        "folder"
+    ]
+    assert {variant["type"] for variant in output_folder_schema["anyOf"]} == {
+        "string",
+        "null",
+    }
+    assert output_folder_schema["default"] is None
+    assert "entire mailbox" in output_folder_schema["description"]
+    assert "Mail.ReadWrite" in tools["search_emails"].description
+    assert "Mail.ReadWrite" in tools["filter_emails"].description
+
+
+@pytest.mark.asyncio
+async def test_create_reply_draft_schema_and_annotations() -> None:
+    mcp = FastMCP("test-server")
+    drafts.register(mcp)
+
+    tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+    tool = tools["create_reply_draft"]
+    params_schema = _inner_params_schema(tool)
+
+    assert params_schema["required"] == ["message_id"]
+    assert set(params_schema["properties"]) == {
+        "message_id",
+        "body",
+        "reply_all",
+        "body_type",
+        "profile",
+    }
+    assert params_schema["properties"]["body"]["default"] is None
+    assert params_schema["properties"]["reply_all"]["default"] is False
+    assert set(tool.output_schema["properties"]) == {
+        "success",
+        "action",
+        "error",
+        "draft_id",
+        "original_message_id",
+        "reply_all",
+        "body_type",
+    }
+    assert set(tool.output_schema["required"]) == {"success", "action"}
+    assert "Mail.ReadWrite" in tool.description
+    assert "not sent" in tool.description
+    assert tool.annotations.destructiveHint is False
+    assert tool.annotations.readOnlyHint is not True
+
+    get_draft_tool = tools["get_draft"]
+    assert set(get_draft_tool.output_schema["properties"]) == {
+        "success",
+        "action",
+        "error",
+        "id",
+        "subject",
+        "to",
+        "cc",
+        "bcc",
+        "last_modified_at",
+        "last_modified_at_display",
+        "body",
+        "body_content_type",
+        "is_draft",
+    }
+    assert set(get_draft_tool.output_schema["required"]) == {"success", "action"}
 
 
 @pytest.mark.asyncio

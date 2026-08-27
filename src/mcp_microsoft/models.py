@@ -45,7 +45,10 @@ class MessageSummary(MCPModel):
 
 
 class ListEmailsResponse(MCPModel):
-    folder: str = ""
+    folder: str | None = Field(
+        default=None,
+        description="Folder searched, or null when the entire mailbox was searched.",
+    )
     count: int = 0
     messages: list[MessageSummary] = Field(default_factory=list)
     next_page_token: str | None = None
@@ -82,7 +85,10 @@ class ReadEmailSummaryResponse(MCPModel):
 
 class SearchEmailsResponse(MCPModel):
     query: str = ""
-    folder: str | None = None
+    folder: str | None = Field(
+        default=None,
+        description="Folder searched, or null when the entire mailbox was searched.",
+    )
     count: int = 0
     messages: list[MessageSummary] = Field(default_factory=list)
 
@@ -189,12 +195,19 @@ class CreateDraftResponse(ActionResult):
     body_type: str = ""
 
 
+class CreateReplyDraftResponse(ActionResult):
+    draft_id: str = ""
+    original_message_id: str = ""
+    reply_all: bool = False
+    body_type: str = ""
+
+
 class ListDraftsResponse(MCPModel):
     count: int = 0
     drafts: list[DraftSummary] = Field(default_factory=list)
 
 
-class DraftDetailResponse(MCPModel):
+class DraftDetailResponse(ActionResult):
     id: str = ""
     subject: str = ""
     to: list[Address] = Field(default_factory=list)

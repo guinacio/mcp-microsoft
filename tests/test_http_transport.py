@@ -356,6 +356,7 @@ async def test_http_mode_omits_profile_tools_but_keeps_core(
     )
     # Core mail/calendar tools still register.
     assert "send_email" in names
+    assert "create_reply_draft" in names
     assert "create_event" in names
 
 
@@ -371,6 +372,7 @@ async def test_stdio_mode_registers_profile_tools(
         f"{PROFILE_TOOLS - names}"
     )
     assert "send_email" in names
+    assert "create_reply_draft" in names
 
 
 @pytest.mark.asyncio
