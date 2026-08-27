@@ -102,6 +102,34 @@ def _supports_form_elicitation(ctx: Context) -> bool:
     return client_params.capabilities.elicitation.form is not None
 
 
+async def _email_confirmation_error(
+    *,
+    confirm: bool,
+    ctx: Context | None,
+    prompt: str,
+) -> str | None:
+    """Return an error when a requested email confirmation cannot proceed."""
+    if not confirm:
+        return None
+    if ctx is None or not _supports_form_elicitation(ctx):
+        return (
+            "confirm=True requires an MCP host that negotiated form elicitation. "
+            "The email action was not performed."
+        )
+    try:
+        result = await ctx.elicit(prompt, response_type=_Confirmation)
+    except McpError as exc:
+        if exc.error.code != mcp_types.METHOD_NOT_FOUND:
+            raise
+        return (
+            "The MCP client advertised elicitation but did not implement it. "
+            "The email action was not performed."
+        )
+    if result.action != "accept" or not result.data.confirmed:
+        return "Cancelled by user."
+    return None
+
+
 class _BatchRequestEntry(BaseModel):
     id: str
     method: str
@@ -239,7 +267,10 @@ class SendEmailInput(ToolRequestModel):
     save_to_sent: bool = True
     reply_to: str | list[str] | None = None
     profile: str | None = None
-    confirm: bool = False
+    confirm: bool = Field(
+        default=False,
+        description="Prompt for confirmation before sending when the client supports elicitation.",
+    )
 
 
 class ReplyEmailInput(ToolRequestModel):
@@ -248,6 +279,10 @@ class ReplyEmailInput(ToolRequestModel):
     reply_all: bool = False
     body_type: BodyType = "text"
     profile: str | None = None
+    confirm: bool = Field(
+        default=False,
+        description="Prompt for confirmation before sending the reply.",
+    )
 
 
 class ForwardEmailInput(ToolRequestModel):
@@ -255,6 +290,10 @@ class ForwardEmailInput(ToolRequestModel):
     to: str | list[str]
     comment: str | None = None
     profile: str | None = None
+    confirm: bool = Field(
+        default=False,
+        description="Prompt for confirmation before sending the forwarded message.",
+    )
 
 
 class MarkAsReadInput(ToolRequestModel):
@@ -968,40 +1007,23 @@ async def send_email(
     Returns:
         Structured send confirmation.
     """
-    if params.confirm:
-        if ctx is None or not _supports_form_elicitation(ctx):
-            return SendEmailResponse(
-                success=False,
-                action="send_email",
-                error=(
-                    "confirm=True requires an MCP host that negotiated form elicitation. "
-                    "The email was not sent."
-                ),
-            )
-        to_display = params.to if isinstance(params.to, str) else ", ".join(params.to)
-        preview = (
-            f"To: {to_display}\n"
-            f"Subject: {params.subject}\n\n"
-            f"{params.body[:200]}{'...' if len(params.body) > 200 else ''}"
+    to_display = params.to if isinstance(params.to, str) else ", ".join(params.to)
+    preview = (
+        f"To: {to_display}\n"
+        f"Subject: {params.subject}\n\n"
+        f"{params.body[:200]}{'...' if len(params.body) > 200 else ''}"
+    )
+    confirmation_error = await _email_confirmation_error(
+        confirm=params.confirm,
+        ctx=ctx,
+        prompt=f"Send this email?\n\n{preview}",
+    )
+    if confirmation_error is not None:
+        return SendEmailResponse(
+            success=False,
+            action="send_email",
+            error=confirmation_error,
         )
-        try:
-            result = await ctx.elicit(
-                f"Send this email?\n\n{preview}",
-                response_type=_Confirmation,
-            )
-        except McpError as exc:
-            if exc.error.code != mcp_types.METHOD_NOT_FOUND:
-                raise
-            return SendEmailResponse(
-                success=False,
-                action="send_email",
-                error=(
-                    "The MCP client advertised elicitation but did not implement it. "
-                    "The email was not sent."
-                ),
-            )
-        if result.action != "accept" or not result.data.confirmed:
-            return SendEmailResponse(success=False, action="send_email", error="Cancelled by user.")
 
     g = get_graph(params.profile)
     message: dict = {
@@ -1047,6 +1069,7 @@ async def send_email(
 
 async def reply_email(
     params: ReplyEmailInput,
+    ctx: Context | None = None,
 ) -> ReplyEmailResponse:
     """
     Reply to an existing email message.
@@ -1057,12 +1080,32 @@ async def reply_email(
         reply_all: When True, reply to all recipients. Defaults to False.
         body_type: 'text' or 'html'. Defaults to 'text'.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
+        confirm: When True, prompt the user before sending the reply.
 
     Returns:
         Structured reply confirmation.
     """
-    g = get_graph(params.profile)
     endpoint = "replyAll" if params.reply_all else "reply"
+    action = "reply_all" if params.reply_all else "reply"
+    body_preview = f"{params.body[:200]}{'...' if len(params.body) > 200 else ''}"
+    confirmation_error = await _email_confirmation_error(
+        confirm=params.confirm,
+        ctx=ctx,
+        prompt=(
+            f"Send this {'reply-all' if params.reply_all else 'reply'} "
+            f"to message {params.message_id}?\n\n{body_preview}"
+        ),
+    )
+    if confirmation_error is not None:
+        return ReplyEmailResponse(
+            success=False,
+            action=action,
+            error=confirmation_error,
+            message_id=params.message_id,
+            body_type=params.body_type,
+        )
+
+    g = get_graph(params.profile)
     if params.body_type.lower() == "html":
         payload = {
             "message": {
@@ -1082,7 +1125,7 @@ async def reply_email(
 
     return ReplyEmailResponse(
         success=True,
-        action="reply_all" if params.reply_all else "reply",
+        action=action,
         message_id=params.message_id,
         body_type=params.body_type,
     )
@@ -1095,6 +1138,7 @@ async def reply_email(
 
 async def forward_email(
     params: ForwardEmailInput,
+    ctx: Context | None = None,
 ) -> ForwardEmailResponse:
     """
     Forward an email message to one or more recipients.
@@ -1104,13 +1148,42 @@ async def forward_email(
         to: Recipient address(es). Comma-separated string or list.
         comment: Optional comment to prepend to the forwarded message.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
+        confirm: When True, prompt the user before sending the forwarded message.
 
     Returns:
         Structured forward confirmation.
     """
+    recipients = parse_recipients(params.to)
+    to_addresses = [
+        recipient.get("emailAddress", {}).get("address", "")
+        for recipient in recipients
+    ]
+    to_display = ", ".join(to_addresses)
+    comment_preview = params.comment or "(no comment)"
+    comment_preview = (
+        f"{comment_preview[:200]}{'...' if len(comment_preview) > 200 else ''}"
+    )
+    confirmation_error = await _email_confirmation_error(
+        confirm=params.confirm,
+        ctx=ctx,
+        prompt=(
+            f"Forward message {params.message_id}?\n\n"
+            f"To: {to_display}\nComment: {comment_preview}"
+        ),
+    )
+    if confirmation_error is not None:
+        return ForwardEmailResponse(
+            success=False,
+            action="forward",
+            error=confirmation_error,
+            message_id=params.message_id,
+            to=to_addresses,
+            comment=params.comment or "",
+        )
+
     g = get_graph(params.profile)
     payload: dict = {
-        "toRecipients": parse_recipients(params.to),
+        "toRecipients": recipients,
         "comment": params.comment or "",
     }
 

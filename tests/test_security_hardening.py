@@ -200,6 +200,107 @@ async def test_send_email_confirm_cancellation_does_not_call_graph(
 
 
 @pytest.mark.asyncio
+async def test_reply_email_confirm_requires_elicitation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mail,
+        "get_graph",
+        lambda _profile: (_ for _ in ()).throw(AssertionError("Graph must not be called")),
+    )
+
+    result = await mail.reply_email(
+        mail.ReplyEmailInput(
+            message_id="message-id",
+            body="Reply body",
+            confirm=True,
+        ),
+        ctx=None,
+    )
+
+    assert result.success is False
+    assert result.action == "reply"
+    assert "confirm=True requires" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_forward_email_confirmation_cancellation_does_not_call_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mail,
+        "get_graph",
+        lambda _profile: (_ for _ in ()).throw(AssertionError("Graph must not be called")),
+    )
+    cancelled = SimpleNamespace(
+        action="cancel", data=SimpleNamespace(confirmed=False)
+    )
+
+    result = await mail.forward_email(
+        mail.ForwardEmailInput(
+            message_id="message-id",
+            to="recipient@example.com",
+            confirm=True,
+        ),
+        ctx=_EmailConfirmationContext(supported=True, result=cancelled),
+    )
+
+    assert result.success is False
+    assert result.error == "Cancelled by user."
+
+
+@pytest.mark.asyncio
+async def test_reply_email_confirmation_acceptance_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def post(self, path: str, json: dict | None = None):
+            captured["path"] = path
+
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: DummyGraph())
+
+    result = await mail.reply_email(
+        mail.ReplyEmailInput(
+            message_id="message-id",
+            body="Reply body",
+            reply_all=True,
+            confirm=True,
+        ),
+        ctx=_EmailConfirmationContext(supported=True),
+    )
+
+    assert result.success is True
+    assert result.action == "reply_all"
+    assert captured["path"] == "/me/messages/message-id/replyAll"
+
+
+@pytest.mark.asyncio
+async def test_forward_email_without_confirmation_still_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyGraph:
+        async def post(self, path: str, json: dict | None = None):
+            captured["path"] = path
+
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: DummyGraph())
+
+    result = await mail.forward_email(
+        mail.ForwardEmailInput(
+            message_id="message-id",
+            to="recipient@example.com",
+        ),
+        ctx=None,
+    )
+
+    assert result.success is True
+    assert captured["path"] == "/me/messages/message-id/forward"
+
+
+@pytest.mark.asyncio
 async def test_delete_email_with_confirm_false_still_deletes(monkeypatch: pytest.MonkeyPatch) -> None:
     """When confirm=False the tool should perform the delete without elicitation.
 
