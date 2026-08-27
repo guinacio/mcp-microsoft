@@ -47,6 +47,25 @@ async def test_send_email_tool_hides_ctx_and_uses_params_object() -> None:
 
 
 @pytest.mark.asyncio
+async def test_filter_emails_schema_exposes_safe_recipient_search() -> None:
+    mcp = FastMCP("test-server")
+    mail.register(mcp)
+
+    tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+    params_schema = _inner_params_schema(tools["filter_emails"])
+
+    recipient_schema = params_schema["properties"]["to_address"]
+    string_schema = next(
+        variant
+        for variant in recipient_schema["anyOf"]
+        if variant.get("type") == "string"
+    )
+    assert string_schema["maxLength"] == 320
+    assert "documented to: search" in recipient_schema["description"]
+    assert params_schema["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
 async def test_move_or_copy_item_tool_preserves_copy_field_name() -> None:
     mcp = FastMCP("test-server")
     onedrive.register(mcp)
