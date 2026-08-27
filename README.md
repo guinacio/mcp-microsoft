@@ -12,7 +12,7 @@ Microsoft 365 MCP server — Mail, Calendar, OneDrive, SharePoint, Contacts, and
 
 ## Overview
 
-`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers six surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, SharePoint, contacts, and Teams — **95 tools** in stdio mode with every optional service enabled. The exact count depends on your feature flags and, since 0.8.0, on transport mode: the multi-user remote (`http`) mode omits profile-management and local-disk tools, landing at **87 tools** with everything else enabled — see [Remote server — multi-user (Streamable HTTP)](#remote-server--multi-user-streamable-http) below.
+`mcp-microsoft` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude (and any other MCP client) full access to your Microsoft 365 account. It covers six surface areas of the Microsoft Graph API: email, calendar, OneDrive file storage, SharePoint, contacts, and Teams — **96 tools** in stdio mode with every optional service enabled. The exact count depends on your feature flags and, since 0.8.0, on transport mode: the multi-user remote (`http`) mode omits profile-management and local-disk tools, landing at **88 tools** with everything else enabled — see [Remote server — multi-user (Streamable HTTP)](#remote-server--multi-user-streamable-http) below.
 
 The server works with both personal Microsoft accounts (Outlook.com, Live) and enterprise accounts (Azure AD / Entra ID) using a single App Registration. Teams and SharePoint require a work or school account and are gated behind feature flags (`MCP_ENABLE_TEAMS` / `MCP_ENABLE_SHAREPOINT`). On manual installs, they auto-enable for corporate-oriented tenant values (`common`, `organizations`, or a specific tenant ID). In Claude Desktop / MCPB, the installer toggles remain authoritative. You can always override the default with the environment flags to force either service on or off. Teams meeting transcripts/recordings and Copilot AI insights are separate explicit opt-ins so the server does not request those additional scopes unless you enable them.
 
@@ -22,9 +22,9 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 
 ## Features
 
-### Tools (95 total in stdio mode, all optional services enabled)
+### Tools (96 total in stdio mode, all optional services enabled)
 
-#### Mail (25 tools)
+#### Mail (26 tools)
 
 - `list_emails` — list messages from any folder with pagination and unread filter
 - `read_email` — fetch the full body of a message by ID (supports summary mode)
@@ -40,7 +40,7 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `bulk_move_emails` — move multiple messages to a folder in one operation
 - `bulk_trash_emails` — move multiple messages to Deleted Items
 - `bulk_delete_emails` — permanently delete multiple messages (irreversible)
-- `create_draft` / `get_draft` / `list_drafts` / `update_draft` / `send_draft` — full draft lifecycle
+- `create_draft` / `create_reply_draft` / `get_draft` / `list_drafts` / `update_draft` / `send_draft` — full draft lifecycle, including reply and reply-all drafts that retain quoted conversation history
 - `list_folders` / `create_folder` / `delete_folder` — manage mailbox folders
 - `list_attachments` / `download_attachment` — inspect and save attachments
 

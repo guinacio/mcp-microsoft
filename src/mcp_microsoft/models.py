@@ -195,12 +195,19 @@ class CreateDraftResponse(ActionResult):
     body_type: str = ""
 
 
+class CreateReplyDraftResponse(ActionResult):
+    draft_id: str = ""
+    original_message_id: str = ""
+    reply_all: bool = False
+    body_type: str = ""
+
+
 class ListDraftsResponse(MCPModel):
     count: int = 0
     drafts: list[DraftSummary] = Field(default_factory=list)
 
 
-class DraftDetailResponse(MCPModel):
+class DraftDetailResponse(ActionResult):
     id: str = ""
     subject: str = ""
     to: list[Address] = Field(default_factory=list)
