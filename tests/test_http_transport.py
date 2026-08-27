@@ -913,7 +913,7 @@ async def test_download_attachment_http_schema_omits_save_path(
 
 
 @pytest.mark.asyncio
-async def test_send_email_http_schema_preserves_elicitation_confirmation() -> None:
+async def test_email_action_schemas_preserve_elicitation_confirmation() -> None:
     from fastmcp import FastMCP
 
     from mcp_microsoft.tools import mail
@@ -921,14 +921,17 @@ async def test_send_email_http_schema_preserves_elicitation_confirmation() -> No
     mcp = FastMCP("test-server")
     mail.register(mcp)
 
-    tool = next(
-        tool
-        for tool in await mcp.list_tools(run_middleware=False)
-        if tool.name == "send_email"
-    )
-    input_properties = tool.parameters["$defs"]["SendEmailInput"]["properties"]
+    tools = {
+        tool.name: tool for tool in await mcp.list_tools(run_middleware=False)
+    }
 
-    assert "confirm" in input_properties
+    for tool_name, model_name in (
+        ("send_email", "SendEmailInput"),
+        ("reply_email", "ReplyEmailInput"),
+        ("forward_email", "ForwardEmailInput"),
+    ):
+        input_properties = tools[tool_name].parameters["$defs"][model_name]["properties"]
+        assert "confirm" in input_properties
 
 
 @pytest.mark.asyncio

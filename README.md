@@ -31,8 +31,8 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 - `search_emails` — search using Microsoft Graph KQL `$search` syntax (max 25 results)
 - `filter_emails` — find emails by sender, recipient, subject, date range, or attachments with full pagination
 - `send_email` — compose and send a new message (to/cc/bcc, HTML or plain text)
-- `reply_email` — reply or reply-all to an existing message
-- `forward_email` — forward a message to one or more recipients
+- `reply_email` — reply or reply-all to an existing message (optional confirmation)
+- `forward_email` — forward a message to one or more recipients (optional confirmation)
 - `mark_as_read` / `mark_as_unread` — toggle read state
 - `move_email` — move to any folder by well-known name or folder ID
 - `trash_email` — soft-delete to Deleted Items (recoverable)
