@@ -66,6 +66,30 @@ async def test_filter_emails_schema_exposes_safe_recipient_search() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mail_search_schemas_default_to_entire_mailbox() -> None:
+    mcp = FastMCP("test-server")
+    mail.register(mcp)
+
+    tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+    for tool_name in ("search_emails", "filter_emails"):
+        folder_schema = _inner_params_schema(tools[tool_name])["properties"]["folder"]
+        assert folder_schema["default"] is None
+        assert "entire mailbox" in folder_schema["description"]
+
+    output_folder_schema = tools["filter_emails"].output_schema["properties"][
+        "folder"
+    ]
+    assert {variant["type"] for variant in output_folder_schema["anyOf"]} == {
+        "string",
+        "null",
+    }
+    assert output_folder_schema["default"] is None
+    assert "entire mailbox" in output_folder_schema["description"]
+    assert "Mail.ReadWrite" in tools["search_emails"].description
+    assert "Mail.ReadWrite" in tools["filter_emails"].description
+
+
+@pytest.mark.asyncio
 async def test_move_or_copy_item_tool_preserves_copy_field_name() -> None:
     mcp = FastMCP("test-server")
     onedrive.register(mcp)
