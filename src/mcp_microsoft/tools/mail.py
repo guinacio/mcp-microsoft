@@ -23,13 +23,18 @@ Implemented:
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
 import re
 from typing import Any, Callable, Literal, Optional
+from urllib.parse import unquote, urlsplit
 
 from fastmcp.server.context import Context
 from mcp import types as mcp_types
 from mcp.shared.exceptions import McpError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mcp_microsoft.common.mail_utils import (
     format_mail_datetime,
@@ -162,23 +167,66 @@ class ReadEmailInput(ToolRequestModel):
 class SearchEmailsInput(ToolRequestModel):
     query: str
     max_results: int = 10
-    folder: str | None = None
+    folder: str | None = Field(
+        default=None,
+        description=(
+            "Optional folder name or ID. Omit to search the entire mailbox, "
+            "including system folders such as Sent Items, Drafts, Junk, and Deleted Items."
+        ),
+    )
     profile: str | None = None
 
 
 class FilterEmailsInput(ToolRequestModel):
+    model_config = ConfigDict(extra="forbid")
+
     from_address: str | None = None
-    to_address: str | None = None
+    to_address: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=320,
+        pattern=r'^[^\s"():<>]+@[^\s"():<>]+$',
+        description=(
+            "Recipient email address. Uses Microsoft Graph's documented to: search "
+            "rather than OData filtering and cannot be combined with other filter "
+            "criteria. Up to 1,000 matching messages can be paged."
+        ),
+    )
     subject_contains: str | None = None
     received_after: str | None = None
     received_before: str | None = None
     has_attachments: bool | None = None
     importance: Literal["low", "normal", "high"] | None = None
-    folder: str = "inbox"
+    folder: str | None = Field(
+        default=None,
+        description=(
+            "Optional folder name or ID. Omit to filter the entire mailbox, "
+            "including system folders such as Sent Items, Drafts, Junk, and Deleted Items."
+        ),
+    )
     max_results: int = 50
     sort_order: Literal["newest", "oldest"] = "newest"
     skip_token: str | None = None
     profile: str | None = None
+
+    @model_validator(mode="after")
+    def validate_recipient_search(self) -> FilterEmailsInput:
+        if self.to_address and any(
+            value is not None
+            for value in (
+                self.from_address,
+                self.subject_contains,
+                self.received_after,
+                self.received_before,
+                self.has_attachments,
+                self.importance,
+            )
+        ):
+            raise ValueError(
+                "to_address cannot be combined with other filter criteria; "
+                "Microsoft Graph does not support combining message $search and $filter"
+            )
+        return self
 
 
 class SendEmailInput(ToolRequestModel):
@@ -468,66 +516,67 @@ async def read_email(
 # ---------------------------------------------------------------------------
 
 
-_KQL_OPERATORS = frozenset({"AND", "OR", "NOT"})
-_MAIL_KQL_PROPERTIES = frozenset(
-    {
-        "attachment",
-        "bcc",
-        "body",
-        "cc",
-        "from",
-        "hasattachment",
-        "importance",
-        "isread",
-        "kind",
-        "participants",
-        "received",
-        "sent",
-        "subject",
-        "to",
-    }
-)
+_QUOTED_SEARCH_TERM_PATTERN = re.compile(r'"(?P<value>(?:\\.|[^"\\])*)"')
 _SUBJECT_SEARCH_PATTERN = re.compile(
     r'^subject\s*:\s*"(?P<subject>(?:\\.|[^"\\])*)"$',
     flags=re.IGNORECASE,
 )
+_RECIPIENT_SEARCH_MAX_RESULTS = 1_000
+_RECIPIENT_SEARCH_CURSOR_PREFIX = "m1."
+_RECIPIENT_SEARCH_CURSOR_MAX_LENGTH = 1_024
+_MAIL_FILTER_CURSOR_PREFIX = "mf1."
+_MAIL_FILTER_CURSOR_MAX_LENGTH = 16_384
+_GRAPH_MAIL_CONTINUATION_MAX_LENGTH = 12_000
+
+
+class _RecipientSearchCursorState(BaseModel):
+    """Versioned state for paging a bounded recipient search."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    offset: int = Field(ge=1, le=_RECIPIENT_SEARCH_MAX_RESULTS)
+
+
+class _MailFilterCursorState(BaseModel):
+    """Versioned state containing a validated Graph continuation link."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page_link: str = Field(min_length=1, max_length=_GRAPH_MAIL_CONTINUATION_MAX_LENGTH)
 
 
 def _normalize_email_search_query(query: str) -> str:
-    """Preserve structured KQL while quoting punctuation-bearing operands."""
+    """Build the quoted message-search expression required by Graph."""
     query = query.strip()
-    is_structured = bool(
-        '"' in query
-        or "(" in query
-        or ")" in query
-        or re.search(r"\b(?:AND|OR|NOT)\b", query, flags=re.IGNORECASE)
-        or re.search(r"\b[A-Za-z][A-Za-z0-9]*:", query)
-    )
-    if not is_structured:
-        return f'"{query}"'
+    if not query or any(ord(character) < 0x20 for character in query):
+        raise ValueError("email search query must contain printable text")
 
-    parts = re.split(r'("(?:\\.|[^"\\])*"|[()\s]+)', query)
-    normalized: list[str] = []
-    for part in parts:
-        if (
-            not part
-            or part.isspace()
-            or part in {"(", ")"}
-            or (part.startswith('"') and part.endswith('"'))
-            or part.upper() in _KQL_OPERATORS
-        ):
-            normalized.append(part)
-            continue
+    # Graph documents one enclosing quote pair for message $search values,
+    # including property restrictions such as ``to:alias@example.com``.
+    # A caller that already supplied that complete envelope can pass it through.
+    complete_envelope = _QUOTED_SEARCH_TERM_PATTERN.fullmatch(query)
+    if complete_envelope:
+        if not complete_envelope.group("value"):
+            raise ValueError("email search query must not be empty")
+        return query
 
-        property_name, separator, value = part.partition(":")
-        if separator and property_name.casefold() in _MAIL_KQL_PROPERTIES:
-            if value and any(character in value for character in ".@"):
-                part = f'{property_name}:"{value}"'
-        elif any(character in part for character in ".@"):
-            part = f'"{part}"'
-        normalized.append(part)
+    def _unquote_atomic_term(match: re.Match[str]) -> str:
+        value = match.group("value")
+        if not value or "\\" in value or any(character.isspace() for character in value):
+            raise ValueError(
+                "nested quoted phrases are not supported in Graph message searches; "
+                "use an unquoted KQL term or filter_emails"
+            )
+        return value
 
-    return "".join(normalized)
+    normalized = _QUOTED_SEARCH_TERM_PATTERN.sub(_unquote_atomic_term, query)
+    if '"' in normalized:
+        raise ValueError("email search query contains unbalanced quotes")
+    return f'"{normalized}"'
 
 
 def _subject_search_filter(query: str) -> str | None:
@@ -539,6 +588,184 @@ def _subject_search_filter(query: str) -> str | None:
     return f"contains(subject, '{subject}')"
 
 
+def _mail_collection_path(folder: str | None) -> str:
+    if folder:
+        return f"/me/mailFolders/{folder}/messages"
+    return "/me/messages"
+
+
+def _mail_filter_fingerprint(params: FilterEmailsInput) -> str:
+    material = "\0".join(
+        (
+            params.folder or "",
+            params.from_address or "",
+            params.subject_contains or "",
+            params.received_after or "",
+            params.received_before or "",
+            "" if params.has_attachments is None else str(params.has_attachments),
+            params.importance or "",
+            params.sort_order,
+            str(params.max_results),
+            params.profile or "",
+        )
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _graph_mail_continuation_request(next_link: str, expected_path: str) -> str:
+    if not next_link or len(next_link) > _GRAPH_MAIL_CONTINUATION_MAX_LENGTH:
+        raise ValueError("Microsoft Graph returned an invalid mail continuation link")
+
+    parsed = urlsplit(next_link)
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.netloc.casefold() != "graph.microsoft.com"
+        or unquote(parsed.path) != f"/v1.0{expected_path}"
+        or not parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Microsoft Graph returned an invalid mail continuation link")
+
+    return f"{parsed.path.removeprefix('/v1.0')}?{parsed.query}"
+
+
+def _encode_mail_filter_cursor(
+    *,
+    fingerprint: str,
+    page_link: str,
+    expected_path: str,
+) -> str:
+    _graph_mail_continuation_request(page_link, expected_path)
+    state = _MailFilterCursorState(
+        fingerprint=fingerprint,
+        page_link=page_link,
+    )
+    payload = base64.urlsafe_b64encode(state.model_dump_json().encode()).rstrip(b"=")
+    cursor = f"{_MAIL_FILTER_CURSOR_PREFIX}{payload.decode('ascii')}"
+    if len(cursor) > _MAIL_FILTER_CURSOR_MAX_LENGTH:
+        raise ValueError("Microsoft Graph returned an oversized mail continuation link")
+    return cursor
+
+
+def _decode_mail_filter_cursor(
+    cursor: str,
+    *,
+    fingerprint: str,
+    expected_path: str,
+) -> str:
+    try:
+        if (
+            len(cursor) > _MAIL_FILTER_CURSOR_MAX_LENGTH
+            or not cursor.startswith(_MAIL_FILTER_CURSOR_PREFIX)
+        ):
+            raise ValueError
+        encoded = cursor.removeprefix(_MAIL_FILTER_CURSOR_PREFIX)
+        padding = "=" * (-len(encoded) % 4)
+        payload = base64.b64decode(
+            f"{encoded}{padding}",
+            altchars=b"-_",
+            validate=True,
+        )
+        state = _MailFilterCursorState.model_validate_json(payload)
+    except (binascii.Error, UnicodeError, ValidationError, ValueError):
+        raise ValueError("mail filter cursor is invalid or expired") from None
+
+    if not hmac.compare_digest(state.fingerprint, fingerprint):
+        raise ValueError("mail filter cursor does not match this query or folder")
+    return _graph_mail_continuation_request(state.page_link, expected_path)
+
+
+def _recipient_search_fingerprint(params: FilterEmailsInput) -> str:
+    material = "\0".join(
+        (
+            (params.folder or "").casefold(),
+            (params.to_address or "").casefold(),
+            params.sort_order,
+            params.profile or "",
+        )
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _encode_recipient_search_cursor(*, fingerprint: str, offset: int) -> str:
+    state = _RecipientSearchCursorState(fingerprint=fingerprint, offset=offset)
+    payload = base64.urlsafe_b64encode(state.model_dump_json().encode()).rstrip(b"=")
+    cursor = f"{_RECIPIENT_SEARCH_CURSOR_PREFIX}{payload.decode('ascii')}"
+    if len(cursor) > _RECIPIENT_SEARCH_CURSOR_MAX_LENGTH:
+        raise ValueError("recipient search cursor is too large")
+    return cursor
+
+
+def _decode_recipient_search_cursor(cursor: str, *, fingerprint: str) -> int:
+    try:
+        if (
+            len(cursor) > _RECIPIENT_SEARCH_CURSOR_MAX_LENGTH
+            or not cursor.startswith(_RECIPIENT_SEARCH_CURSOR_PREFIX)
+        ):
+            raise ValueError
+        encoded = cursor.removeprefix(_RECIPIENT_SEARCH_CURSOR_PREFIX)
+        padding = "=" * (-len(encoded) % 4)
+        payload = base64.b64decode(
+            f"{encoded}{padding}",
+            altchars=b"-_",
+            validate=True,
+        )
+        state = _RecipientSearchCursorState.model_validate_json(payload)
+    except (binascii.Error, UnicodeError, ValidationError, ValueError):
+        raise ValueError("recipient search cursor is invalid or expired") from None
+
+    if not hmac.compare_digest(state.fingerprint, fingerprint):
+        raise ValueError("recipient search cursor does not match this query or folder")
+    return state.offset
+
+
+async def _filter_emails_by_recipient(
+    params: FilterEmailsInput,
+) -> ListEmailsResponse:
+    """Run the documented recipient KQL search and page its bounded result set."""
+    fingerprint = _recipient_search_fingerprint(params)
+    offset = 0
+    if params.skip_token:
+        offset = _decode_recipient_search_cursor(
+            params.skip_token,
+            fingerprint=fingerprint,
+        )
+
+    g = get_graph(params.profile)
+    query = {
+        "$top": _RECIPIENT_SEARCH_MAX_RESULTS,
+        "$select": (
+            "id,subject,from,receivedDateTime,isRead,bodyPreview,"
+            "hasAttachments,importance"
+        ),
+        "$search": _normalize_email_search_query(f"to:{params.to_address}"),
+    }
+    result = await g.get(_mail_collection_path(params.folder), params=query)
+    messages = parse_graph_collection(result, GraphMessage)
+    messages.sort(
+        key=lambda message: message.received_date_time or "",
+        reverse=params.sort_order == "newest",
+    )
+
+    page_size = min(max(1, params.max_results), 100)
+    page = messages[offset : offset + page_size]
+    next_offset = offset + len(page)
+    next_page_token = None
+    if next_offset < len(messages):
+        next_page_token = _encode_recipient_search_cursor(
+            fingerprint=fingerprint,
+            offset=next_offset,
+        )
+
+    return ListEmailsResponse(
+        folder=params.folder,
+        count=len(page),
+        messages=[_message_summary(message) for message in page],
+        next_page_token=next_page_token,
+        has_more=next_page_token is not None,
+    )
+
+
 async def search_emails(
     params: SearchEmailsInput,
 ) -> SearchEmailsResponse:
@@ -546,13 +773,21 @@ async def search_emails(
     Search messages using Graph KQL $search syntax.
 
     Note: Graph $search and $filter cannot be combined in the same request.
-    The Graph API caps $search results at 25 regardless of the value requested.
+    This read-only tool returns at most 25 results per request and requires a
+    delegated Microsoft Graph mail-read permission. This server requests
+    ``Mail.ReadWrite`` for its combined read/write mail toolset.
 
     Args:
-        query: KQL search string, e.g. 'from:alice@example.com' or 'project update'.
+        query: KQL search string, e.g. 'from:alias@example.com' or
+            'to:alias@example.com', 'recipients:alias@example.com', or
+            'project update'. Use ``to:`` for To recipients and
+            ``recipients:`` for To, Cc, or Bcc recipients. Do not quote
+            individual atomic property values; use filter_emails for an exact
+            multiword subject phrase.
         max_results: Maximum number of results (1-25). Values above 25 are
-            silently capped by the Graph API. Defaults to 10.
-        folder: Optional well-known folder name or folder ID to restrict the search.
+            capped by this tool. Defaults to 10.
+        folder: Optional well-known folder name or folder ID. Omit to search
+            the entire mailbox, including Sent, Drafts, Junk, and Deleted Items.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
@@ -567,12 +802,11 @@ async def search_emails(
     if subject_filter:
         query_params["$filter"] = subject_filter
     else:
+        # Microsoft Graph requires the complete message-search expression to
+        # be enclosed in one pair of double quotes.
         query_params["$search"] = _normalize_email_search_query(params.query)
 
-    if params.folder:
-        path = f"/me/mailFolders/{params.folder}/messages"
-    else:
-        path = "/me/messages"
+    path = _mail_collection_path(params.folder)
 
     result = await g.get(path, params=query_params)
     messages = parse_graph_collection(result, GraphMessage)
@@ -594,19 +828,27 @@ async def filter_emails(
     params: FilterEmailsInput,
 ) -> ListEmailsResponse:
     """
-    Find emails matching specific criteria using OData $filter.
+    Find emails using supported Microsoft Graph filtering or recipient search.
 
     Unlike search_emails (which is limited to 25 results), this tool
     supports up to 100 results per page with full pagination — ideal for
     finding all emails from a sender, within a date range, or matching
-    a subject.
+    a subject. Recipient lookup uses Graph's documented ``to:`` search,
+    scans at most 1,000 matches, and exposes those matches through opaque
+    local pagination because Graph does not support filtering the message
+    ``toRecipients`` collection with OData.
 
-    All filter parameters are combined with AND logic. Omitted parameters
-    are not filtered on.
+    OData filter parameters are combined with AND logic. ``to_address``
+    cannot be combined with those parameters because Microsoft Graph does
+    not support combining ``$search`` and ``$filter`` on messages. This is a
+    read-only tool requiring a delegated Microsoft Graph mail-read permission;
+    this server requests ``Mail.ReadWrite`` for its combined mail toolset.
 
     Args:
         from_address: Filter by sender email address (exact match).
-        to_address: Filter by recipient email address (exact match).
+        to_address: Search the To field for this email address. This is
+            mutually exclusive with the other filter criteria and returns at
+            most 1,000 Graph matches across local pages.
         subject_contains: Filter by subject containing this text (case-insensitive).
         received_after: Only messages received on or after this date.
             ISO 8601 format: '2026-01-01' or '2026-01-01T00:00:00Z'.
@@ -615,7 +857,8 @@ async def filter_emails(
         has_attachments: When True, only messages with attachments.
             When False, only messages without.
         importance: Filter by importance level: 'low', 'normal', or 'high'.
-        folder: Well-known folder name or folder ID. Defaults to 'inbox'.
+        folder: Optional well-known folder name or folder ID. Omit to filter
+            the entire mailbox, including Sent, Drafts, Junk, and Deleted Items.
         max_results: Maximum number of messages to return (1-100). Defaults to 50.
         sort_order: 'newest' (default) or 'oldest' first.
         skip_token: Opaque pagination cursor returned as next_page_token from a
@@ -625,7 +868,12 @@ async def filter_emails(
     Returns:
         Structured message summaries with pagination metadata.
     """
+    if params.to_address:
+        return await _filter_emails_by_recipient(params)
+
     g = get_graph(params.profile)
+    path = _mail_collection_path(params.folder)
+    fingerprint = _mail_filter_fingerprint(params)
     order = "receivedDateTime asc" if params.sort_order == "oldest" else "receivedDateTime desc"
     query: dict[str, Any] = {
         "$top": min(max(1, params.max_results), 100),
@@ -646,9 +894,6 @@ async def filter_emails(
     if params.from_address:
         safe = params.from_address.replace("'", "''")
         clauses.append(f"from/emailAddress/address eq '{safe}'")
-    if params.to_address:
-        safe = params.to_address.replace("'", "''")
-        clauses.append(f"toRecipients/any(r:r/emailAddress/address eq '{safe}')")
     if params.subject_contains:
         safe = params.subject_contains.replace("'", "''")
         clauses.append(f"contains(subject, '{safe}')")
@@ -662,19 +907,30 @@ async def filter_emails(
             date_clauses.append("receivedDateTime ge 1900-01-01T00:00:00Z")
         query["$filter"] = " and ".join(date_clauses + clauses)
 
-    if params.skip_token is not None:
-        query["$skiptoken"] = params.skip_token
-
-    result = await g.get(f"/me/mailFolders/{params.folder}/messages", params=query)
+    if params.skip_token and params.skip_token.startswith(_MAIL_FILTER_CURSOR_PREFIX):
+        continuation_path = _decode_mail_filter_cursor(
+            params.skip_token,
+            fingerprint=fingerprint,
+            expected_path=path,
+        )
+        result = await g.get(continuation_path)
+    else:
+        # Accept legacy raw $skiptoken values while issuing only complete,
+        # validated continuation cursors in new responses.
+        if params.skip_token is not None:
+            query["$skiptoken"] = params.skip_token
+        result = await g.get(path, params=query)
 
     messages = parse_graph_collection(result, GraphMessage)
     next_link = result.get("@odata.nextLink")
 
-    from urllib.parse import parse_qs, urlparse
     next_page_token: str | None = None
     if next_link:
-        qs = parse_qs(urlparse(next_link).query)
-        next_page_token = qs.get("$skiptoken", [None])[0]
+        next_page_token = _encode_mail_filter_cursor(
+            fingerprint=fingerprint,
+            page_link=next_link,
+            expected_path=path,
+        )
 
     return ListEmailsResponse(
         folder=params.folder,

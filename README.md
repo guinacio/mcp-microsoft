@@ -28,8 +28,8 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 
 - `list_emails` — list messages from any folder with pagination and unread filter
 - `read_email` — fetch the full body of a message by ID (supports summary mode)
-- `search_emails` — search using Microsoft Graph KQL `$search` syntax (max 25 results)
-- `filter_emails` — find emails by sender, recipient, subject, date range, or attachments with full pagination
+- `search_emails` — search the entire mailbox by default using Microsoft Graph KQL `$search` syntax (max 25 results); optionally restrict to a folder
+- `filter_emails` — filter the entire mailbox by default by sender, recipient, subject, date range, or attachments; optionally restrict to a folder (recipient searches use documented KQL with a bounded 1,000-match result set)
 - `send_email` — compose and send a new message (to/cc/bcc, HTML or plain text)
 - `reply_email` — reply or reply-all to an existing message
 - `forward_email` — forward a message to one or more recipients
