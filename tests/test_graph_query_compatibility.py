@@ -249,6 +249,29 @@ async def test_filter_emails_accepts_graph_canonical_folder_continuation(
 
 
 @pytest.mark.parametrize(
+    ("next_link", "expected_request"),
+    [
+        (
+            "https://graph.microsoft.com/v1.0/me/mailFolders/opaque-id/messages?%24skip=1",
+            "/me/mailFolders/opaque-id/messages?%24skip=1",
+        ),
+        (
+            "https://graph.microsoft.com/v1.0/me/mailFolders('opaque-id')/messages?%24skip=1",
+            "/me/mailFolders('opaque-id')/messages?%24skip=1",
+        ),
+    ],
+)
+def test_filter_emails_accepts_documented_folder_continuation_shapes(
+    next_link: str,
+    expected_request: str,
+) -> None:
+    assert mail._graph_mail_continuation_request(
+        next_link,
+        "/me/mailFolders/sentitems/messages",
+    ) == expected_request
+
+
+@pytest.mark.parametrize(
     "unsafe_path",
     [
         "/v1.0/users/other/messages",

@@ -250,8 +250,20 @@ async def test_forward_email_confirmation_cancellation_does_not_call_graph(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reply_all", "body", "body_type", "endpoint", "action"),
+    [
+        (False, "Reply body", "text", "reply", "reply"),
+        (True, "<p>Reply body</p>", "html", "replyAll", "reply_all"),
+    ],
+)
 async def test_reply_email_confirmation_acceptance_sends(
     monkeypatch: pytest.MonkeyPatch,
+    reply_all: bool,
+    body: str,
+    body_type: str,
+    endpoint: str,
+    action: str,
 ) -> None:
     captured: dict[str, object] = {}
 
@@ -265,18 +277,18 @@ async def test_reply_email_confirmation_acceptance_sends(
     result = await mail.reply_email(
         mail.ReplyEmailInput(
             message_id="message-id",
-            body="<p>Reply body</p>",
-            reply_all=True,
-            body_type="html",
+            body=body,
+            reply_all=reply_all,
+            body_type=body_type,
             confirm=True,
         ),
         ctx=_EmailConfirmationContext(supported=True),
     )
 
     assert result.success is True
-    assert result.action == "reply_all"
-    assert captured["path"] == "/me/messages/message-id/replyAll"
-    assert captured["json"] == {"comment": "<p>Reply body</p>"}
+    assert result.action == action
+    assert captured["path"] == f"/me/messages/message-id/{endpoint}"
+    assert captured["json"] == {"comment": body}
 
 
 @pytest.mark.asyncio
