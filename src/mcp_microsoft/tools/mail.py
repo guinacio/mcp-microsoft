@@ -656,16 +656,58 @@ def _graph_mail_continuation_request(next_link: str, expected_path: str) -> str:
         raise ValueError("Microsoft Graph returned an invalid mail continuation link")
 
     parsed = urlsplit(next_link)
+    decoded_path = unquote(parsed.path)
+    expected_versioned_path = f"/v1.0{expected_path}"
+    path_matches = decoded_path.casefold() == expected_versioned_path.casefold()
+
+    # A request that uses a well-known folder name can return a nextLink whose
+    # path contains the folder's opaque ID instead. Graph also documents the
+    # OData parenthesis form: /me/mailFolders('ID')/messages. Accept either
+    # canonical folder-message collection shape, but no other Graph resource.
+    expected_folder_prefix = "/me/mailfolders/"
+    expected_folder_suffix = "/messages"
+    expected_path_folded = expected_path.casefold()
+    if (
+        not path_matches
+        and expected_path_folded.startswith(expected_folder_prefix)
+        and expected_path_folded.endswith(expected_folder_suffix)
+    ):
+        raw_path_folded = parsed.path.casefold()
+        direct_prefix = "/v1.0/me/mailfolders/"
+        parenthesized_prefix = "/v1.0/me/mailfolders("
+        direct_middle = (
+            raw_path_folded[len(direct_prefix) : -len(expected_folder_suffix)]
+            if raw_path_folded.startswith(direct_prefix)
+            and raw_path_folded.endswith(expected_folder_suffix)
+            else ""
+        )
+        parenthesized_middle = (
+            raw_path_folded[
+                len(parenthesized_prefix) : -len(")/messages")
+            ]
+            if raw_path_folded.startswith(parenthesized_prefix)
+            and raw_path_folded.endswith(")/messages")
+            else ""
+        )
+        path_matches = (
+            bool(direct_middle) and "/" not in direct_middle
+        ) or (
+            len(parenthesized_middle) >= 2
+            and parenthesized_middle.startswith("'")
+            and parenthesized_middle.endswith("'")
+            and "/" not in parenthesized_middle
+        )
+
     if (
         parsed.scheme.casefold() != "https"
         or parsed.netloc.casefold() != "graph.microsoft.com"
-        or unquote(parsed.path) != f"/v1.0{expected_path}"
+        or not path_matches
         or not parsed.query
         or parsed.fragment
     ):
         raise ValueError("Microsoft Graph returned an invalid mail continuation link")
 
-    return f"{parsed.path.removeprefix('/v1.0')}?{parsed.query}"
+    return f"{parsed.path[len('/v1.0'):]}?{parsed.query}"
 
 
 def _encode_mail_filter_cursor(
@@ -1072,11 +1114,11 @@ async def reply_email(
     ctx: Context | None = None,
 ) -> ReplyEmailResponse:
     """
-    Reply to an existing email message.
+    Reply to an existing email message while retaining the quoted history.
 
     Args:
         message_id: The Graph message ID to reply to.
-        body: Reply body text or HTML.
+        body: Reply body text or HTML, inserted above Graph's quoted history.
         reply_all: When True, reply to all recipients. Defaults to False.
         body_type: 'text' or 'html'. Defaults to 'text'.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
@@ -1106,20 +1148,10 @@ async def reply_email(
         )
 
     g = get_graph(params.profile)
-    if params.body_type.lower() == "html":
-        payload = {
-            "message": {
-                "body": {
-                    "contentType": "HTML",
-                    "content": params.body,
-                }
-            }
-        }
-    else:
-        payload = {
-            "message": {},
-            "comment": params.body,
-        }
+    # Graph composes ``comment`` above its generated quoted reply history.
+    # Supplying ``message.body`` replaces that generated body, which leaves
+    # the sent reply threaded but removes the visible conversation history.
+    payload = {"comment": params.body}
 
     await g.post(f"/me/messages/{params.message_id}/{endpoint}", json=payload)
 
