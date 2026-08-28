@@ -12,15 +12,23 @@ from mcp_microsoft.tools import calendar, mail, sharepoint, teams
     [
         ("project update", '"project update"'),
         ('"project update"', '"project update"'),
-        ('to:"user@example.com"', '"to:user@example.com"'),
+        ('to:"user@example.com"', '"to:\\"user@example.com\\""'),
         ('"to:user@example.com"', '"to:user@example.com"'),
         (
             '"Denmark" AND ("LMS" OR "deployment")',
-            '"Denmark AND (LMS OR deployment)"',
+            '"\\"Denmark\\" AND (\\"LMS\\" OR \\"deployment\\")"',
+        ),
+        ('"Project Alpha" AND roadmap', '"\\"Project Alpha\\" AND roadmap"'),
+        ('"Project Alpha" roadmap', '"\\"Project Alpha\\" roadmap"'),
+        ('body:"project update" AND status', '"body:\\"project update\\" AND status"'),
+        (r'path:C:\Reports', '"path:C:\\\\Reports"'),
+        (
+            r'body:"say \"hello\""',
+            '"body:\\"say \\\\\\"hello\\\\\\"\\""',
         ),
         (
             '("Package" OR Platform OR service.example) AND (Region OR Org)',
-            '"(Package OR Platform OR service.example) AND (Region OR Org)"',
+            '"(\\"Package\\" OR Platform OR service.example) AND (Region OR Org)"',
         ),
         ('from:user@example.com AND status', '"from:user@example.com AND status"'),
     ],
@@ -48,16 +56,17 @@ async def test_search_emails_uses_graph_search_envelope(
 @pytest.mark.parametrize(
     "search_input",
     [
-        'body:"project update" AND status',
         'from:"unterminated',
+        'subject:"say \\"hello',
+        '""',
         "   ",
         "subject:status\nOR body:update",
     ],
 )
-def test_search_emails_rejects_unsupported_nested_or_unbalanced_quotes(
+def test_search_emails_rejects_empty_control_or_unbalanced_queries(
     search_input: str,
 ) -> None:
-    with pytest.raises(ValueError, match="quoted|unbalanced|printable"):
+    with pytest.raises(ValueError, match="empty|unbalanced|printable"):
         mail._normalize_email_search_query(search_input)
 
 
