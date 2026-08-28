@@ -603,19 +603,23 @@ def _normalize_email_search_query(query: str) -> str:
             raise ValueError("email search query must not be empty")
         return query
 
-    def _unquote_atomic_term(match: re.Match[str]) -> str:
-        value = match.group("value")
-        if not value or "\\" in value or any(character.isspace() for character in value):
-            raise ValueError(
-                "nested quoted phrases are not supported in Graph message searches; "
-                "use an unquoted KQL term or filter_emails"
-            )
-        return value
-
-    normalized = _QUOTED_SEARCH_TERM_PATTERN.sub(_unquote_atomic_term, query)
-    if '"' in normalized:
+    quote_open = False
+    escaped_character = False
+    for character in query:
+        if escaped_character:
+            escaped_character = False
+        elif character == "\\":
+            escaped_character = True
+        elif character == '"':
+            quote_open = not quote_open
+    if quote_open:
         raise ValueError("email search query contains unbalanced quotes")
-    return f'"{normalized}"'
+
+    # Graph requires an enclosing quote pair for message searches. Preserve
+    # KQL phrase quotes by escaping them inside that envelope instead of
+    # deleting the phrase semantics or rejecting multiword phrases.
+    escaped_query = query.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped_query}"'
 
 
 def _subject_search_filter(query: str) -> str | None:
@@ -819,10 +823,10 @@ async def search_emails(
     Args:
         query: KQL search string, e.g. 'from:alias@example.com' or
             'to:alias@example.com', 'recipients:alias@example.com', or
-            'project update'. Use ``to:`` for To recipients and
-            ``recipients:`` for To, Cc, or Bcc recipients. Do not quote
-            individual atomic property values; use filter_emails for an exact
-            multiword subject phrase.
+            '"project update" AND status'. Use ``to:`` for To recipients and
+            ``recipients:`` for To, Cc, or Bcc recipients. Straight double
+            quotes preserve exact KQL phrases; uppercase ``AND`` and ``OR``
+            combine expressions.
         max_results: Maximum number of results (1-25). Values above 25 are
             capped by this tool. Defaults to 10.
         folder: Optional well-known folder name or folder ID. Omit to search
