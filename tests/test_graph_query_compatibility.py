@@ -214,6 +214,68 @@ async def test_filter_emails_preserves_validated_graph_continuation(
 
 
 @pytest.mark.asyncio
+async def test_filter_emails_accepts_graph_canonical_folder_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict | None]] = []
+
+    class DummyGraph:
+        async def get(self, path: str, params: dict | None = None):
+            calls.append((path, params))
+            if len(calls) == 1:
+                return {
+                    "value": [{"id": "first"}],
+                    "@odata.nextLink": (
+                        "https://graph.microsoft.com/v1.0/"
+                        "me/mailFolders('opaque-folder-id')/messages?%24skip=1"
+                    ),
+                }
+            return {"value": [{"id": "second"}]}
+
+    monkeypatch.setattr(mail, "get_graph", lambda _profile: DummyGraph())
+    first = await mail.filter_emails(
+        mail.FilterEmailsInput(
+            folder="sentitems",
+            subject_contains="status",
+            max_results=1,
+        )
+    )
+    second = await mail.filter_emails(
+        mail.FilterEmailsInput(
+            folder="sentitems",
+            subject_contains="status",
+            max_results=1,
+            skip_token=first.next_page_token,
+        )
+    )
+
+    assert first.has_more is True
+    assert calls[1] == (
+        "/me/mailFolders('opaque-folder-id')/messages?%24skip=1",
+        None,
+    )
+    assert [message.id for message in second.messages] == ["second"]
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        "/v1.0/users/other/messages",
+        "/v1.0/me/mailFolders/folder/childFolders/child/messages",
+        "/v1.0/me/mailFolders/folder/messages/message-id",
+    ],
+)
+def test_filter_emails_rejects_other_graph_continuation_resources(
+    unsafe_path: str,
+) -> None:
+    with pytest.raises(ValueError, match="invalid mail continuation"):
+        mail._graph_mail_continuation_request(
+            f"https://graph.microsoft.com{unsafe_path}?%24skip=1",
+            "/me/mailFolders/sentitems/messages",
+        )
+
+
+@pytest.mark.asyncio
 async def test_filter_emails_rejects_untrusted_or_mismatched_continuation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

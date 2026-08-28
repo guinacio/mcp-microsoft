@@ -258,14 +258,16 @@ async def test_reply_email_confirmation_acceptance_sends(
     class DummyGraph:
         async def post(self, path: str, json: dict | None = None):
             captured["path"] = path
+            captured["json"] = json
 
     monkeypatch.setattr(mail, "get_graph", lambda _profile: DummyGraph())
 
     result = await mail.reply_email(
         mail.ReplyEmailInput(
             message_id="message-id",
-            body="Reply body",
+            body="<p>Reply body</p>",
             reply_all=True,
+            body_type="html",
             confirm=True,
         ),
         ctx=_EmailConfirmationContext(supported=True),
@@ -274,6 +276,7 @@ async def test_reply_email_confirmation_acceptance_sends(
     assert result.success is True
     assert result.action == "reply_all"
     assert captured["path"] == "/me/messages/message-id/replyAll"
+    assert captured["json"] == {"comment": "<p>Reply body</p>"}
 
 
 @pytest.mark.asyncio
