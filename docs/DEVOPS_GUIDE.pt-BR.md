@@ -464,12 +464,19 @@ docker compose up -d
 curl http://localhost:8000/health      # -> {"status":"ok","transport":"http"}
 ```
 
-Ou sem o Compose:
+As versões estáveis são publicadas no GitHub Container Registry. Em produção,
+fixe uma versão específica em vez de depender da tag mutável `latest`:
 
 ```bash
-docker build -t mcp-microsoft:0.8.0 .
-docker run --rm -p 8000:8000 --env-file .env mcp-microsoft:0.8.0
+docker pull ghcr.io/guinacio/mcp-microsoft:0.9.1
+docker run --rm -p 8000:8000 --env-file .env \
+  ghcr.io/guinacio/mcp-microsoft:0.9.1
 ```
+
+O arquivo Compose mantém `build: .` como fallback: o Compose tenta baixar a
+imagem publicada primeiro e só constrói localmente quando não consegue
+baixá-la. Para forçar uma reconstrução local, execute `docker compose build`
+antes de `docker compose up`.
 
 > `.env` está no `.gitignore` — **nunca faça commit dele.** Prefira um gerenciador de segredos (ex.:
 > Azure Key Vault) que injete `MCP_AUTH_CLIENT_SECRET` e `MCP_STATS_TOKEN` como variáveis de

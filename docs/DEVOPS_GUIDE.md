@@ -430,12 +430,18 @@ docker compose up -d
 curl http://localhost:8000/health      # -> {"status":"ok","transport":"http"}
 ```
 
-Or without Compose:
+Stable releases are published to GitHub Container Registry. Pin a specific
+release in production rather than relying on the mutable `latest` tag:
 
 ```bash
-docker build -t mcp-microsoft:0.8.0 .
-docker run --rm -p 8000:8000 --env-file .env mcp-microsoft:0.8.0
+docker pull ghcr.io/guinacio/mcp-microsoft:0.9.1
+docker run --rm -p 8000:8000 --env-file .env \
+  ghcr.io/guinacio/mcp-microsoft:0.9.1
 ```
+
+The Compose file retains `build: .` as a fallback: Compose tries the published
+image first and builds locally only when it cannot pull that image. To force a
+local rebuild, run `docker compose build` before `docker compose up`.
 
 > `.env` is gitignored — **never commit it.** Prefer a secrets manager (e.g. Azure Key Vault) that
 > injects `MCP_AUTH_CLIENT_SECRET` and `MCP_STATS_TOKEN` as environment variables at deploy time

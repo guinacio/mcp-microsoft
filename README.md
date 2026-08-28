@@ -202,6 +202,17 @@ docker compose up -d
 curl http://localhost:8000/health
 ```
 
+Stable releases are published to GitHub Container Registry as
+`ghcr.io/guinacio/mcp-microsoft`. `docker compose up` pulls `latest` first and
+falls back to a local Dockerfile build if the image is unavailable. Pin a
+specific release for production deployments, for example:
+
+```bash
+docker pull ghcr.io/guinacio/mcp-microsoft:0.9.1
+docker run --rm -p 8000:8000 --env-file .env \
+  ghcr.io/guinacio/mcp-microsoft:0.9.1
+```
+
 See [`docs/azure-setup.md`](docs/azure-setup.md#app-registration-for-the-remote-http-server) for the Azure App Registration this mode requires — it is a **separate, confidential-client registration**, distinct from the public-client one used for stdio installs.
 
 ### How MCP clients connect
