@@ -28,6 +28,7 @@ import binascii
 import hashlib
 import hmac
 import re
+import secrets
 from typing import Any, Callable, Literal, Optional
 from urllib.parse import unquote, urlsplit
 
@@ -277,7 +278,16 @@ class ReplyEmailInput(ToolRequestModel):
     message_id: str
     body: str
     reply_all: bool = False
-    body_type: BodyType = "text"
+    body_type: BodyType = Field(
+        default="text",
+        deprecated=True,
+        description=(
+            "Deprecated compatibility field. Microsoft Graph immediate replies "
+            "use a comment string so Graph can retain quoted history; the reply "
+            "and replyAll APIs do not expose a content-type selector for comment, "
+            "so 'text' and 'html' behave identically."
+        ),
+    )
     profile: str | None = None
     confirm: bool = Field(
         default=False,
@@ -563,9 +573,13 @@ _SUBJECT_SEARCH_PATTERN = re.compile(
 _RECIPIENT_SEARCH_MAX_RESULTS = 1_000
 _RECIPIENT_SEARCH_CURSOR_PREFIX = "m1."
 _RECIPIENT_SEARCH_CURSOR_MAX_LENGTH = 1_024
-_MAIL_FILTER_CURSOR_PREFIX = "mf1."
+_MAIL_FILTER_CURSOR_PREFIX = "mf2."
 _MAIL_FILTER_CURSOR_MAX_LENGTH = 16_384
 _GRAPH_MAIL_CONTINUATION_MAX_LENGTH = 12_000
+# Continuation links can contain sensitive mailbox query state. A process-local
+# key keeps that state tamper-evident without introducing another deployment
+# secret. Cursors intentionally expire when the server process restarts.
+_MAIL_FILTER_CURSOR_SIGNING_KEY = secrets.token_bytes(32)
 
 
 class _RecipientSearchCursorState(BaseModel):
@@ -583,7 +597,7 @@ class _MailFilterCursorState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     page_link: str = Field(min_length=1, max_length=_GRAPH_MAIL_CONTINUATION_MAX_LENGTH)
 
@@ -660,16 +674,64 @@ def _graph_mail_continuation_request(next_link: str, expected_path: str) -> str:
         raise ValueError("Microsoft Graph returned an invalid mail continuation link")
 
     parsed = urlsplit(next_link)
+    if not parsed.path.casefold().startswith("/v1.0/"):
+        raise ValueError("Microsoft Graph returned an invalid mail continuation link")
+
+    decoded_path = unquote(parsed.path)
+    expected_versioned_path = f"/v1.0{expected_path}"
+    path_matches = decoded_path.casefold() == expected_versioned_path.casefold()
+
+    # A request that uses a well-known folder name can return a nextLink whose
+    # path contains the folder's opaque ID instead. Graph also documents the
+    # OData parenthesis form: /me/mailFolders('ID')/messages. Accept either
+    # canonical folder-message collection shape, but no other Graph resource.
+    expected_folder_prefix = "/me/mailfolders/"
+    expected_folder_suffix = "/messages"
+    expected_path_folded = expected_path.casefold()
+    if (
+        not path_matches
+        and expected_path_folded.startswith(expected_folder_prefix)
+        and expected_path_folded.endswith(expected_folder_suffix)
+    ):
+        decoded_path_folded = decoded_path.casefold()
+        direct_prefix = "/v1.0/me/mailfolders/"
+        parenthesized_prefix = "/v1.0/me/mailfolders("
+        direct_middle = (
+            decoded_path_folded[len(direct_prefix) : -len(expected_folder_suffix)]
+            if decoded_path_folded.startswith(direct_prefix)
+            and decoded_path_folded.endswith(expected_folder_suffix)
+            else ""
+        )
+        parenthesized_middle = (
+            decoded_path_folded[
+                len(parenthesized_prefix) : -len(")/messages")
+            ]
+            if decoded_path_folded.startswith(parenthesized_prefix)
+            and decoded_path_folded.endswith(")/messages")
+            else ""
+        )
+        path_matches = (
+            bool(direct_middle)
+            and "/" not in direct_middle
+            and "\\" not in direct_middle
+        ) or (
+            len(parenthesized_middle) >= 2
+            and parenthesized_middle.startswith("'")
+            and parenthesized_middle.endswith("'")
+            and "/" not in parenthesized_middle
+            and "\\" not in parenthesized_middle
+        )
+
     if (
         parsed.scheme.casefold() != "https"
         or parsed.netloc.casefold() != "graph.microsoft.com"
-        or unquote(parsed.path) != f"/v1.0{expected_path}"
+        or not path_matches
         or not parsed.query
         or parsed.fragment
     ):
         raise ValueError("Microsoft Graph returned an invalid mail continuation link")
 
-    return f"{parsed.path.removeprefix('/v1.0')}?{parsed.query}"
+    return f"{parsed.path[len('/v1.0'):]}?{parsed.query}"
 
 
 def _encode_mail_filter_cursor(
@@ -683,8 +745,14 @@ def _encode_mail_filter_cursor(
         fingerprint=fingerprint,
         page_link=page_link,
     )
-    payload = base64.urlsafe_b64encode(state.model_dump_json().encode()).rstrip(b"=")
-    cursor = f"{_MAIL_FILTER_CURSOR_PREFIX}{payload.decode('ascii')}"
+    payload = state.model_dump_json().encode()
+    encoded_payload = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    signature = hmac.digest(_MAIL_FILTER_CURSOR_SIGNING_KEY, payload, "sha256")
+    encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=")
+    cursor = (
+        f"{_MAIL_FILTER_CURSOR_PREFIX}{encoded_payload.decode('ascii')}."
+        f"{encoded_signature.decode('ascii')}"
+    )
     if len(cursor) > _MAIL_FILTER_CURSOR_MAX_LENGTH:
         raise ValueError("Microsoft Graph returned an oversized mail continuation link")
     return cursor
@@ -702,13 +770,28 @@ def _decode_mail_filter_cursor(
             or not cursor.startswith(_MAIL_FILTER_CURSOR_PREFIX)
         ):
             raise ValueError
-        encoded = cursor.removeprefix(_MAIL_FILTER_CURSOR_PREFIX)
-        padding = "=" * (-len(encoded) % 4)
+        encoded_payload, encoded_signature = cursor.removeprefix(
+            _MAIL_FILTER_CURSOR_PREFIX
+        ).split(".")
+        payload_padding = "=" * (-len(encoded_payload) % 4)
         payload = base64.b64decode(
-            f"{encoded}{padding}",
+            f"{encoded_payload}{payload_padding}",
             altchars=b"-_",
             validate=True,
         )
+        signature_padding = "=" * (-len(encoded_signature) % 4)
+        signature = base64.b64decode(
+            f"{encoded_signature}{signature_padding}",
+            altchars=b"-_",
+            validate=True,
+        )
+        expected_signature = hmac.digest(
+            _MAIL_FILTER_CURSOR_SIGNING_KEY,
+            payload,
+            "sha256",
+        )
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError
         state = _MailFilterCursorState.model_validate_json(payload)
     except (binascii.Error, UnicodeError, ValidationError, ValueError):
         raise ValueError("mail filter cursor is invalid or expired") from None
@@ -904,8 +987,9 @@ async def filter_emails(
             the entire mailbox, including Sent, Drafts, Junk, and Deleted Items.
         max_results: Maximum number of messages to return (1-100). Defaults to 50.
         sort_order: 'newest' (default) or 'oldest' first.
-        skip_token: Opaque pagination cursor returned as next_page_token from a
-                    previous call. Omit for the first page.
+        skip_token: Opaque, process-bound pagination cursor returned as
+                    next_page_token from a previous call. It may expire after
+                    a server restart. Omit for the first page.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
@@ -1076,13 +1160,15 @@ async def reply_email(
     ctx: Context | None = None,
 ) -> ReplyEmailResponse:
     """
-    Reply to an existing email message.
+    Reply to an existing email message while retaining the quoted history.
 
     Args:
         message_id: The Graph message ID to reply to.
-        body: Reply body text or HTML.
+        body: Reply body text or HTML, inserted above Graph's quoted history.
         reply_all: When True, reply to all recipients. Defaults to False.
-        body_type: 'text' or 'html'. Defaults to 'text'.
+        body_type: Deprecated compatibility field. Graph immediate replies use
+            a comment string without a content-type selector, so 'text' and
+            'html' behave identically.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
         confirm: When True, prompt the user before sending the reply.
 
@@ -1091,6 +1177,7 @@ async def reply_email(
     """
     endpoint = "replyAll" if params.reply_all else "reply"
     action = "reply_all" if params.reply_all else "reply"
+    requested_body_type = params.model_dump()["body_type"]
     body_preview = f"{params.body[:200]}{'...' if len(params.body) > 200 else ''}"
     confirmation_error = await _email_confirmation_error(
         confirm=params.confirm,
@@ -1106,24 +1193,14 @@ async def reply_email(
             action=action,
             error=confirmation_error,
             message_id=params.message_id,
-            body_type=params.body_type,
+            body_type=requested_body_type,
         )
 
     g = get_graph(params.profile)
-    if params.body_type.lower() == "html":
-        payload = {
-            "message": {
-                "body": {
-                    "contentType": "HTML",
-                    "content": params.body,
-                }
-            }
-        }
-    else:
-        payload = {
-            "message": {},
-            "comment": params.body,
-        }
+    # Graph composes ``comment`` above its generated quoted reply history.
+    # Supplying ``message.body`` replaces that generated body, which leaves
+    # the sent reply threaded but removes the visible conversation history.
+    payload = {"comment": params.body}
 
     await g.post(f"/me/messages/{params.message_id}/{endpoint}", json=payload)
 
@@ -1131,7 +1208,7 @@ async def reply_email(
         success=True,
         action=action,
         message_id=params.message_id,
-        body_type=params.body_type,
+        body_type=requested_body_type,
     )
 
 

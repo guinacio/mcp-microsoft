@@ -111,7 +111,14 @@ class SendEmailResponse(ActionResult):
 
 class ReplyEmailResponse(ActionResult):
     message_id: str = ""
-    body_type: str = ""
+    body_type: str = Field(
+        default="",
+        deprecated=True,
+        description=(
+            "Deprecated compatibility echo of the requested body_type; it is "
+            "not the content type of the Microsoft Graph immediate reply."
+        ),
+    )
 
 
 class ForwardEmailResponse(ActionResult):
