@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -203,7 +206,7 @@ async def test_filter_emails_preserves_validated_graph_continuation(
         )
     )
 
-    assert first.next_page_token and first.next_page_token.startswith("mf1.")
+    assert first.next_page_token and first.next_page_token.startswith("mf2.")
     assert first.has_more is True
     assert calls[1] == (
         "/me/messages?%24filter=subject%20eq%20%27status%27&%24skip=2",
@@ -285,6 +288,9 @@ def test_filter_emails_accepts_documented_folder_continuation_shapes(
     [
         "/v1.0/users/other/messages",
         "/v1.0/me/mailFolders/folder/childFolders/child/messages",
+        "/v1.0/me/mailFolders/folder%2FchildFolders%2Fchild/messages",
+        "/v1.0/me/mailFolders('folder%2Fchild')/messages",
+        "/v1.0/me/mailFolders/folder%5Cchild/messages",
         "/v1.0/me/mailFolders/folder/messages/message-id",
     ],
 )
@@ -333,8 +339,43 @@ async def test_filter_emails_rejects_untrusted_or_mismatched_continuation(
         await mail.filter_emails(
             mail.FilterEmailsInput(
                 subject_contains="status",
-                skip_token="mf1.not-valid-base64",
+                skip_token="mf2.not-valid-base64",
             )
+        )
+
+
+@pytest.mark.parametrize(
+    "tampered_page_link",
+    [
+        "https://graph.microsoft.com/v1.0/me/mailFolders/other/messages?$skip=2",
+        "https://graph.microsoft.com/v1.0/me/messages?$skip=999",
+    ],
+)
+def test_filter_emails_rejects_tampered_signed_cursor_state(
+    tampered_page_link: str,
+) -> None:
+    params = mail.FilterEmailsInput(subject_contains="status")
+    cursor = mail._encode_mail_filter_cursor(
+        fingerprint=mail._mail_filter_fingerprint(params),
+        page_link="https://graph.microsoft.com/v1.0/me/messages?$skip=2",
+        expected_path="/me/messages",
+    )
+    encoded_payload, signature = cursor.removeprefix("mf2.").split(".")
+    payload_padding = "=" * (-len(encoded_payload) % 4)
+    state = json.loads(
+        base64.urlsafe_b64decode(f"{encoded_payload}{payload_padding}")
+    )
+    state["page_link"] = tampered_page_link
+    altered_payload = base64.urlsafe_b64encode(
+        json.dumps(state, separators=(",", ":")).encode()
+    ).rstrip(b"=")
+    tampered_cursor = f"mf2.{altered_payload.decode()}.{signature}"
+
+    with pytest.raises(ValueError, match="invalid or expired"):
+        mail._decode_mail_filter_cursor(
+            tampered_cursor,
+            fingerprint=mail._mail_filter_fingerprint(params),
+            expected_path="/me/messages",
         )
 
 

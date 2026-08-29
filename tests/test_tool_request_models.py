@@ -47,6 +47,25 @@ async def test_send_email_tool_hides_ctx_and_uses_params_object() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reply_email_schema_documents_body_type_compatibility() -> None:
+    mcp = FastMCP("test-server")
+    mail.register(mcp)
+
+    tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
+    tool = tools["reply_email"]
+    params_schema = _inner_params_schema(tool)
+
+    body_type_schema = params_schema["properties"]["body_type"]
+    assert body_type_schema["default"] == "text"
+    assert body_type_schema["deprecated"] is True
+    assert "do not expose a content-type selector" in body_type_schema["description"]
+
+    output_body_type_schema = tool.output_schema["properties"]["body_type"]
+    assert output_body_type_schema["deprecated"] is True
+    assert "compatibility echo" in output_body_type_schema["description"]
+
+
+@pytest.mark.asyncio
 async def test_filter_emails_schema_exposes_safe_recipient_search() -> None:
     mcp = FastMCP("test-server")
     mail.register(mcp)
