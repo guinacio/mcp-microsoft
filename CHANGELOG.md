@@ -7,6 +7,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.10.0] — 2026-08-27
+
+### Added
+
+- **Published Docker images on GHCR** ([#26](https://github.com/guinacio/mcp-microsoft/issues/26)) — every GitHub release now builds and pushes a multi-arch (`linux/amd64` + `linux/arm64`) image of the Streamable HTTP server to `ghcr.io/guinacio/mcp-microsoft` (`<version>`, `<major.minor>`, and `latest` tags) via `.github/workflows/release.yml`. Kubernetes / open-webui deployments can now `docker pull` instead of building locally; `docker-compose.yml` defaults to the published image.
+- **`create_reply_draft` mail tool** ([#22](https://github.com/guinacio/mcp-microsoft/pull/22), [#25](https://github.com/guinacio/mcp-microsoft/pull/25)) — create reply / reply-all drafts for an existing message via Graph `createReply`/`createReplyAll`. The draft retains the quoted conversation history (body is sent as the Graph `comment`), is never sent automatically, and plugs into the existing draft lifecycle (`get_draft`, `update_draft`, `send_draft`). Uses the already-granted `Mail.ReadWrite` scope. Tool count: 95 → 96 (stdio).
+- **Optional confirmation on `reply_email` / `forward_email`** ([#23](https://github.com/guinacio/mcp-microsoft/issues/23), [#24](https://github.com/guinacio/mcp-microsoft/pull/24)) — both tools now accept `confirm: true` to request host-side form elicitation before sending, closing the gap with `send_email`/`delete_email`. Fails closed: without a negotiated elicitation capability (or on user cancel) the action returns a structured error and Graph is never called. The shared confirmation flow was extracted into one helper used by all three send-style tools.
+
+### Changed
+
+- **Mail searches default to the entire mailbox** ([#20](https://github.com/guinacio/mcp-microsoft/pull/20), [#21](https://github.com/guinacio/mcp-microsoft/pull/21)) — `search_emails` / `filter_emails` no longer default to Inbox-only; `folder` is optional and omitting it searches the whole mailbox. `filter_emails` gains a bounded `to_address` recipient search; `reply_email`'s `body_type` is marked deprecated (kept as a compatibility echo).
+- **`get_draft` structured not-found handling** — a 404 for a deleted/sent draft now returns a structured `success: false` result instead of raising; other Graph errors still propagate.
+
+---
+
 ## [0.9.1] — 2026-07-25
 
 ### Security

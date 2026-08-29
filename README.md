@@ -195,12 +195,22 @@ uv run mcp-microsoft
 
 **With Docker:**
 
+Multi-arch images (`linux/amd64` + `linux/arm64`) are published to GitHub Container Registry on every release — no local build needed:
+
 ```bash
 cp .env.template .env
 # fill in the "Remote server (http) mode" section of .env, then:
-docker compose up -d
+docker compose up -d          # pulls ghcr.io/guinacio/mcp-microsoft
 curl http://localhost:8000/health
 ```
+
+Or run the image directly (e.g. for Kubernetes manifests, point your Deployment at the same image):
+
+```bash
+docker run --rm -p 8000:8000 --env-file .env ghcr.io/guinacio/mcp-microsoft:latest
+```
+
+Pin a version tag (`:0.10.0`) for production; `latest` tracks the newest release. To build locally instead, uncomment `build: .` in `docker-compose.yml` or `docker build -t mcp-microsoft .`.
 
 See [`docs/azure-setup.md`](docs/azure-setup.md#app-registration-for-the-remote-http-server) for the Azure App Registration this mode requires — it is a **separate, confidential-client registration**, distinct from the public-client one used for stdio installs.
 

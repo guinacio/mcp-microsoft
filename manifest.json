@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "mcp-microsoft",
   "display_name": "Microsoft 365",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Mail, Calendar, OneDrive, SharePoint, Contacts, and Teams via Microsoft Graph API for personal and enterprise accounts with multi-profile support",
   "long_description": "Full Microsoft 365 integration for Claude Desktop. Manage emails, drafts, calendar events, OneDrive files, SharePoint sites, contacts, and Teams channels/chats/meetings across multiple accounts (personal Outlook.com/Live and enterprise Azure AD/Entra). Supports multi-profile authentication so you can switch between work and personal accounts seamlessly.\n\n**96 tools** (plus 3 more — a drag-and-drop file upload app, `list_files`, and `read_file` — when Enable File Upload is turned on) covering:\n- **Mail**: Read, send, reply, forward, search, move, and manage emails\n- **Drafts**: Create, update, and send draft messages\n- **Calendar**: Events, scheduling, free/busy lookups, and meeting time suggestions\n- **OneDrive**: Browse, upload, download, search, and manage files\n- **SharePoint**: Browse sites, document libraries, upload/download files, and manage SharePoint lists (work accounts only)\n- **Contacts**: List, search, create, update, and delete contacts; manage contact folders and photos\n- **Teams**: Channels, channel messages, 1:1 and group chats, online meetings, meeting transcripts, recordings, and Copilot AI insights (work accounts only; transcript/recording/AI tools are optional)\n- **Profiles**: Add and switch between multiple Microsoft 365 accounts",
   "icon": "icon.png",
