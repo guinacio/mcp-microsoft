@@ -418,24 +418,34 @@ endpoint at `/mcp` plus an unauthenticated `GET /health`.
 
 ### 6.3 Docker & Compose quickstart
 
-The provided `Dockerfile` builds an http-only image (it hardcodes `MCP_TRANSPORT=http`,
-`MCP_HTTP_HOST=0.0.0.0`, `MCP_HTTP_PORT=8000`, runs as a non-root user, and has a `/health`
-healthcheck). Auth values are intentionally **not** baked in — supply them at run time.
+The image is http-only (it hardcodes `MCP_TRANSPORT=http`, `MCP_HTTP_HOST=0.0.0.0`,
+`MCP_HTTP_PORT=8000`, runs as a non-root user, and has a `/health` healthcheck). Auth values are
+intentionally **not** baked in — supply them at run time.
+
+**Published images** — every GitHub release pushes a multi-arch (`linux/amd64` + `linux/arm64`)
+image to GitHub Container Registry, so Kubernetes and remote deployments don't need to build
+anything:
+
+```bash
+docker pull ghcr.io/guinacio/mcp-microsoft:latest    # or a pinned :0.10.0 / :0.10 tag
+```
 
 ```bash
 cp .env.template .env
 # Fill in the "Remote server (http) mode" section of .env:
 #   MCP_BASE_URL, MCP_AUTH_CLIENT_ID, MCP_AUTH_CLIENT_SECRET, MCP_AUTH_TENANT_ID
-docker compose up -d
+docker compose up -d                   # pulls the GHCR image by default
 curl http://localhost:8000/health      # -> {"status":"ok","transport":"http"}
 ```
 
 Or without Compose:
 
 ```bash
-docker build -t mcp-microsoft:0.8.0 .
-docker run --rm -p 8000:8000 --env-file .env mcp-microsoft:0.8.0
+docker run --rm -p 8000:8000 --env-file .env ghcr.io/guinacio/mcp-microsoft:latest
 ```
+
+To build locally instead (`docker build -t mcp-microsoft .`), uncomment `build: .` in
+`docker-compose.yml` or run the built tag directly.
 
 > `.env` is gitignored — **never commit it.** Prefer a secrets manager (e.g. Azure Key Vault) that
 > injects `MCP_AUTH_CLIENT_SECRET` and `MCP_STATS_TOKEN` as environment variables at deploy time

@@ -1,7 +1,9 @@
 # docker-compose.yml — mcp-microsoft Streamable HTTP (multi-user) server.
 #
 # Setup:
-#   1. Build or pull the image (see Dockerfile).
+#   1. Nothing to build — the published image is pulled from GHCR
+#      (ghcr.io/guinacio/mcp-microsoft). To build locally instead,
+#      uncomment `build: .` below.
 #   2. cp .env.template .env, then fill in the "Remote server (http) mode"
 #      section: MCP_BASE_URL, MCP_AUTH_CLIENT_ID, MCP_AUTH_CLIENT_SECRET,
 #      MCP_AUTH_TENANT_ID (see docs/azure-setup.md for the App Registration
@@ -15,8 +17,8 @@
 
 services:
   mcp-microsoft:
-    build: .
-    image: mcp-microsoft:0.9.1
+    # build: .   # uncomment to build from source instead of pulling from GHCR
+    image: ghcr.io/guinacio/mcp-microsoft:0.10.0
     container_name: mcp-microsoft
     env_file:
       # All secrets and deployment-specific values (MCP_BASE_URL,
@@ -60,8 +62,7 @@ services:
   # it its own MCP_STATS_TOKEN if observability is wanted. Uncomment to use.
   #
   # mcp-microsoft-nodelete:
-  #   build: .
-  #   image: mcp-microsoft:0.9.1
+  #   image: ghcr.io/guinacio/mcp-microsoft:0.10.0
   #   container_name: mcp-microsoft-nodelete
   #   env_file:
   #     - .env

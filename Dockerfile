@@ -11,8 +11,11 @@
 # / compose time — see .env.template's "Remote server (http) mode" section
 # and docs/azure-setup.md.
 #
-# Build:  docker build -t mcp-microsoft:0.9.1 .
-# Run:    docker run --rm -p 8000:8000 --env-file .env mcp-microsoft:0.9.1
+# Pull:   docker pull ghcr.io/guinacio/mcp-microsoft:latest
+#         (published for linux/amd64 + linux/arm64 on every GitHub release
+#         by .github/workflows/release.yml)
+# Build:  docker build -t mcp-microsoft:0.10.0 .
+# Run:    docker run --rm -p 8000:8000 --env-file .env ghcr.io/guinacio/mcp-microsoft:latest
 # Or:     docker compose up -d   (see docker-compose.yml)
 
 # ---------------------------------------------------------------------------

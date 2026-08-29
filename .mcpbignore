@@ -7,6 +7,7 @@ __pycache__/
 server/lib/
 server/venv/
 .git/
+.github/
 .env
 .env.*
 !.env.template
