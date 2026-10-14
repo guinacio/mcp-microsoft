@@ -219,6 +219,8 @@ After this, the server refreshes tokens silently in the background. You only nee
 
 > **Rotation note:** the secret has a hard expiry — plan to rotate it before then. Create a new secret alongside the old one (both are valid simultaneously), roll `MCP_AUTH_CLIENT_SECRET` to the new value and restart the server, then delete the old secret from the App Registration once you've confirmed the new one is live. The server holds no long-lived cache of the secret itself beyond process memory, so a restart is sufficient — no data migration needed.
 
+> **Prefer a secretless credential in production.** Instead of a client secret you can upload a certificate (**Certificates & secrets → Certificates**) or add a federated identity credential for the managed identity or Kubernetes service account the server runs as (**Certificates & secrets → Federated credentials**), then set `MCP_AUTH_CREDENTIAL_TYPE` to `certificate`, `managed_identity`, or `workload_identity` and leave `MCP_AUTH_CLIENT_SECRET` unset. See [DevOps guide §4.3](DEVOPS_GUIDE.md#43-enterprise-authentication-hardening).
+
 ### 5. Add delegated Graph permissions
 
 Same permission set as the stdio server (Step 5 above), added to **this** registration instead:

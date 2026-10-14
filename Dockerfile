@@ -53,12 +53,14 @@ WORKDIR /app
 # cached across source-only changes. README.md is copied too because
 # pyproject.toml declares it as the package readme and hatchling reads it
 # during the build.
+# The image is the http (multi-user) deployment target, so it ships the
+# optional Redis client for MCP_AUTH_REDIS_URL.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --extra redis --no-install-project
 
 # Now copy the actual source and install the project itself.
 COPY src/ ./src/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra redis
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime — slim image with just the venv, source, and a non-root user.

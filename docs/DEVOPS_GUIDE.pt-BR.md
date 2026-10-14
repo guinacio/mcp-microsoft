@@ -45,7 +45,7 @@ escolhido na inicialização pela variável de ambiente `MCP_TRANSPORT`:
 | | **stdio** (padrão) | **http** (remoto, multiusuário) |
 |---|---|---|
 | `MCP_TRANSPORT` | `stdio` | `http` |
-| Transporte | stdio (subprocesso local) | Streamable HTTP (spec MCP 2025-11-25), servido em `/mcp` |
+| Transporte | stdio (subprocesso local) | Streamable HTTP (MCP 2026-07-28 e as versões com handshake desde 2024-11-05), servido em `/mcp` |
 | Quem executa | Iniciado pelo seu cliente MCP na sua máquina | Um servidor compartilhado que você hospeda atrás de um proxy reverso |
 | Identidade | **Perfis** locais nomeados; OAuth interativo/device-code; cache de tokens criptografado em disco | Cada usuário faz login com **sua própria** conta Entra; token de portador (bearer) por requisição |
 | Como as chamadas ao Graph são autorizadas | Token MSAL de client público para o perfil ativo | Troca de token **On-Behalf-Of (OBO)** por usuário a partir do bearer token do chamador |
@@ -272,6 +272,39 @@ você mesmo não possa consentir):
 https://login.microsoftonline.com/{tenant}/adminconsent?client_id={client_id}
 ```
 
+### 4.3 Endurecimento da autenticação corporativa
+
+O segredo do cliente continua funcionando e segue como padrão, mas a Microsoft recomenda
+credenciais de certificado ou credenciais de identidade federada em produção: não há segredo
+compartilhado para vazar nem prazo de 24 meses para expirar. `MCP_AUTH_CREDENTIAL_TYPE` escolhe o
+modo. Nos modos sem segredo, o servidor se autentica no Entra com uma *client assertion* RFC 7523,
+tanto no login (resgate de código e de refresh token) quanto na troca On-Behalf-Of, e
+`MCP_AUTH_CLIENT_SECRET` deve ficar **vazio**.
+
+| `MCP_AUTH_CREDENTIAL_TYPE` | Configuração no registro do app | Variáveis do servidor |
+|---|---|---|
+| `secret` *(padrão)* | §4.2, passo do segredo do cliente. | `MCP_AUTH_CLIENT_SECRET` |
+| `certificate` | **Certificados e segredos** → **Certificados** → envie o certificado público. | `MCP_AUTH_CLIENT_CERTIFICATE_PATH`: um PEM com a chave privada RSA **e** o certificado. `MCP_AUTH_CLIENT_CERTIFICATE_PASSWORD` se a chave for criptografada. |
+| `managed_identity` | **Credenciais federadas** → **Adicionar** → cenário *Identidade gerenciada*, escolhendo a identidade do servidor. | Opcional: `MCP_AUTH_MANAGED_IDENTITY_CLIENT_ID` para identidade atribuída pelo usuário. |
+| `workload_identity` | **Credenciais federadas** → **Adicionar** → *Kubernetes acessando recursos do Azure* (ou outro emissor OIDC). | `MCP_AUTH_FEDERATED_TOKEN_FILE`, ou o `AZURE_FEDERATED_TOKEN_FILE` injetado pelo AKS. |
+
+Configurações válidas para qualquer tipo:
+
+- **`MCP_AUTH_JWT_SIGNING_KEY`** (obrigatória sem segredo, recomendada sempre): assina os tokens
+  MCP emitidos aos clientes. Sem ela, a chave deriva do segredo do cliente e rotacionar o segredo
+  desconecta todos os usuários. Gere com `python -c "import secrets; print(secrets.token_hex(32))"`.
+- **`MCP_AUTH_ALLOWED_REDIRECT_URIS`**: lista (separada por vírgulas, curingas fnmatch) das URLs de
+  callback de clientes MCP permitidas, por exemplo
+  `https://claude.ai/api/mcp/auth_callback,http://localhost:*`. Sem ela, qualquer cliente pode
+  registrar qualquer redirect URI e a tela de consentimento é a única proteção.
+- **`MCP_AUTH_REDIS_URL`** + **`MCP_AUTH_STORAGE_ENCRYPTION_KEY`**: guarda o estado do proxy OAuth
+  no Redis, criptografado com Fernet, para que os logins sobrevivam a reinícios (extra `[redis]`).
+- **`MCP_AUTH_AUTHORITY_HOST`**: autoridade do Entra em nuvens soberanas (`login.microsoftonline.us`).
+- **`MCP_REQUEST_STATE_KEYS`**: veja a [§6.9](#69-versões-do-protocolo-mcp-e-confirmações).
+- **HTTPS obrigatório:** `MCP_BASE_URL` precisa ser `https://`, exceto em loopback.
+
+O servidor registra um aviso na inicialização para cada um desses itens deixado no padrão mais fraco.
+
 ---
 
 ## 5. Configuração: stdio (usuário único)
@@ -409,7 +442,9 @@ Toda variável `MCP_*` lida no modo http. O modo stdio ignora todos os valores `
 | `MCP_TRANSPORT` | Seleciona o modo. Deve ser `stdio` ou `http`. | `stdio` | Defina como `http`. |
 | `MCP_HTTP_HOST` | Host de bind **dentro** do processo/container. Use `0.0.0.0` atrás de um proxy/Docker. | `127.0.0.1` | Não. |
 | `MCP_HTTP_PORT` | Porta de bind. Deve ser 1–65535. | `8000` | Não. |
-| `MCP_BASE_URL` | A **URL HTTPS pública** que os clientes acessam (a URL do seu proxy, não o endereço de bind). Deve começar com `http://` ou `https://`. | — | **Sim.** |
+| `MCP_BASE_URL` | A **URL HTTPS pública** que os clientes acessam (a URL do seu proxy, não o endereço de bind). Deve ser `https://`, exceto em loopback. | — | **Sim.** |
+| `MCP_AUTH_CREDENTIAL_TYPE` | `secret`, `certificate`, `managed_identity` ou `workload_identity` ([§4.3](#43-endurecimento-da-autenticação-corporativa)). Demais variáveis `MCP_AUTH_*` novas na §4.3. | `secret` | Não. |
+| `MCP_REQUEST_STATE_KEYS` | Chaves compartilhadas que selam as confirmações do protocolo 2026-07-28 entre réplicas (≥ 32 bytes cada). | por processo | Não. |
 | `MCP_AUTH_CLIENT_ID` | Application (client) ID do app confidencial (§4.2). | — | **Sim.** |
 | `MCP_AUTH_CLIENT_SECRET` | O valor do client secret (§4.2). | — | **Sim.** |
 | `MCP_AUTH_TENANT_ID` | O **GUID do tenant** do seu diretório. Pseudo-tenants/domínios são rejeitados na inicialização. | — | **Sim.** |
@@ -645,6 +680,24 @@ ferramenta — incluindo a ferramenta de backend `store_files`, que é acessíve
 | `MCP_ENABLE_FILE_UPLOAD` | Habilita/desabilita o app de upload. O valor explícito vence. | ligado no http, desligado no stdio |
 | `MCP_UPLOAD_MAX_MB` | Tamanho máx. (MB) de cada arquivo enviado. Inteiro positivo. | `10` |
 | `MCP_UPLOAD_GLOBAL_BUDGET_MB` | Limite global (MB) da pegada base64 de todos os uploads entre todos os usuários. Inteiro positivo. | `1024` |
+
+### 6.9 Versões do protocolo MCP e confirmações
+
+O servidor roda sobre FastMCP 4 / MCP Python SDK v2 e atende as duas eras do protocolo no mesmo
+endpoint `/mcp`: o protocolo **2026-07-28**, sem sessão, que os clientes atuais negociam, e as
+versões com handshake (2024-11-05 a 2025-11-25) dos clientes mais antigos. O SDK escolhe a era por
+cliente, sem configuração.
+
+A diferença visível está nas ferramentas com `confirm=True` (`send_email`, `reply_email`,
+`forward_email`, `delete_email`, `bulk_trash_emails`, `bulk_delete_emails`). Na era com handshake,
+o servidor envia um pedido de elicitação no meio da chamada, como antes. No 2026-07-28, a ferramenta
+retorna um `InputRequiredResult` e o cliente chama de novo com a resposta. O `requestState` é selado
+(AES-GCM) e vinculado à ferramenta, aos argumentos, ao usuário e a um TTL de 10 minutos; uma
+exclusão em massa de pasta pede confirmação de novo se o conteúdo da pasta mudou. Em ambos os casos,
+um cliente que não declarou elicitação recebe um erro estruturado e nada é enviado ou excluído.
+
+A chave de selagem é por processo, o que basta para um único worker. Com réplicas atrás de um
+balanceador, configure o mesmo `MCP_REQUEST_STATE_KEYS` em todas.
 
 ---
 
