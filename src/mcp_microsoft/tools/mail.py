@@ -33,10 +33,14 @@ from typing import Any, Callable, Literal, Optional
 from urllib.parse import unquote, urlsplit
 
 from fastmcp.server.context import Context
-from mcp import types as mcp_types
-from mcp.shared.exceptions import McpError
+from mcp.types import InputRequiredResult
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from mcp_microsoft.common.confirmation import (
+    ConfirmationDenied,
+    ConfirmationGranted,
+    request_confirmation,
+)
 from mcp_microsoft.common.mail_utils import (
     format_mail_datetime,
     parse_recipients,
@@ -84,51 +88,14 @@ from mcp_microsoft.graph_types import (
 from mcp_microsoft.graph import get_graph
 
 # ---------------------------------------------------------------------------
-# Elicitation helpers
+# Confirmation helpers
 # ---------------------------------------------------------------------------
 
 
-class _Confirmation(BaseModel):
-    confirmed: bool
-
-
-def _supports_form_elicitation(ctx: Context) -> bool:
-    """Return whether the active MCP session negotiated form elicitation."""
-    try:
-        client_params = ctx.session.client_params
-    except (AttributeError, RuntimeError):
-        return False
-    if client_params is None or client_params.capabilities.elicitation is None:
-        return False
-    return client_params.capabilities.elicitation.form is not None
-
-
-async def _email_confirmation_error(
-    *,
-    confirm: bool,
-    ctx: Context | None,
-    prompt: str,
-) -> str | None:
-    """Return an error when a requested email confirmation cannot proceed."""
-    if not confirm:
-        return None
-    if ctx is None or not _supports_form_elicitation(ctx):
-        return (
-            "confirm=True requires an MCP host that negotiated form elicitation. "
-            "The email action was not performed."
-        )
-    try:
-        result = await ctx.elicit(prompt, response_type=_Confirmation)
-    except McpError as exc:
-        if exc.error.code != mcp_types.METHOD_NOT_FOUND:
-            raise
-        return (
-            "The MCP client advertised elicitation but did not implement it. "
-            "The email action was not performed."
-        )
-    if result.action != "accept" or not result.data.confirmed:
-        return "Cancelled by user."
-    return None
+def _confirmation_binding(action: str, params: BaseModel, *extra: object) -> str:
+    """Describe the exact action a confirmation approves (see common.confirmation)."""
+    parts = [action, params.model_dump_json(), *(str(item) for item in extra)]
+    return "\n".join(parts)
 
 
 class _BatchRequestEntry(BaseModel):
@@ -1076,7 +1043,7 @@ async def filter_emails(
 async def send_email(
     params: SendEmailInput,
     ctx: Context | None = None,
-) -> SendEmailResponse:
+) -> SendEmailResponse | InputRequiredResult:
     """
     Send a new email message.
 
@@ -1101,17 +1068,20 @@ async def send_email(
         f"Subject: {params.subject}\n\n"
         f"{params.body[:200]}{'...' if len(params.body) > 200 else ''}"
     )
-    confirmation_error = await _email_confirmation_error(
-        confirm=params.confirm,
-        ctx=ctx,
-        prompt=f"Send this email?\n\n{preview}",
-    )
-    if confirmation_error is not None:
-        return SendEmailResponse(
-            success=False,
-            action="send_email",
-            error=confirmation_error,
+    if params.confirm:
+        outcome = await request_confirmation(
+            ctx,
+            message=f"Send this email?\n\n{preview}",
+            binding=_confirmation_binding("send_email", params),
         )
+        if isinstance(outcome, InputRequiredResult):
+            return outcome
+        if isinstance(outcome, ConfirmationDenied):
+            return SendEmailResponse(
+                success=False,
+                action="send_email",
+                error=outcome.reason,
+            )
 
     g = get_graph(params.profile)
     message: dict = {
@@ -1158,7 +1128,7 @@ async def send_email(
 async def reply_email(
     params: ReplyEmailInput,
     ctx: Context | None = None,
-) -> ReplyEmailResponse:
+) -> ReplyEmailResponse | InputRequiredResult:
     """
     Reply to an existing email message while retaining the quoted history.
 
@@ -1179,22 +1149,25 @@ async def reply_email(
     action = "reply_all" if params.reply_all else "reply"
     requested_body_type = params.model_dump()["body_type"]
     body_preview = f"{params.body[:200]}{'...' if len(params.body) > 200 else ''}"
-    confirmation_error = await _email_confirmation_error(
-        confirm=params.confirm,
-        ctx=ctx,
-        prompt=(
-            f"Send this {'reply-all' if params.reply_all else 'reply'} "
-            f"to message {params.message_id}?\n\n{body_preview}"
-        ),
-    )
-    if confirmation_error is not None:
-        return ReplyEmailResponse(
-            success=False,
-            action=action,
-            error=confirmation_error,
-            message_id=params.message_id,
-            body_type=requested_body_type,
+    if params.confirm:
+        outcome = await request_confirmation(
+            ctx,
+            message=(
+                f"Send this {'reply-all' if params.reply_all else 'reply'} "
+                f"to message {params.message_id}?\n\n{body_preview}"
+            ),
+            binding=_confirmation_binding(action, params),
         )
+        if isinstance(outcome, InputRequiredResult):
+            return outcome
+        if isinstance(outcome, ConfirmationDenied):
+            return ReplyEmailResponse(
+                success=False,
+                action=action,
+                error=outcome.reason,
+                message_id=params.message_id,
+                body_type=requested_body_type,
+            )
 
     g = get_graph(params.profile)
     # Graph composes ``comment`` above its generated quoted reply history.
@@ -1220,7 +1193,7 @@ async def reply_email(
 async def forward_email(
     params: ForwardEmailInput,
     ctx: Context | None = None,
-) -> ForwardEmailResponse:
+) -> ForwardEmailResponse | InputRequiredResult:
     """
     Forward an email message to one or more recipients.
 
@@ -1244,23 +1217,26 @@ async def forward_email(
     comment_preview = (
         f"{comment_preview[:200]}{'...' if len(comment_preview) > 200 else ''}"
     )
-    confirmation_error = await _email_confirmation_error(
-        confirm=params.confirm,
-        ctx=ctx,
-        prompt=(
-            f"Forward message {params.message_id}?\n\n"
-            f"To: {to_display}\nComment: {comment_preview}"
-        ),
-    )
-    if confirmation_error is not None:
-        return ForwardEmailResponse(
-            success=False,
-            action="forward",
-            error=confirmation_error,
-            message_id=params.message_id,
-            to=to_addresses,
-            comment=params.comment or "",
+    if params.confirm:
+        outcome = await request_confirmation(
+            ctx,
+            message=(
+                f"Forward message {params.message_id}?\n\n"
+                f"To: {to_display}\nComment: {comment_preview}"
+            ),
+            binding=_confirmation_binding("forward", params),
         )
+        if isinstance(outcome, InputRequiredResult):
+            return outcome
+        if isinstance(outcome, ConfirmationDenied):
+            return ForwardEmailResponse(
+                success=False,
+                action="forward",
+                error=outcome.reason,
+                message_id=params.message_id,
+                to=to_addresses,
+                comment=params.comment or "",
+            )
 
     g = get_graph(params.profile)
     payload: dict = {
@@ -1394,7 +1370,7 @@ async def trash_email(params: TrashEmailInput) -> TrashEmailResponse:
 async def delete_email(
     params: DeleteEmailInput,
     ctx: Context | None = None,
-) -> DeleteEmailResponse:
+) -> DeleteEmailResponse | InputRequiredResult:
     """
     Permanently delete a message from the mailbox. This action is IRREVERSIBLE.
 
@@ -1410,23 +1386,24 @@ async def delete_email(
         Structured delete confirmation.
     """
     if params.confirm:
-        if ctx is None:
+        outcome = await request_confirmation(
+            ctx,
+            message=(
+                "Permanently delete this email? This action is IRREVERSIBLE."
+                f"\n\nMessage ID: {params.message_id}"
+            ),
+            binding=_confirmation_binding("permanent_delete", params),
+        )
+        if isinstance(outcome, InputRequiredResult):
+            return outcome
+        if isinstance(outcome, ConfirmationDenied):
             return DeleteEmailResponse(
                 success=False,
                 action="permanent_delete",
                 message_id=params.message_id,
-                error=(
-                    "confirm=True requires an MCP host that supports elicitation. "
-                    "Set confirm=False to bypass the prompt or upgrade your client."
-                ),
+                error=outcome.reason,
                 irreversible=True,
             )
-        result = await ctx.elicit(
-            f"Permanently delete this email? This action is IRREVERSIBLE.\n\nMessage ID: {params.message_id}",
-            response_type=_Confirmation,
-        )
-        if result.action != "accept" or not result.data.confirmed:
-            return DeleteEmailResponse(success=False, action="permanent_delete", message_id=params.message_id, error="Cancelled by user.", irreversible=True)
 
     g = get_graph(params.profile)
     await g.post(f"/me/messages/{params.message_id}/permanentDelete")
@@ -1567,30 +1544,34 @@ async def _collect_folder_message_ids(g: Any, folder: str) -> list[str]:
     return ids
 
 
-async def _bulk_confirmation_error(
+async def _bulk_confirmation(
     *,
+    params: BaseModel,
     confirm: bool,
     ctx: Context | None,
-    message_count: int,
+    message_ids: list[str],
     folder: str | None,
     permanent: bool,
-) -> str | None:
-    """Return an error unless a required bulk-operation confirmation succeeds."""
+) -> ConfirmationGranted | ConfirmationDenied | InputRequiredResult:
+    """Run the bulk-operation confirmation policy.
+
+    Folder-wide operations always require ``confirm=True`` so the user sees the
+    resolved message count first. The confirmation is bound to the exact set
+    of message IDs resolved for this round: if the folder changes between the
+    prompt and the answer (modern-era retry), the user is asked again with the
+    current count instead of approving a stale one.
+    """
     folder_mode = folder is not None
     if folder_mode and not confirm:
         action = "permanent deletion" if permanent else "trashing"
-        return (
+        return ConfirmationDenied(
             f"Folder-wide {action} requires confirm=True so the message count "
             "can be shown to the user before continuing."
         )
     if not confirm:
-        return None
-    if ctx is None:
-        return (
-            "confirm=True requires an MCP host that supports elicitation. "
-            "The bulk operation was not performed."
-        )
+        return ConfirmationGranted()
 
+    message_count = len(message_ids)
     scope = f" from '{folder}'" if folder else ""
     if permanent:
         prompt = (
@@ -1599,10 +1580,17 @@ async def _bulk_confirmation_error(
         )
     else:
         prompt = f"Move {message_count} messages{scope} to Deleted Items?"
-    result = await ctx.elicit(prompt, response_type=_Confirmation)
-    if result.action != "accept" or not result.data.confirmed:
-        return "Cancelled by user."
-    return None
+    targets = hashlib.sha256("\n".join(sorted(message_ids)).encode()).hexdigest()
+    return await request_confirmation(
+        ctx,
+        message=prompt,
+        binding=_confirmation_binding(
+            "bulk_permanent_delete" if permanent else "bulk_trash",
+            params,
+            message_count,
+            targets,
+        ),
+    )
 
 
 async def bulk_move_emails(
@@ -1679,7 +1667,7 @@ async def bulk_move_emails(
 async def bulk_trash_emails(
     params: BulkTrashEmailsInput,
     ctx: Context | None = None,
-) -> BulkTrashEmailsResponse:
+) -> BulkTrashEmailsResponse | InputRequiredResult:
     """
     Move multiple messages to Deleted Items (soft delete / recoverable).
 
@@ -1710,21 +1698,24 @@ async def bulk_trash_emails(
     if not message_ids:
         return BulkTrashEmailsResponse(success=True, action="bulk_trash", total=0, succeeded=0, failed=0)
 
-    confirmation_error = await _bulk_confirmation_error(
+    outcome = await _bulk_confirmation(
+        params=params,
         confirm=params.confirm,
         ctx=ctx,
-        message_count=len(message_ids),
+        message_ids=message_ids,
         folder=params.folder if params.folder and not params.message_ids else None,
         permanent=False,
     )
-    if confirmation_error:
+    if isinstance(outcome, InputRequiredResult):
+        return outcome
+    if isinstance(outcome, ConfirmationDenied):
         return BulkTrashEmailsResponse(
             success=False,
             action="bulk_trash",
             total=len(message_ids),
             succeeded=0,
             failed=0,
-            error=confirmation_error,
+            error=outcome.reason,
         )
 
     plan = _build_batch_requests(
@@ -1765,7 +1756,7 @@ async def bulk_trash_emails(
 async def bulk_delete_emails(
     params: BulkDeleteEmailsInput,
     ctx: Context | None = None,
-) -> BulkDeleteEmailsResponse:
+) -> BulkDeleteEmailsResponse | InputRequiredResult:
     """
     Permanently delete multiple messages from the mailbox. This action is IRREVERSIBLE.
 
@@ -1799,14 +1790,17 @@ async def bulk_delete_emails(
     if not message_ids:
         return BulkDeleteEmailsResponse(success=True, action="bulk_permanent_delete", total=0, succeeded=0, failed=0, irreversible=True)
 
-    confirmation_error = await _bulk_confirmation_error(
+    outcome = await _bulk_confirmation(
+        params=params,
         confirm=params.confirm,
         ctx=ctx,
-        message_count=len(message_ids),
+        message_ids=message_ids,
         folder=params.folder if params.folder and not params.message_ids else None,
         permanent=True,
     )
-    if confirmation_error:
+    if isinstance(outcome, InputRequiredResult):
+        return outcome
+    if isinstance(outcome, ConfirmationDenied):
         return BulkDeleteEmailsResponse(
             success=False,
             action="bulk_permanent_delete",
@@ -1814,7 +1808,7 @@ async def bulk_delete_emails(
             succeeded=0,
             failed=0,
             irreversible=True,
-            error=confirmation_error,
+            error=outcome.reason,
         )
 
     plan = _build_batch_requests(

@@ -429,33 +429,110 @@ _DASHBOARD_HTML = """<!doctype html>
 """
 
 
-def _build_azure_provider(config: AppConfig):
-    """Construct the FastMCP AzureProvider for http (multi-user) transport.
+def _build_oauth_storage(config: AppConfig):
+    """Return the OAuth-proxy state store, or None for fastmcp's default.
 
-    Imported lazily so stdio mode never touches ``fastmcp[azure]``. The
-    constructor performs no network I/O (JWKS/OBO are fetched lazily at request
-    time), so it is safe to build during server construction and in tests.
+    fastmcp's default is a Fernet-encrypted file store under its data
+    directory, keyed off the JWT signing key: fine for one long-lived
+    instance. ``MCP_AUTH_REDIS_URL`` moves that state (client registrations,
+    upstream refresh tokens) to Redis so it survives container restarts and is
+    shared by replicas, always encrypted at rest with
+    ``MCP_AUTH_STORAGE_ENCRYPTION_KEY``.
     """
-    from fastmcp.server.auth.providers.azure import AzureProvider
+    if not config.auth_redis_url:
+        return None
+    from cryptography.fernet import Fernet
+    from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
-    return AzureProvider(
-        client_id=config.auth_client_id,
-        client_secret=config.auth_client_secret,
-        tenant_id=config.auth_tenant_id,
-        base_url=config.base_url,
-        required_scopes=[config.auth_required_scope],
-        additional_authorize_scopes=build_graph_authorize_scopes(config),
+    try:
+        from key_value.aio.stores.redis import RedisStore
+    except ImportError as exc:
+        raise SystemExit(
+            "MCP_AUTH_REDIS_URL is set but the Redis client is not installed. "
+            "Install the extra: pip install 'mcp-microsoft[redis]'."
+        ) from exc
+
+    return FernetEncryptionWrapper(
+        key_value=RedisStore(url=config.auth_redis_url),
+        fernet=Fernet(config.auth_storage_encryption_key.encode("ascii")),
+        raise_on_decryption_error=False,
     )
 
 
+def _build_azure_provider(config: AppConfig):
+    """Construct the Entra auth provider for http (multi-user) transport.
+
+    Imported lazily so stdio mode never touches ``fastmcp[azure]``. The
+    constructor performs no network I/O (JWKS/OBO are fetched lazily at request
+    time), so it is safe to build during server construction and in tests. A
+    certificate credential is read here so a bad file fails at startup.
+    """
+    from mcp_microsoft.entra import EntraProvider, build_assertion_source
+
+    assertion_source = build_assertion_source(config)
+    return EntraProvider(
+        assertion_source=assertion_source,
+        client_id=config.auth_client_id,
+        client_secret=(config.auth_client_secret or None)
+        if assertion_source is None
+        else None,
+        tenant_id=config.auth_tenant_id,
+        base_url=config.base_url,
+        base_authority=config.auth_authority_host,
+        required_scopes=[config.auth_required_scope],
+        additional_authorize_scopes=build_graph_authorize_scopes(config),
+        jwt_signing_key=config.auth_jwt_signing_key or None,
+        client_storage=_build_oauth_storage(config),
+        allowed_client_redirect_uris=list(config.auth_allowed_redirect_uris) or None,
+    )
+
+
+def _log_auth_posture(config: AppConfig) -> None:
+    """Log one line per auth setting that weakens the enterprise baseline."""
+    if config.auth_credential_type == "secret":
+        _log.warning(
+            "Entra client secret in use (MCP_AUTH_CREDENTIAL_TYPE=secret). "
+            "Prefer certificate, managed_identity, or workload_identity."
+        )
+    if not config.auth_jwt_signing_key:
+        _log.warning(
+            "MCP_AUTH_JWT_SIGNING_KEY unset: issued MCP tokens are signed with a "
+            "key derived from the client secret, so rotating the secret signs "
+            "every client out."
+        )
+    if not config.auth_allowed_redirect_uris:
+        _log.warning(
+            "MCP_AUTH_ALLOWED_REDIRECT_URIS unset: any MCP client redirect URI "
+            "is accepted (the consent screen is the only guard)."
+        )
+
+
+def _build_request_state_security(config: AppConfig):
+    """Shared sealing keys for MCP 2026-07-28 request state, if configured.
+
+    Without keys the SDK seals ``requestState`` under a per-process ephemeral
+    key, which is right for one worker. Replicas behind a load balancer must
+    share a key ring or a confirmation answered on another replica is rejected
+    (fail-closed, but the user is asked again).
+    """
+    if not config.request_state_keys:
+        return None
+    from mcp.server.request_state import RequestStateSecurity
+
+    return RequestStateSecurity(keys=list(config.request_state_keys))
+
+
 @asynccontextmanager
-async def app_lifespan(_server: FastMCP):
+async def app_lifespan(server: FastMCP):
     """Initialize shared runtime resources once for the server process."""
     await initialize_http_clients()
     try:
         yield {}
     finally:
         await close_http_clients()
+        close_obo = getattr(server.auth, "close_obo_credentials", None)
+        if close_obo is not None:
+            await close_obo()
 
 
 def create_mcp_server(config: AppConfig | None = None) -> FastMCP:
@@ -487,9 +564,11 @@ def create_mcp_server(config: AppConfig | None = None) -> FastMCP:
         auth=auth,
         middleware=middleware,
         mask_error_details=True if http_mode else None,
+        request_state_security=_build_request_state_security(runtime_config),
     )
 
     if http_mode:
+        _log_auth_posture(runtime_config)
         _register_health_route(mcp)
         if runtime_config.stats_token:
             _register_stats_routes(mcp, runtime_config)

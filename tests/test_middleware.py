@@ -254,7 +254,7 @@ async def test_rate_limit_per_key_isolation_and_over_limit_exception(
 ) -> None:
     """One key can be throttled without affecting another; over-limit raises
     fastmcp's RateLimitError (McpError, code -32000) unchanged."""
-    from mcp import McpError
+    from mcp import MCPError
     from fastmcp.server.middleware.rate_limiting import RateLimitError
 
     from mcp_microsoft.middleware import UserRateLimitMiddleware
@@ -272,7 +272,7 @@ async def test_rate_limit_per_key_isolation_and_over_limit_exception(
     with pytest.raises(RateLimitError) as exc_info:
         await mw.on_request(_req_context(), _call_next_ok)
     # Exact client-visible behavior: McpError subclass, JSON-RPC code -32000.
-    assert isinstance(exc_info.value, McpError)
+    assert isinstance(exc_info.value, MCPError)
     assert exc_info.value.error.code == -32000
 
     # A different key is unaffected (independent bucket).

@@ -7,6 +7,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Changed
+
+- **FastMCP 4.1 / MCP Python SDK v2; MCP 2026-07-28 support.** The server now serves the sessionless 2026-07-28 protocol to clients that negotiate it and the handshake-era versions (2024-11-05 through 2025-11-25) to older clients from the same `/mcp` endpoint. `fastmcp[azure,apps]` moves to `>=4.1.0,<5`, which brings `mcp` 2.3 and `httpx2` for FastMCP's own HTTP stack. Graph calls still use `httpx`.
+- **`confirm=True` works on 2026-07-28 connections.** `send_email`, `reply_email`, `forward_email`, `delete_email`, `bulk_trash_emails`, and `bulk_delete_emails` share one era-aware confirmation helper. It uses form elicitation on handshake-era connections and an `InputRequiredResult` round trip (SEP-2322) on modern ones. The round-trip state is sealed by the SDK and bound to the tool, its arguments, and the principal. A folder-wide bulk operation asks again if the folder changed between the prompt and the answer. `delete_email` now also requires a client that declared elicitation, matching the other tools.
+- **`MCP_BASE_URL` must be `https://`** unless it points at a loopback host.
+
+### Added
+
+- **Secretless Entra credentials for http mode.** `MCP_AUTH_CREDENTIAL_TYPE=certificate|managed_identity|workload_identity` authenticates the server to Entra with RFC 7523 client assertions, for both sign-in and the On-Behalf-Of exchange, instead of `MCP_AUTH_CLIENT_SECRET`. `secret` remains the default.
+- **`MCP_AUTH_JWT_SIGNING_KEY`** sets a stable signing key for issued MCP tokens, so rotating the client secret no longer signs every client out. It is required for secretless types.
+- **`MCP_AUTH_REDIS_URL` + `MCP_AUTH_STORAGE_ENCRYPTION_KEY`** store Fernet-encrypted OAuth-proxy state in Redis (new `[redis]` extra, included in the Docker image).
+- **`MCP_AUTH_ALLOWED_REDIRECT_URIS`** is an allow-list of MCP client redirect URIs.
+- **`MCP_AUTH_AUTHORITY_HOST`** sets the Entra authority for sovereign clouds.
+- **`MCP_REQUEST_STATE_KEYS`** is a shared key ring for 2026-07-28 confirmation rounds across replicas.
+- The server logs a startup warning for each auth setting left at a weaker default.
+
+---
+
 ## [0.10.0] — 2026-08-27
 
 ### Added
