@@ -5,27 +5,27 @@ from typing import Any
 
 from mcp.types import ToolAnnotations
 
-READ_ONLY_TOOL = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
-WRITE_TOOL = ToolAnnotations(destructiveHint=False, openWorldHint=True)
+READ_ONLY_TOOL = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+WRITE_TOOL = ToolAnnotations(destructive_hint=False, open_world_hint=True)
 IDEMPOTENT_WRITE_TOOL = ToolAnnotations(
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
-DESTRUCTIVE_TOOL = ToolAnnotations(destructiveHint=True, openWorldHint=True)
+DESTRUCTIVE_TOOL = ToolAnnotations(destructive_hint=True, open_world_hint=True)
 
 LOCAL_READ_TOOL = ToolAnnotations(
-    readOnlyHint=True,
-    idempotentHint=True,
-    openWorldHint=False,
+    read_only_hint=True,
+    idempotent_hint=True,
+    open_world_hint=False,
 )
-LOCAL_WRITE_TOOL = ToolAnnotations(destructiveHint=False, openWorldHint=False)
+LOCAL_WRITE_TOOL = ToolAnnotations(destructive_hint=False, open_world_hint=False)
 LOCAL_IDEMPOTENT_TOOL = ToolAnnotations(
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
 )
-LOCAL_DESTRUCTIVE_TOOL = ToolAnnotations(destructiveHint=True, openWorldHint=False)
+LOCAL_DESTRUCTIVE_TOOL = ToolAnnotations(destructive_hint=True, open_world_hint=False)
 
 _TITLE_OVERRIDES = {
     "id": "ID",

@@ -12,6 +12,7 @@ import base64
 
 import pytest
 from fastmcp.exceptions import ToolError
+from fastmcp.server.auth import AccessToken
 
 import mcp_microsoft.config as config_module
 from mcp_microsoft.config import AppConfig
@@ -31,15 +32,18 @@ class _FakeCtx:
         self.session_id = session_id
 
 
-class _FakeAccessToken:
+class _FakeAccessToken(AccessToken):
+    """A real fastmcp AccessToken (the MCP SDK v2 server reads its fields)."""
+
     def __init__(self, oid: str | None, sub: str | None = None) -> None:
-        self.token = "assertion"
         claims: dict[str, str] = {}
         if oid:
             claims["oid"] = oid
         if sub:
             claims["sub"] = sub
-        self.claims = claims
+        super().__init__(
+            token="assertion", client_id="test-client", scopes=[], claims=claims
+        )
 
 
 def _file(name: str, data: bytes, content_type: str = "application/octet-stream") -> dict:

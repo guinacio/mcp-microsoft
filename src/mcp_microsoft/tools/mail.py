@@ -34,7 +34,7 @@ from urllib.parse import unquote, urlsplit
 
 from fastmcp.server.context import Context
 from mcp import types as mcp_types
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from mcp_microsoft.common.mail_utils import (
@@ -119,7 +119,7 @@ async def _email_confirmation_error(
         )
     try:
         result = await ctx.elicit(prompt, response_type=_Confirmation)
-    except McpError as exc:
+    except MCPError as exc:
         if exc.error.code != mcp_types.METHOD_NOT_FOUND:
             raise
         return (

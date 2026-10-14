@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from mcp import types as mcp_types
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from mcp_microsoft.config import reset_app_config
 from mcp_microsoft.runtime import reset_runtime_state
@@ -136,12 +136,7 @@ async def test_send_email_confirm_handles_false_capability_advertisement(
         "get_graph",
         lambda _profile: (_ for _ in ()).throw(AssertionError("Graph must not be called")),
     )
-    error = McpError(
-        mcp_types.ErrorData(
-            code=mcp_types.METHOD_NOT_FOUND,
-            message="Method not found",
-        )
-    )
+    error = MCPError(code=mcp_types.METHOD_NOT_FOUND, message="Method not found")
 
     result = await mail.send_email(
         mail.SendEmailInput(

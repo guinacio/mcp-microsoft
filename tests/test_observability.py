@@ -256,10 +256,12 @@ async def test_file_upload_provider_tool_flows_through_middleware(
     # http-mode upload scoping requires a stable identity (oid/sub) or it refuses
     # (see uploads._get_scope_key). Supply an ambient oid so list_files resolves a
     # real per-user scope rather than being rejected.
-    class _Tok:
-        claims = {"oid": "obs-user"}
+    from fastmcp.server.auth import AccessToken
 
-    monkeypatch.setattr(deps, "get_access_token", lambda: _Tok())
+    token = AccessToken(
+        token="t", client_id="test-client", scopes=[], claims={"oid": "obs-user"}
+    )
+    monkeypatch.setattr(deps, "get_access_token", lambda: token)
 
     caplog_records: list[str] = []
 

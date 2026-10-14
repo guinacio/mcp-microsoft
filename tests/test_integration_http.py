@@ -25,6 +25,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from fastmcp import Client
+from fastmcp.server.auth import AccessToken
 
 import mcp_microsoft.graph as graph_module
 import mcp_microsoft.identity as identity_module
@@ -357,12 +358,18 @@ async def test_protected_resource_metadata_advertises_this_server_as_the_proxy(
 # ---------------------------------------------------------------------------
 
 
-class _FakeAccessToken:
-    """Duck-typed stand-in for fastmcp's AccessToken."""
+class _FakeAccessToken(AccessToken):
+    """A real fastmcp AccessToken with test defaults.
+
+    The MCP SDK v2 server reads ``client_id``/``scopes``/``subject`` off the
+    ambient token (telemetry, request-state principal binding), so a duck-typed
+    stand-in carrying only ``token``/``claims`` no longer suffices.
+    """
 
     def __init__(self, token: str, claims: dict | None = None) -> None:
-        self.token = token
-        self.claims = claims or {}
+        super().__init__(
+            token=token, client_id="test-client", scopes=[], claims=claims or {}
+        )
 
 
 class _FakeCredential:

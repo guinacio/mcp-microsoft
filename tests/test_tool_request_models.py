@@ -139,8 +139,8 @@ async def test_create_reply_draft_schema_and_annotations() -> None:
     assert set(tool.output_schema["required"]) == {"success", "action"}
     assert "Mail.ReadWrite" in tool.description
     assert "not sent" in tool.description
-    assert tool.annotations.destructiveHint is False
-    assert tool.annotations.readOnlyHint is not True
+    assert tool.annotations.destructive_hint is False
+    assert tool.annotations.read_only_hint is not True
 
     get_draft_tool = tools["get_draft"]
     assert set(get_draft_tool.output_schema["properties"]) == {
@@ -174,8 +174,8 @@ async def test_update_draft_schema_documents_history_preservation() -> None:
     preserve_schema = params_schema["properties"]["preserve_history"]
     assert preserve_schema["default"] is False
     assert "quoted reply history is retained" in preserve_schema["description"]
-    assert tool.annotations.destructiveHint is False
-    assert tool.annotations.openWorldHint is True
+    assert tool.annotations.destructive_hint is False
+    assert tool.annotations.open_world_hint is True
     assert "does not send" in tool.description
     assert "Mail.ReadWrite" in tool.description
 
