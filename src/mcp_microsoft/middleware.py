@@ -167,7 +167,7 @@ class UserRateLimitMiddleware(Middleware):
     (``burst_capacity`` defaults to ``2 * max_requests_per_second`` as fastmcp's
     does), applied in ``on_request`` (so it covers all MCP requests, not just
     tool calls), and over-limit raises the same ``RateLimitError`` (an
-    ``McpError`` with JSON-RPC code ``-32000``) so client-visible behavior is
+    ``MCPError`` with JSON-RPC code ``-32000``) so client-visible behavior is
     identical.
     """
 

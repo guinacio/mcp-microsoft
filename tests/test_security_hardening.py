@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import types as mcp_types
 from mcp.shared.exceptions import MCPError
+from mcp_types.version import LATEST_HANDSHAKE_VERSION as HANDSHAKE_VERSION
 
 from mcp_microsoft.config import reset_app_config
 from mcp_microsoft.runtime import reset_runtime_state
@@ -93,14 +94,13 @@ class _EmailConfirmationContext:
             elicitation = SimpleNamespace(form=SimpleNamespace())
         capabilities = SimpleNamespace(elicitation=elicitation)
         self.session = SimpleNamespace(
-            client_params=SimpleNamespace(capabilities=capabilities)
+            client_capabilities=capabilities,
+            protocol_version=HANDSHAKE_VERSION,
         )
-        self.result = result or SimpleNamespace(
-            action="accept", data=SimpleNamespace(confirmed=True)
-        )
+        self.result = result or SimpleNamespace(action="accept", data=True)
         self.error = error
 
-    async def elicit(self, _prompt: str, response_type):
+    async def elicit(self, _prompt: str, response_type, **_kwargs):
         if self.error is not None:
             raise self.error
         return self.result
@@ -181,7 +181,7 @@ async def test_send_email_confirm_cancellation_does_not_call_graph(
         lambda _profile: (_ for _ in ()).throw(AssertionError("Graph must not be called")),
     )
     cancelled = SimpleNamespace(
-        action="cancel", data=SimpleNamespace(confirmed=False)
+        action="cancel", data=None
     )
     result = await mail.send_email(
         mail.SendEmailInput(
@@ -228,7 +228,7 @@ async def test_forward_email_confirmation_cancellation_does_not_call_graph(
         lambda _profile: (_ for _ in ()).throw(AssertionError("Graph must not be called")),
     )
     cancelled = SimpleNamespace(
-        action="cancel", data=SimpleNamespace(confirmed=False)
+        action="cancel", data=None
     )
 
     result = await mail.forward_email(
@@ -352,13 +352,16 @@ class _BulkGraph:
 class _AcceptingContext:
     def __init__(self) -> None:
         self.prompt = ""
-
-    async def elicit(self, prompt: str, response_type):
-        self.prompt = prompt
-        return SimpleNamespace(
-            action="accept",
-            data=SimpleNamespace(confirmed=True),
+        self.session = SimpleNamespace(
+            client_capabilities=SimpleNamespace(
+                elicitation=SimpleNamespace(form=SimpleNamespace(), url=None)
+            ),
+            protocol_version=HANDSHAKE_VERSION,
         )
+
+    async def elicit(self, prompt: str, response_type, **_kwargs):
+        self.prompt = prompt
+        return SimpleNamespace(action="accept", data=True)
 
 
 @pytest.mark.asyncio
@@ -424,7 +427,7 @@ async def test_bulk_trash_folder_confirm_without_context_fails_closed(
 
     assert result.success is False
     assert result.total == 2
-    assert "supports elicitation" in (result.error or "")
+    assert "negotiated form elicitation" in (result.error or "")
     assert graph.batch_called is False
 
 
