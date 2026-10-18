@@ -682,11 +682,9 @@ async def test_mutual_exclusion_message_survives_masking(
         result = await client.call_tool(
             "upload_file",
             {
-                "params": {
                     "uploaded_file": "r.txt",
                     "content_base64": base64.b64encode(b"x").decode("ascii"),
-                }
-            },
+                },
             raise_on_error=False,
         )
     assert result.is_error is True

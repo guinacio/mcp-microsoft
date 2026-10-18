@@ -120,7 +120,7 @@ async def test_send_email_confirmation_accept_sends_once(
     ) as client:
         result = await client.call_tool(
             "send_email",
-            {"params": {"to": "a@example.com", "subject": "Hi", "body": "Body", "confirm": True}},
+            {"to": "a@example.com", "subject": "Hi", "body": "Body", "confirm": True},
         )
 
     assert result.structured_content["success"] is True
@@ -142,7 +142,7 @@ async def test_send_email_confirmation_decline_never_sends(
     ) as client:
         result = await client.call_tool(
             "send_email",
-            {"params": {"to": "a@example.com", "subject": "Hi", "body": "Body", "confirm": True}},
+            {"to": "a@example.com", "subject": "Hi", "body": "Body", "confirm": True},
         )
 
     assert result.structured_content["success"] is False
@@ -159,7 +159,7 @@ async def test_modern_client_without_elicitation_fails_closed(
 
     async with Client(_server()) as client:
         result = await client.call_tool(
-            "delete_email", {"params": {"message_id": "m1", "confirm": True}}
+            "delete_email", {"message_id": "m1", "confirm": True}
         )
 
     assert result.structured_content["success"] is False
@@ -178,7 +178,7 @@ async def test_modern_bulk_delete_reasks_when_folder_changes_between_rounds(
     async with Client(_server(), elicitation_handler=_answer(True, prompts)) as client:
         result = await client.call_tool(
             "bulk_delete_emails",
-            {"params": {"folder": "junkemail", "confirm": True}},
+            {"folder": "junkemail", "confirm": True},
         )
 
     # The first approval was for 3 messages; the folder then held 2, so the

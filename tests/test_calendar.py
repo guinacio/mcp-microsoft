@@ -224,7 +224,7 @@ async def test_get_event_returns_full_details(monkeypatch: pytest.MonkeyPatch) -
     """Verify get_event returns EventDetailResponse with all major fields populated."""
 
     class DummyGraph:
-        async def get(self, path: str, params: dict = None):
+        async def get(self, path: str, params: dict = None, headers: dict | None = None):
             return {
                 "id": "event-1",
                 "subject": "Project Review",
@@ -271,7 +271,7 @@ async def test_get_event_null_safe_optional_fields(monkeypatch: pytest.MonkeyPat
     """Verify get_event handles missing optional fields (onlineMeeting, recurrence) safely."""
 
     class DummyGraph:
-        async def get(self, path: str, params: dict = None):
+        async def get(self, path: str, params: dict = None, headers: dict | None = None):
             return {
                 "id": "event-minimal",
                 "subject": "Minimal Event",
@@ -324,6 +324,7 @@ async def test_create_event_required_fields_only(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
     result = await calendar.create_event(
         calendar.CreateEventInput(
+            timezone="UTC",
             subject="Kickoff Meeting",
             start_datetime="2026-04-15T10:00:00",
             end_datetime="2026-04-15T11:00:00",
@@ -358,6 +359,7 @@ async def test_create_event_with_optional_fields(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
     await calendar.create_event(
         calendar.CreateEventInput(
+            timezone="UTC",
             subject="Full Event",
             start_datetime="2026-04-20T09:00:00",
             end_datetime="2026-04-20T10:00:00",
@@ -394,6 +396,7 @@ async def test_create_event_uses_calendar_id_in_path(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
     await calendar.create_event(
         calendar.CreateEventInput(
+            timezone="UTC",
             subject="Cal-specific Event",
             start_datetime="2026-04-21T10:00:00",
             end_datetime="2026-04-21T11:00:00",
@@ -421,6 +424,7 @@ async def test_create_event_online_meeting_sets_teams_fields(monkeypatch: pytest
     monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
     result = await calendar.create_event(
         calendar.CreateEventInput(
+            timezone="UTC",
             subject="Teams Meeting",
             start_datetime="2026-04-22T10:00:00",
             end_datetime="2026-04-22T11:00:00",
@@ -628,6 +632,7 @@ async def test_get_free_busy_returns_schedule_for_multiple_users(monkeypatch: py
     monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
     result = await calendar.get_free_busy(
         calendar.GetFreeBusyInput(
+            timezone="UTC",
             email_addresses=["alice@example.com", "bob@example.com"],
             start_datetime="2026-04-15T09:00:00",
             end_datetime="2026-04-15T17:00:00",
@@ -667,6 +672,7 @@ async def test_get_free_busy_accepts_comma_separated_string(monkeypatch: pytest.
     monkeypatch.setattr(calendar, "get_graph", lambda _profile: DummyGraph())
     await calendar.get_free_busy(
         calendar.GetFreeBusyInput(
+            timezone="UTC",
             email_addresses="alice@example.com, bob@example.com",
             start_datetime="2026-04-15T09:00:00",
             end_datetime="2026-04-15T17:00:00",

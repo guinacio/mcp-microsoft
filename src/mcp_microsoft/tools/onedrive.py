@@ -22,7 +22,7 @@ import logging
 import httpx
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
@@ -69,7 +69,22 @@ class UploadFileInput(ToolRequestModel):
 class ListDriveItemsInput(ToolRequestModel):
     folder_id: str | None = None
     max_results: int = 25
+    skip_token: str | None = None
     profile: str | None = None
+
+
+def _next_skip_token(next_link: str | None) -> str | None:
+    """Pull the ``$skiptoken`` cursor out of a Graph ``@odata.nextLink``.
+
+    OneDrive spells it ``$skiptoken`` or ``$skipToken`` depending on the
+    account type, so match the key case-insensitively.
+    """
+    if not next_link:
+        return None
+    for key, values in parse_qs(urlparse(next_link).query).items():
+        if key.casefold() == "$skiptoken" and values:
+            return values[0]
+    return None
 
 
 class GetDriveItemInput(ToolRequestModel):
@@ -125,10 +140,13 @@ async def list_drive_items(
         folder_id: Optional folder ID to list contents of. When omitted,
                    lists the root of the user's OneDrive.
         max_results: Maximum number of items to return (1-200). Defaults to 25.
+        skip_token: Opaque pagination cursor returned as next_page_token from a
+                    previous call for the same folder. Omit for the first page.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Structured OneDrive item data.
+        Structured OneDrive item data. When has_more is True, pass
+        next_page_token as skip_token to retrieve the next page.
     """
     g = get_graph(params.profile)
     query: dict[str, Any] = {
@@ -136,6 +154,8 @@ async def list_drive_items(
         "$select": "id,name,size,file,folder,lastModifiedDateTime,webUrl",
         "$orderby": "name",
     }
+    if params.skip_token is not None:
+        query["$skiptoken"] = params.skip_token
 
     if params.folder_id:
         path = f"/me/drive/items/{params.folder_id}/children"
@@ -144,12 +164,14 @@ async def list_drive_items(
 
     result = await g.get(path, params=query)
     items = parse_graph_collection(result, GraphDriveItem)
+    next_page_token = _next_skip_token(result.get("@odata.nextLink"))
 
     return ListDriveItemsResponse(
         folder_id=params.folder_id,
         count=len(items),
         items=[drive_item_payload(item) for item in items],
-        has_more=result.get("@odata.nextLink") is not None,
+        next_page_token=next_page_token,
+        has_more=next_page_token is not None,
     )
 
 

@@ -23,10 +23,13 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Union
 from pydantic import model_validator
 
+from fastmcp.exceptions import ToolError
+
 from mcp_microsoft.common.formatting import format_datetime_display
 from mcp_microsoft.common.request_model import ToolRequestModel
 from mcp_microsoft.common.text import strip_html
 from mcp_microsoft.common.tooling import DESTRUCTIVE_TOOL, READ_ONLY_TOOL, WRITE_TOOL, register_tool
+from mcp_microsoft.config import get_app_config
 from mcp_microsoft.feature_flags import is_deletion_disabled
 from mcp_microsoft.graph_types import (
     GraphAttendee,
@@ -110,7 +113,7 @@ class CreateEventInput(ToolRequestModel):
     subject: str
     start_datetime: str
     end_datetime: str
-    timezone: str = "UTC"
+    timezone: str | None = None
     body: str | None = None
     body_type: BodyType = "text"
     location: str | None = None
@@ -127,7 +130,7 @@ class UpdateEventInput(ToolRequestModel):
     subject: str | None = None
     start_datetime: str | None = None
     end_datetime: str | None = None
-    timezone: str = "UTC"
+    timezone: str | None = None
     body: str | None = None
     body_type: BodyType = "text"
     location: str | None = None
@@ -159,7 +162,7 @@ class GetFreeBusyInput(ToolRequestModel):
     email_addresses: str | list[str]
     start_datetime: str
     end_datetime: str
-    timezone: str = "UTC"
+    timezone: str | None = None
     profile: str | None = None
 
 
@@ -168,7 +171,7 @@ class FindMeetingTimesInput(ToolRequestModel):
     duration_minutes: int = 60
     start_datetime: str | None = None
     end_datetime: str | None = None
-    timezone: str = "UTC"
+    timezone: str | None = None
     max_candidates: int = 5
     is_organizer_optional: bool = False
     profile: str | None = None
@@ -189,8 +192,35 @@ def _fmt_attendees(attendees: list[GraphAttendee]) -> str:
     return ", ".join(parts) if parts else "(none)"
 
 
-def _build_datetime(dt_str: str, tz: str) -> dict:
-    """Build a Graph dateTimeTimeZone object."""
+_TIMEZONE_REQUIRED = (
+    "No timezone for '{value}'. Pass timezone as an IANA name such as "
+    "'America/Sao_Paulo' (or 'UTC'), give the datetime an explicit offset such "
+    "as '2026-04-01T10:00:00-03:00', or set MCP_DEFAULT_TIMEZONE on the server."
+)
+
+
+def _effective_timezone(explicit: str | None) -> str | None:
+    """Return the caller's timezone, else the server-wide MCP_DEFAULT_TIMEZONE."""
+    return explicit or get_app_config().default_timezone or None
+
+
+def _build_datetime(dt_str: str, tz: str | None) -> dict:
+    """Build a Graph dateTimeTimeZone object.
+
+    A datetime with an explicit UTC offset is unambiguous, so it is converted
+    to UTC whatever ``tz`` says. A naive datetime needs a timezone: there is no
+    silent UTC fallback, because an event created at 10:00 UTC when the user
+    meant 10:00 local time is wrong without any visible error.
+    """
+    try:
+        parsed = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.tzinfo is not None:
+        as_utc = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return {"dateTime": as_utc.isoformat(timespec="seconds"), "timeZone": "UTC"}
+    if not tz:
+        raise ToolError(_TIMEZONE_REQUIRED.format(value=dt_str))
     return {"dateTime": dt_str, "timeZone": tz}
 
 
@@ -415,7 +445,15 @@ async def get_event(params: GetEventInput) -> EventDetailResponse:
         ),
     }
 
-    ev = GraphEvent.model_validate(await g.get(f"/me/events/{params.event_id}", params=query))
+    # Outlook stores every event body as HTML, even ones created as plain text,
+    # so ask Graph to convert it back to text instead of reporting "html".
+    ev = GraphEvent.model_validate(
+        await g.get(
+            f"/me/events/{params.event_id}",
+            params=query,
+            headers={"Prefer": 'outlook.body-content-type="text"'},
+        )
+    )
 
     subject = ev.subject or "(no subject)"
     start = format_datetime_display(ev.start.date_time)
@@ -481,7 +519,10 @@ async def create_event(
         subject: Event title.
         start_datetime: Start time in ISO 8601 format (e.g. '2026-04-01T10:00:00').
         end_datetime: End time in ISO 8601 format (e.g. '2026-04-01T11:00:00').
-        timezone: IANA timezone string (e.g. 'America/Sao_Paulo', 'UTC'). Defaults to 'UTC'.
+        timezone: IANA timezone for naive start/end times (e.g. 'America/Sao_Paulo').
+                  Omit only when the datetimes carry an offset or the server
+                  sets MCP_DEFAULT_TIMEZONE; otherwise the call is rejected
+                  rather than silently using UTC.
         body: Optional event description/body.
         body_type: 'text' or 'html'. Defaults to 'text'.
         location: Optional location display name.
@@ -496,10 +537,13 @@ async def create_event(
         Structured event creation confirmation.
     """
     g = get_graph(params.profile)
+    tz = _effective_timezone(params.timezone)
+    start = _build_datetime(params.start_datetime, tz)
+    end = _build_datetime(params.end_datetime, tz)
     event: dict = {
         "subject": params.subject,
-        "start": _build_datetime(params.start_datetime, params.timezone),
-        "end": _build_datetime(params.end_datetime, params.timezone),
+        "start": start,
+        "end": end,
         "isAllDay": params.is_all_day,
     }
 
@@ -537,9 +581,9 @@ async def create_event(
         action="create_event",
         event_id=event_id,
         subject=params.subject,
-        start_datetime=params.start_datetime,
-        end_datetime=params.end_datetime,
-        timezone=params.timezone,
+        start_datetime=start["dateTime"],
+        end_datetime=end["dateTime"],
+        timezone=start["timeZone"],
         calendar_id=params.calendar_id,
         web_link=web_link,
         join_url=join_url,
@@ -562,7 +606,9 @@ async def update_event(
         subject: Replace event title (omit to leave unchanged).
         start_datetime: Replace start time (ISO 8601, omit to leave unchanged).
         end_datetime: Replace end time (ISO 8601, omit to leave unchanged).
-        timezone: IANA timezone for start/end times. Defaults to 'UTC'.
+        timezone: IANA timezone for naive start/end times. Required when changing
+                  times unless they carry an offset or the server sets
+                  MCP_DEFAULT_TIMEZONE.
         body: Replace event body (omit to leave unchanged).
         body_type: 'text' or 'html'. Defaults to 'text'.
         location: Replace location (omit to leave unchanged).
@@ -574,14 +620,15 @@ async def update_event(
         Structured event update confirmation.
     """
     g = get_graph(params.profile)
+    tz = _effective_timezone(params.timezone)
     patch: dict = {}
 
     if params.subject is not None:
         patch["subject"] = params.subject
     if params.start_datetime is not None:
-        patch["start"] = _build_datetime(params.start_datetime, params.timezone)
+        patch["start"] = _build_datetime(params.start_datetime, tz)
     if params.end_datetime is not None:
-        patch["end"] = _build_datetime(params.end_datetime, params.timezone)
+        patch["end"] = _build_datetime(params.end_datetime, tz)
     if params.body is not None:
         patch["body"] = {
             "contentType": "HTML" if params.body_type.lower() == "html" else "Text",
@@ -689,11 +736,14 @@ async def get_free_busy(
         email_addresses: Email address(es) to check. Comma-separated string or list.
         start_datetime: Start of the time window (ISO 8601).
         end_datetime: End of the time window (ISO 8601).
-        timezone: IANA timezone. Defaults to 'UTC'.
+        timezone: IANA timezone for naive start/end times. Required unless they
+                  carry an offset or the server sets MCP_DEFAULT_TIMEZONE.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
 
     Returns:
-        Structured free/busy data for each requested person.
+        Structured free/busy data for each requested person. Check has_data
+        before reading availability: an address Graph has no calendar for
+        comes back with has_data=False and an error, not as "free".
     """
     g = get_graph(params.profile)
     if isinstance(params.email_addresses, str):
@@ -701,10 +751,12 @@ async def get_free_busy(
     else:
         schedules = [addr.strip() for addr in params.email_addresses if addr.strip()]
 
+    tz = _effective_timezone(params.timezone)
+    start = _build_datetime(params.start_datetime, tz)
     payload = {
         "schedules": schedules,
-        "startTime": _build_datetime(params.start_datetime, params.timezone),
-        "endTime": _build_datetime(params.end_datetime, params.timezone),
+        "startTime": start,
+        "endTime": _build_datetime(params.end_datetime, tz),
         "availabilityViewInterval": 30,  # 30-minute slots
     }
 
@@ -712,13 +764,21 @@ async def get_free_busy(
     schedule_items = (result or {}).get("value", [])
 
     people: list[PersonSchedule] = []
+    returned: set[str] = set()
     for sched in schedule_items:
         email = sched.get("scheduleId", "unknown")
-        availability = sched.get("availabilityView", "")
-        items = sched.get("scheduleItems", [])
+        returned.add(email.casefold())
+        availability = sched.get("availabilityView", "") or ""
+        items = sched.get("scheduleItems", []) or []
+        graph_error = sched.get("error") or {}
+        error = graph_error.get("message") or graph_error.get("responseCode") or ""
+        if not error and not availability:
+            error = "Microsoft Graph returned no availability for this address."
         people.append(
             PersonSchedule(
                 email=email,
+                has_data=not error,
+                error=error,
                 availability_view=availability,
                 legend={
                     "0": "Free",
@@ -741,10 +801,20 @@ async def get_free_busy(
             )
         )
 
+    for address in schedules:
+        if address.casefold() not in returned:
+            people.append(
+                PersonSchedule(
+                    email=address,
+                    has_data=False,
+                    error="Microsoft Graph returned no schedule for this address.",
+                )
+            )
+
     return FreeBusyResponse(
         start_datetime=params.start_datetime,
         end_datetime=params.end_datetime,
-        timezone=params.timezone,
+        timezone=start["timeZone"],
         people=people,
     )
 
@@ -768,7 +838,8 @@ async def find_meeting_times(
         duration_minutes: Meeting duration in minutes. Defaults to 60.
         start_datetime: Optional start of the search window (ISO 8601).
         end_datetime: Optional end of the search window (ISO 8601).
-        timezone: IANA timezone. Defaults to 'UTC'.
+        timezone: IANA timezone for a naive search window. Required with a window
+                  unless it carries an offset or the server sets MCP_DEFAULT_TIMEZONE.
         max_candidates: Maximum number of time suggestions to return. Defaults to 5.
         is_organizer_optional: When True, organizer's schedule is not considered. Defaults to False.
         profile: Microsoft 365 profile to use. Omit to use the default profile.
@@ -777,6 +848,7 @@ async def find_meeting_times(
         Structured meeting-time suggestions.
     """
     g = get_graph(params.profile)
+    tz = _effective_timezone(params.timezone)
     attendee_list = _parse_attendees(params.attendees, "required")
 
     payload: dict = {
@@ -787,15 +859,17 @@ async def find_meeting_times(
     }
 
     if params.start_datetime and params.end_datetime:
+        window_start = _build_datetime(params.start_datetime, tz)
         payload["timeConstraint"] = {
             "activityDomain": "work",
             "timeSlots": [
                 {
-                    "start": _build_datetime(params.start_datetime, params.timezone),
-                    "end": _build_datetime(params.end_datetime, params.timezone),
+                    "start": window_start,
+                    "end": _build_datetime(params.end_datetime, tz),
                 }
             ],
         }
+        tz = window_start["timeZone"]
 
     result = await g.post("/me/findMeetingTimes", json=payload)
 
@@ -827,7 +901,7 @@ async def find_meeting_times(
         count=len(normalized),
         suggestions=normalized,
         empty_suggestions_reason=emptiness or None,
-        timezone=params.timezone,
+        timezone=tz or "UTC",
     )
 
 

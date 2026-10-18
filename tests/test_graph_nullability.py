@@ -36,7 +36,7 @@ def test_graph_message_accepts_null_wire_fields() -> None:
 @pytest.mark.asyncio
 async def test_get_event_handles_nullable_graph_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyGraph:
-        async def get(self, _path: str, params: dict | None = None):
+        async def get(self, _path: str, params: dict | None = None, headers: dict | None = None):
             return {
                 "id": "event-null",
                 "subject": None,

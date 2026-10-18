@@ -411,6 +411,11 @@ class ScheduleItemInfo(MCPModel):
 
 class PersonSchedule(MCPModel):
     email: str = ""
+    # False when Graph has no calendar data for the address (unknown or
+    # external address, no permission): an empty availability_view then means
+    # "unknown", not "free".
+    has_data: bool = True
+    error: str = ""
     availability_view: str = ""
     legend: dict[str, str] = Field(default_factory=dict)
     schedule_items: list[ScheduleItemInfo] = Field(default_factory=list)
@@ -462,6 +467,7 @@ class ListDriveItemsResponse(MCPModel):
     folder_id: str | None = None
     count: int = 0
     items: list[DriveItemInfo] = Field(default_factory=list)
+    next_page_token: str | None = None
     has_more: bool = False
 
 

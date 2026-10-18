@@ -7,38 +7,33 @@ from mcp_microsoft.tools import contacts, drafts, mail, onedrive, profiles, serv
 
 
 def _inner_params_schema(tool) -> dict:
-    schema = tool.parameters
-    params_schema = schema["properties"]["params"]
-    ref = params_schema["$ref"].split("/")[-1]
-    return schema["$defs"][ref]
+    """Tool arguments are top-level; there is no nested params object."""
+    assert "params" not in tool.parameters["properties"]
+    return tool.parameters
 
 
 @pytest.mark.asyncio
-async def test_create_contact_tool_uses_standardized_params_object() -> None:
+async def test_create_contact_tool_takes_flat_arguments() -> None:
     mcp = FastMCP("test-server")
     contacts.register(mcp)
 
     tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
     tool = tools["create_contact"]
 
-    assert set(tool.parameters["properties"]) == {"params"}
-    assert tool.parameters["required"] == ["params"]
-
     params_schema = _inner_params_schema(tool)
     assert "display_name" in params_schema["properties"]
     assert "display_name" in params_schema["required"]
-    assert "display_name" not in tool.parameters["properties"]
+    assert params_schema["additionalProperties"] is False
 
 
 @pytest.mark.asyncio
-async def test_send_email_tool_hides_ctx_and_uses_params_object() -> None:
+async def test_send_email_tool_hides_ctx_and_takes_flat_arguments() -> None:
     mcp = FastMCP("test-server")
     mail.register(mcp)
 
     tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
     tool = tools["send_email"]
 
-    assert set(tool.parameters["properties"]) == {"params"}
     assert "ctx" not in tool.parameters["properties"]
 
     params_schema = _inner_params_schema(tool)

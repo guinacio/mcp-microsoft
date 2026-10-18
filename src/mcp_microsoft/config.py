@@ -31,6 +31,10 @@ class AppConfig:
     enable_teams_meeting_artifacts: bool | None = None
     enable_teams_ai_insights: bool | None = None
     disable_deletion_tools: bool = False
+    # Timezone applied to naive calendar datetimes when a tool call names none
+    # (MCP_DEFAULT_TIMEZONE, an IANA name such as "America/Sao_Paulo"). Empty
+    # means calendar tools reject naive datetimes instead of assuming UTC.
+    default_timezone: str = ""
     # Transport / remote (http) mode. stdio mode ignores every MCP_HTTP_* /
     # MCP_AUTH_* value below.
     transport: str = "stdio"
@@ -115,6 +119,7 @@ class AppConfig:
             enable_teams_meeting_artifacts=env_flag("MCP_ENABLE_TEAMS_MEETING_ARTIFACTS"),
             enable_teams_ai_insights=env_flag("MCP_ENABLE_TEAMS_AI_INSIGHTS"),
             disable_deletion_tools=bool(env_flag("MCP_DISABLE_DELETION_TOOLS")),
+            default_timezone=os.environ.get("MCP_DEFAULT_TIMEZONE", "").strip(),
             transport=os.environ.get("MCP_TRANSPORT", "stdio").strip().lower() or "stdio",
             http_host=os.environ.get("MCP_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1",
             http_port=_int_env("MCP_HTTP_PORT", 8000),

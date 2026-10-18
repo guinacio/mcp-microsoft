@@ -903,9 +903,7 @@ async def test_download_attachment_http_schema_omits_save_path(
         for tool in await mcp.list_tools(run_middleware=False)
         if tool.name == "download_attachment"
     )
-    input_properties = tool.parameters["$defs"]["DownloadAttachmentHttpInput"][
-        "properties"
-    ]
+    input_properties = tool.parameters["properties"]
     assert "save_path" not in input_properties
     assert set(input_properties) == {
         "message_id",
@@ -932,7 +930,7 @@ async def test_email_action_schemas_preserve_elicitation_confirmation() -> None:
         ("reply_email", "ReplyEmailInput"),
         ("forward_email", "ForwardEmailInput"),
     ):
-        input_properties = tools[tool_name].parameters["$defs"][model_name]["properties"]
+        input_properties = tools[tool_name].parameters["properties"]
         assert "confirm" in input_properties
 
 

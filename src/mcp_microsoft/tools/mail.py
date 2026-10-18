@@ -889,7 +889,7 @@ async def search_emails(
     g = get_graph(params.profile)
     query_params: dict[str, Any] = {
         "$top": min(params.max_results, 25),
-        "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments",
+        "$select": "id,subject,from,receivedDateTime,isRead,bodyPreview,hasAttachments,importance",
     }
     subject_filter = _subject_search_filter(params.query)
     if subject_filter:

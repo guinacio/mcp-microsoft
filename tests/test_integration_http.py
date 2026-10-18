@@ -147,7 +147,7 @@ async def test_authenticated_tool_call_reaches_graph_with_obo_token(
     try:
         async with Client(mcp) as client:
             result = await client.call_tool(
-                "list_emails", {"params": {"folder": "inbox", "max_results": 5}}
+                "list_emails", {"folder": "inbox", "max_results": 5}
             )
     finally:
         await mock_client.aclose()
@@ -184,7 +184,7 @@ async def test_error_masking_hides_sensitive_details_from_client(
     async with Client(mcp) as client:
         result = await client.call_tool(
             "list_emails",
-            {"params": {"folder": "inbox", "max_results": 5}},
+            {"folder": "inbox", "max_results": 5},
             raise_on_error=False,
         )
 
@@ -266,7 +266,7 @@ async def test_tool_call_resolves_real_azure_provider_through_server_auth(
     try:
         async with Client(mcp) as client:
             result = await client.call_tool(
-                "list_emails", {"params": {"folder": "inbox", "max_results": 5}}
+                "list_emails", {"folder": "inbox", "max_results": 5}
             )
     finally:
         await mock_client.aclose()

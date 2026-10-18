@@ -14,6 +14,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **FastMCP 4.1 / MCP Python SDK v2; MCP 2026-07-28 support.** The server now serves the sessionless 2026-07-28 protocol to clients that negotiate it and the handshake-era versions (2024-11-05 through 2025-11-25) to older clients from the same `/mcp` endpoint. `fastmcp[azure,apps]` moves to `>=4.1.0,<5`, which brings `mcp` 2.3 and `httpx2` for FastMCP's own HTTP stack. Graph calls still use `httpx`.
 - **`confirm=True` works on 2026-07-28 connections.** `send_email`, `reply_email`, `forward_email`, `delete_email`, `bulk_trash_emails`, and `bulk_delete_emails` share one era-aware confirmation helper. It uses form elicitation on handshake-era connections and an `InputRequiredResult` round trip (SEP-2322) on modern ones. The round-trip state is sealed by the SDK and bound to the tool, its arguments, and the principal. A folder-wide bulk operation asks again if the folder changed between the prompt and the answer. `delete_email` now also requires a client that declared elicitation, matching the other tools.
 - **`MCP_BASE_URL` must be `https://`** unless it points at a loopback host.
+- **Tool arguments are top-level.** Every tool used to take one `params` object wrapping its real arguments; they are now ordinary top-level arguments (`send_email(to=..., subject=..., body=...)`), each with its own description, default and constraints in the input schema. The same request models still validate every call. Clients that sent `{"params": {...}}` must send the inner object instead.
+- **Calendar tools no longer assume UTC.** `create_event`, `update_event`, `get_free_busy` and `find_meeting_times` reject a naive datetime unless `timezone` is passed or the new `MCP_DEFAULT_TIMEZONE` is set. Datetimes with an explicit offset (`2026-10-19T10:00:00-03:00`) are converted to UTC.
+- **`get_free_busy` reports missing data.** Each person carries `has_data` and `error`, so an address Graph has no calendar for no longer looks free.
 
 ### Added
 
@@ -24,6 +27,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`MCP_AUTH_AUTHORITY_HOST`** sets the Entra authority for sovereign clouds.
 - **`MCP_REQUEST_STATE_KEYS`** is a shared key ring for 2026-07-28 confirmation rounds across replicas.
 - The server logs a startup warning for each auth setting left at a weaker default.
+- **`list_drive_items` pages.** It returns `next_page_token` and accepts it back as `skip_token`; before, `has_more` could be true with no way to reach the next page.
+- **`MCP_DEFAULT_TIMEZONE`** sets the IANA timezone calendar tools use when a call names none.
+
+### Fixed
+
+- `search_emails` returns `importance`, like `list_emails`.
+- `get_event` returns event bodies as text. Outlook stores every event body as HTML, so bodies created as plain text were reported as `html`.
 
 ---
 
