@@ -28,7 +28,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync --all-groups --all-extras
 
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short
@@ -46,7 +46,7 @@ jobs:
           enable-cache: true
 
       - name: Export locked dependencies
-        run: uv export --all-groups --no-hashes --no-emit-project --output-file requirements-audit.txt
+        run: uv export --all-groups --all-extras --no-hashes --no-emit-project --output-file requirements-audit.txt
 
       - name: Audit dependencies
         run: uvx pip-audit --requirement requirements-audit.txt

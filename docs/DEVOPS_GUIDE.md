@@ -44,12 +44,12 @@ As of 0.8.0 the server runs in one of **two mutually exclusive modes**, chosen a
 | | **stdio** (default) | **http** (remote, multi-user) |
 |---|---|---|
 | `MCP_TRANSPORT` | `stdio` | `http` |
-| Transport | stdio (local subprocess) | Streamable HTTP (MCP spec 2025-11-25), served at `/mcp` |
+| Transport | stdio (local subprocess) | Streamable HTTP (MCP 2026-07-28 plus handshake-era versions back to 2024-11-05), served at `/mcp` |
 | Who runs it | Launched by your MCP client on your machine | A shared server you host behind a reverse proxy |
-| Identity | Named local **profiles**; interactive/device-code OAuth; encrypted disk token cache | Each user signs in with **their own** Entra account; per-request bearer token |
+| Identity | Named local **profiles**; interactive/device-code OAuth; encrypted disk token cache | Each user signs in with **their own** Microsoft account; per-request bearer token |
 | How Graph calls are authorized | MSAL public-client token for the active profile | Per-user **On-Behalf-Of (OBO)** token exchange from the caller's bearer token |
 | Azure app type | **Public** client (Mobile & desktop platform) | **Confidential** client (Web platform + secret) |
-| Accounts | Personal **and** work/school | Work/school **only**, single concrete tenant |
+| Accounts | Personal **and** work/school | One audience per server: a single work/school tenant, **or** personal accounts |
 | Tool count (all optional services on) | **95** | **87** (profile-management + local-disk tools omitted) |
 
 **Architecture in five lines:**
@@ -71,8 +71,9 @@ As of 0.8.0 the server runs in one of **two mutually exclusive modes**, chosen a
 - **stdio** — a single person on their own laptop, personal or work account, no server to operate.
   This is the default and the MCPB / Claude Desktop experience.
 - **http** — you want to offer Microsoft 365 tools to many users from one hosted service, each with
-  their own delegated identity and no local install. Requires a work/school tenant, a public HTTPS
-  endpoint, and a confidential Azure App Registration.
+  their own delegated identity and no local install. Requires a confidential Azure App Registration
+  and a public HTTPS endpoint (a loopback `http://localhost` URL is fine for a local test). One
+  server serves either one work/school tenant or personal Microsoft accounts.
 
 ---
 
@@ -144,7 +145,9 @@ familiarity.
 **Directory (tenant) ID**. Copy the GUID (format `8-4-4-4-12` hex, e.g.
 `9a8b7c6d-1234-5678-90ab-cdef01234567`).
 
-> **http mode requires the concrete tenant GUID.** Pseudo-tenants (`organizations`, `common`,
+> **http mode requires a concrete tenant GUID.** For personal Microsoft accounts (Outlook.com /
+> Live) that GUID is `9188040d-6c67-4c5b-b112-36a304b66dad`, the fixed tenant every personal account signs
+> in through. Pseudo-tenants (`organizations`, `common`,
 > `consumers`) and verified domains (`contoso.onmicrosoft.com`) are **rejected at startup**. The
 > reason: FastMCP's `AzureProvider` pins the accepted token issuer (`iss` claim) to a single literal
 > URL built from `MCP_AUTH_TENANT_ID`, and real Entra tokens always carry the *concrete* tenant GUID
@@ -206,15 +209,18 @@ depend on — create a separate one.
 > user.
 
 1. **App registrations** → **+ New registration**. Name e.g. `mcp-microsoft-remote`.
-2. **Supported account types:** work/school only (*this organizational directory only* or *any
-   organizational directory*). **Do not** pick a personal-account option — OBO and custom API scopes
-   are not reliably supported for consumer accounts.
+2. **Supported account types:** the audience this server serves. Work/school: *this organizational
+   directory only* or *any organizational directory*. Personal Microsoft accounts: *Personal
+   Microsoft accounts only* (or *any organizational directory and personal Microsoft accounts*),
+   with `MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad`. One server cannot serve both, because
+   the token issuer is pinned to that one tenant; run a second instance for the other audience.
 3. **Redirect URI:** platform **Web**, URI:
    ```
    {MCP_BASE_URL}/auth/callback
    ```
    e.g. `https://mcp.example.com/auth/callback`. `/auth/callback` is `AzureProvider`'s default
-   redirect path.
+   redirect path. For a local Docker test, `http://localhost:8000/auth/callback` with
+   `MCP_BASE_URL=http://localhost:8000` works (see [Local test with a personal account](#local-test-with-a-personal-account)).
 4. **Register.**
 5. **Expose an API:**
    - **Application ID URI** → **Add** → accept the default `api://{client_id}` → **Save**.
@@ -230,9 +236,38 @@ depend on — create a separate one.
    sets only for the feature flags you set — in http mode flags must be **explicit**, there is no
    auto-detect). `offline_access` is added automatically by `AzureProvider` — no need to request it.
 9. **Grant admin consent** for the tenant (**API permissions** → **Grant admin consent for
-   [tenant]**). Because this is a confidential, work/school-only registration, plan on tenant-wide
-   consent so new users do not each hit an individual prompt. `Sites.ReadWrite.All` in particular
-   will not work without it.
+   [tenant]**). For a work/school registration, plan on tenant-wide consent so new users do not each
+   hit an individual prompt. `Sites.ReadWrite.All` in particular will not work without it. Personal
+   accounts have no admin: each user consents on first sign-in, and Teams/SharePoint stay off.
+
+#### Local test with a personal account
+
+To try http mode on your own machine with an Outlook.com / Live account, register the app as above
+with *Personal Microsoft accounts only* and the redirect `http://localhost:8000/auth/callback`, then
+run the image with:
+
+```env
+MCP_BASE_URL=http://localhost:8000
+MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad
+MCP_AUTH_CLIENT_ID=<Application (client) ID>
+MCP_AUTH_CLIENT_SECRET=<client secret value>
+MCP_AUTH_JWT_SIGNING_KEY=<python -c "import secrets; print(secrets.token_hex(32))">
+MCP_ENABLE_TEAMS=false
+MCP_ENABLE_SHAREPOINT=false
+MCP_DEFAULT_TIMEZONE=America/Sao_Paulo
+```
+
+`MCP_DEFAULT_TIMEZONE` is optional; set it to your IANA timezone. Docker's `--env-file` does not
+strip trailing comments, so keep comments on their own lines.
+
+```bash
+docker run -d --name mcp-microsoft -p 8000:8000 --env-file .env ghcr.io/guinacio/mcp-microsoft:latest
+```
+
+Connect a client that runs on the same machine (Claude Code: `claude mcp add --transport http
+mcp-microsoft http://localhost:8000/mcp`, then `/mcp` → Authenticate). Hosted clients such as
+Claude Desktop's connectors call the server from Anthropic's infrastructure, which cannot reach
+`localhost`; they need the public HTTPS deployment.
 
 **Client-secret rotation:** the secret has a hard expiry — rotate before then. Create a new secret
 alongside the old one (both valid simultaneously), roll `MCP_AUTH_CLIENT_SECRET` to the new value
@@ -244,6 +279,50 @@ data migration is needed — the server holds the secret only in process memory.
 ```
 https://login.microsoftonline.com/{tenant}/adminconsent?client_id={client_id}
 ```
+
+### 4.3 Enterprise authentication hardening
+
+The client secret from §4.2 step 7 still works and stays the default, but Microsoft recommends
+certificate credentials or federated identity credentials for production workloads: there is no
+shared secret to leak, and nothing expires every 24 months. `MCP_AUTH_CREDENTIAL_TYPE` selects one.
+In every secretless mode the server authenticates to Entra with an RFC 7523 client assertion for
+both sign-in (authorization-code and refresh-token redemption) and the On-Behalf-Of exchange, and
+`MCP_AUTH_CLIENT_SECRET` must be **unset**.
+
+| `MCP_AUTH_CREDENTIAL_TYPE` | App registration setup | Server settings |
+|---|---|---|
+| `secret` *(default)* | §4.2 step 7. | `MCP_AUTH_CLIENT_SECRET` |
+| `certificate` | **Certificates & secrets** → **Certificates** → upload the public certificate (`.cer`/`.pem`). | `MCP_AUTH_CLIENT_CERTIFICATE_PATH`: one PEM file with the RSA private key **and** that certificate. `MCP_AUTH_CLIENT_CERTIFICATE_PASSWORD` if the key is encrypted. |
+| `managed_identity` | **Certificates & secrets** → **Federated credentials** → **Add** → scenario *Managed identity*, select the identity the server runs as. | Optional `MCP_AUTH_MANAGED_IDENTITY_CLIENT_ID` for a user-assigned identity (omit for system-assigned). |
+| `workload_identity` | **Federated credentials** → **Add** → *Kubernetes accessing Azure resources* (or another OIDC issuer) with your cluster issuer, namespace, and service account. | `MCP_AUTH_FEDERATED_TOKEN_FILE`, or the `AZURE_FEDERATED_TOKEN_FILE` the AKS webhook injects. |
+
+Certificate assertions are signed `PS256` with an `x5t#S256` thumbprint header, live 5 minutes,
+and carry a unique `jti`. Managed-identity tokens are fetched for the cloud's token-exchange
+audience (`api://AzureADTokenExchange`, or the US Gov / China variant chosen from
+`MCP_AUTH_AUTHORITY_HOST`) and refreshed in the background. Federated token files are re-read
+on every use because the platform rotates them.
+
+Settings that apply to every credential type:
+
+- **`MCP_AUTH_JWT_SIGNING_KEY`** (required for secretless types, recommended always). It signs the
+  MCP access tokens this server issues to clients and keys the encrypted OAuth-proxy store. If it
+  is unset, fastmcp derives the key from the client secret, so a routine secret rotation
+  invalidates every client's session. Generate it with
+  `python -c "import secrets; print(secrets.token_hex(32))"`.
+- **`MCP_AUTH_ALLOWED_REDIRECT_URIS`**: a comma-separated allow-list (fnmatch wildcards) of MCP
+  client callback URLs, for example
+  `https://claude.ai/api/mcp/auth_callback,http://localhost:*,http://127.0.0.1:*`. If it is unset,
+  any client can register any redirect URI and the consent screen is the only safeguard.
+- **`MCP_AUTH_REDIS_URL`** + **`MCP_AUTH_STORAGE_ENCRYPTION_KEY`**: store OAuth-proxy state
+  (client registrations and upstream refresh tokens) in Redis, Fernet-encrypted, so sign-ins
+  survive container restarts. Install with `pip install 'mcp-microsoft[redis]'`. Generate the
+  key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+- **`MCP_AUTH_AUTHORITY_HOST`**: the Entra authority for sovereign clouds (`login.microsoftonline.us`,
+  `login.chinacloudapi.cn`). Graph calls still go to the global endpoint.
+- **`MCP_REQUEST_STATE_KEYS`**: see [§6.9](#69-mcp-protocol-versions-and-confirmations).
+- **HTTPS is enforced.** `MCP_BASE_URL` must be `https://` unless the host is loopback.
+
+The server logs one warning at startup for each of these that is left at its weaker default.
 
 ---
 
@@ -378,9 +457,18 @@ Every `MCP_*` variable read in http mode. stdio mode ignores all `MCP_HTTP_*` / 
 | `MCP_TRANSPORT` | Selects the mode. Must be `stdio` or `http`. | `stdio` | Set to `http`. |
 | `MCP_HTTP_HOST` | Bind host **inside** the process/container. Use `0.0.0.0` behind a proxy/Docker. | `127.0.0.1` | No. |
 | `MCP_HTTP_PORT` | Bind port. Must be 1–65535. | `8000` | No. |
-| `MCP_BASE_URL` | The **public HTTPS URL** clients reach (your proxy's URL, not the bind address). Must start with `http://` or `https://`. | — | **Yes.** |
+| `MCP_BASE_URL` | The **public HTTPS URL** clients reach (your proxy's URL, not the bind address). Must be `https://` unless the host is loopback. | — | **Yes.** |
 | `MCP_AUTH_CLIENT_ID` | Confidential app's Application (client) ID (§4.2). | — | **Yes.** |
-| `MCP_AUTH_CLIENT_SECRET` | The client secret value (§4.2). | — | **Yes.** |
+| `MCP_AUTH_CREDENTIAL_TYPE` | `secret`, `certificate`, `managed_identity`, or `workload_identity` ([§4.3](#43-enterprise-authentication-hardening)). | `secret` | No. |
+| `MCP_AUTH_CLIENT_SECRET` | The client secret value (§4.2). Must be unset for secretless types. | — | Only for `secret`. |
+| `MCP_AUTH_CLIENT_CERTIFICATE_PATH` / `_PASSWORD` | PEM with RSA key + certificate, and its optional password. | — | Only for `certificate`. |
+| `MCP_AUTH_MANAGED_IDENTITY_CLIENT_ID` | User-assigned managed identity client ID. | system-assigned | No. |
+| `MCP_AUTH_FEDERATED_TOKEN_FILE` | Projected federated token file. Falls back to `AZURE_FEDERATED_TOKEN_FILE`. | — | Only for `workload_identity`. |
+| `MCP_AUTH_JWT_SIGNING_KEY` | Signs issued MCP tokens; keys the OAuth state store. ≥ 32 bytes. | derived from secret | For secretless types (recommended always). |
+| `MCP_AUTH_ALLOWED_REDIRECT_URIS` | Comma-separated MCP client redirect URI allow-list (fnmatch). | any | No (recommended). |
+| `MCP_AUTH_REDIS_URL` / `MCP_AUTH_STORAGE_ENCRYPTION_KEY` | Encrypted shared OAuth state in Redis (`[redis]` extra) and its Fernet key. | local encrypted files | No. |
+| `MCP_AUTH_AUTHORITY_HOST` | Entra authority host (sovereign clouds). | `login.microsoftonline.com` | No. |
+| `MCP_REQUEST_STATE_KEYS` | Comma-separated keys sealing 2026-07-28 confirmation rounds across replicas. ≥ 32 bytes each. | per-process key | No. |
 | `MCP_AUTH_TENANT_ID` | Your directory's **tenant GUID**. Pseudo-tenants/domains rejected at startup. | — | **Yes.** |
 | `MCP_AUTH_REQUIRED_SCOPE` | Custom API scope name from "Expose an API". | `mcp-access` | No (only if you renamed it). |
 | `MCP_HTTP_STATELESS` | Stateless Streamable HTTP. Single-worker constraint still applies. | `false` | No. |
@@ -396,8 +484,9 @@ Teams/SharePoint auto-detect fallback does not apply (no single profile to inspe
 must be set **explicitly** in http mode or the services stay off.
 
 > **Startup is fail-fast.** In http mode the server validates config before binding and aborts with
-> a clear, itemized error if `MCP_BASE_URL`, `MCP_AUTH_CLIENT_ID`, `MCP_AUTH_CLIENT_SECRET`, or
-> `MCP_AUTH_TENANT_ID` is missing or malformed (see [§9.1](#91-boot-time-configuration-errors)).
+> a clear, itemized error if `MCP_BASE_URL`, `MCP_AUTH_CLIENT_ID`, `MCP_AUTH_TENANT_ID`, or the
+> credential settings for the selected `MCP_AUTH_CREDENTIAL_TYPE` are missing or malformed (see
+> [§9.1](#91-boot-time-configuration-errors)).
 
 ### 6.2 Bare-metal quickstart
 
@@ -609,6 +698,35 @@ UI-only) and passes through those same middleware, per-file, and quota checks.
 
 ---
 
+### 6.9 MCP protocol versions and confirmations
+
+The server runs on FastMCP 4 / MCP Python SDK v2 and serves both protocol eras from the same
+`/mcp` endpoint: the sessionless **2026-07-28** protocol that current clients negotiate, and the
+handshake-era versions (2024-11-05 through 2025-11-25) that older clients still use. The SDK picks
+the era for each client, so no configuration is needed.
+
+The visible difference is in tools that take `confirm=True` (`send_email`, `reply_email`,
+`forward_email`, `delete_email`, `bulk_trash_emails`, `bulk_delete_emails`):
+
+- **Handshake era:** the server sends a form-elicitation request mid-call, as before.
+- **2026-07-28:** server-initiated requests no longer exist. The tool returns an
+  `InputRequiredResult` asking for confirmation, and the client shows the prompt and calls the tool
+  again with the answer. The SDK seals the round-trip `requestState` with AES-GCM and binds it to
+  the tool, its arguments, the signed-in user, and a 10-minute TTL. The server also binds it to the
+  exact action, so a folder-wide bulk delete asks again if the folder's contents changed between
+  the prompt and the answer.
+
+Either way, a client that has not declared form elicitation gets a structured `success: false`
+error, and nothing is sent or deleted.
+
+The sealing key is per process by default, which is correct for the single-worker deployment
+this guide describes. If you run replicas behind a load balancer, give every replica the same
+`MCP_REQUEST_STATE_KEYS` ring (`keys[0]` seals, every key unseals; rotate by prepending a new key,
+then dropping the old one after 10 minutes). Without a shared ring, a confirmation answered on a
+different replica is rejected and the user is asked again.
+
+---
+
 ## 7. Observability
 
 http mode can expose lightweight, in-process traffic/usage metrics. It is **off by default** and
@@ -683,15 +801,18 @@ per-identity cardinality is unbounded and a known Prometheus anti-pattern; per-u
 | Item | What to do | Why |
 |---|---|---|
 | **TLS only** | Terminate TLS at a reverse proxy; set `MCP_BASE_URL` to the public HTTPS URL. | OAuth flows and every Graph call carry bearer tokens — never send them over plain HTTP. |
-| **Tenant GUID** | `MCP_AUTH_TENANT_ID` must be the concrete tenant GUID. | Pseudo-tenants/domains are rejected at startup; issuer pinning means only the GUID validates real tokens. |
-| **Secret storage** | Keep `MCP_AUTH_CLIENT_SECRET` / `MCP_STATS_TOKEN` in a secrets manager or env injection, not committed files. | They are passwords. `.env` is gitignored. |
+| **Tenant GUID** | `MCP_AUTH_TENANT_ID` must be the concrete tenant GUID (`9188040d-6c67-4c5b-b112-36a304b66dad` for personal accounts). | Pseudo-tenants/domains are rejected at startup; issuer pinning means only the GUID validates real tokens. |
+| **Secretless app credential** | Prefer `MCP_AUTH_CREDENTIAL_TYPE=certificate`, `managed_identity`, or `workload_identity` ([§4.3](#43-enterprise-authentication-hardening)). | No shared secret to leak or expire. |
+| **Stable signing key** | Set `MCP_AUTH_JWT_SIGNING_KEY`. | Otherwise rotating the client secret signs every user out. |
+| **Redirect allow-list** | Set `MCP_AUTH_ALLOWED_REDIRECT_URIS` to the MCP clients you support. | Stops unknown clients from completing the OAuth flow. |
+| **Secret storage** | Keep `MCP_AUTH_CLIENT_SECRET`, `MCP_AUTH_JWT_SIGNING_KEY`, `MCP_AUTH_STORAGE_ENCRYPTION_KEY`, `MCP_REQUEST_STATE_KEYS`, and `MCP_STATS_TOKEN` in a secrets manager or env injection, not committed files. | They are passwords. `.env` is gitignored. |
 | **Secret rotation** | Rotate the client secret before its (≤24-month) expiry: add a new secret, roll the env var, restart, delete the old one. | Both secrets are valid simultaneously, so no downtime. |
 | **Rate limiting** | Leave `MCP_RATE_LIMIT_RPS` on (default `10`/s per user, burst `2×`). Per-user key is `tid:oid`; bucket store is LRU-capped at 10,000 keys and idle-pruned after 900s. | Prevents one user starving others; bounded memory. Over-limit raises JSON-RPC `-32000`. |
 | **Proxy throttling** | Throttle `/authorize`, `/token`, `/register`, `/auth/callback` at the proxy. | The built-in limiter covers only authenticated `/mcp` traffic. |
 | **Audit logs** | One line per tool call: tool name, caller `oid` + `preferred_username`, duration, outcome. | Never logs arguments, results, or the token itself. |
 | **Deletion kill-switch** | Set `MCP_DISABLE_DELETION_TOOLS=1` where hard deletes should be impossible. | Removes all permanent-delete tools; recoverable variants remain. |
 | **Disk-tool gating** | Automatic in http mode — download-to-disk tools not registered; `save_path`/`local_path` rejected. | The server's disk is not the caller's disk. |
-| **Single worker** | Run exactly one worker/replica in http mode. | The OAuth-proxy client store and per-user OBO cache are in-process memory; multiple workers split state and break sessions. Horizontal scaling needs FastMCP's external `client_storage` (not wired up here). |
+| **Single worker** | Run exactly one worker/replica in http mode unless you accept the trade-offs. | `MCP_AUTH_REDIS_URL` and `MCP_REQUEST_STATE_KEYS` share OAuth and confirmation state, but rate limits, uploads, metrics, and the OBO cache stay per process. |
 | **Non-root container** | The image already runs as a non-root user. | No reason for the process to write outside its venv/tmp. |
 
 ---
@@ -713,14 +834,19 @@ Actual problem messages:
 - `MCP_BASE_URL is required in http mode`
 - `MCP_BASE_URL must start with http:// or https:// (got '...')`
 - `MCP_AUTH_CLIENT_ID is required in http mode`
-- `MCP_AUTH_CLIENT_SECRET is required in http mode`
+- `MCP_AUTH_CLIENT_SECRET is required in http mode when MCP_AUTH_CREDENTIAL_TYPE=secret (the default). ...`
+- `MCP_BASE_URL must use https:// unless it points at localhost (got '...'). ...`
+- `MCP_AUTH_CLIENT_SECRET must be unset when MCP_AUTH_CREDENTIAL_TYPE=<type>: ...`
+- `MCP_AUTH_JWT_SIGNING_KEY is required when MCP_AUTH_CREDENTIAL_TYPE=<type> ...`
+- `MCP_AUTH_JWT_SIGNING_KEY must carry at least 32 bytes of key material. ...`
+- `MCP_AUTH_STORAGE_ENCRYPTION_KEY must be a Fernet key when MCP_AUTH_REDIS_URL is set ...`
 - `MCP_AUTH_TENANT_ID is required in http mode`
 - `MCP_HTTP_PORT must be between 1 and 65535 (got ...)`
 - The tenant-GUID rejection (verbatim):
-  > `MCP_AUTH_TENANT_ID must be your directory's tenant GUID (8-4-4-4-12 hexadecimal), not '...'. Copy the Directory (tenant) ID from Azure Portal -> Microsoft Entra ID -> Overview. Pseudo-tenants ('organizations', 'common', 'consumers') and verified domains ('contoso.onmicrosoft.com') are rejected because fastmcp's AzureProvider validates the token 'iss' claim against a single literal issuer URL built from this value, and real Entra tokens always carry the concrete tenant GUID -- so a pseudo-tenant or domain never matches and every request fails authentication.`
+  > `MCP_AUTH_TENANT_ID must be your directory's tenant GUID (8-4-4-4-12 hexadecimal), not '...'. Copy the Directory (tenant) ID from Azure Portal -> Microsoft Entra ID -> Overview, or use 9188040d-6c67-4c5b-b112-36a304b66dad for personal Microsoft accounts (Outlook.com / Live). Pseudo-tenants ('organizations', 'common', 'consumers') and verified domains ('contoso.onmicrosoft.com') are rejected because fastmcp's AzureProvider validates the token 'iss' claim against a single literal issuer URL built from this value, and real Entra tokens always carry the concrete tenant GUID -- so a pseudo-tenant or domain never matches and every request fails authentication.`
 
 **Fix:** supply the missing value(s); for the last one, put the concrete tenant GUID in
-`MCP_AUTH_TENANT_ID`.
+`MCP_AUTH_TENANT_ID` (`9188040d-6c67-4c5b-b112-36a304b66dad` instead of `consumers` for personal accounts).
 
 ### 9.2 `MCP_TRANSPORT` typo
 
@@ -788,15 +914,18 @@ mode. The observability `/stats` and `/dashboard` routes surface live in-process
 
 ## 10. Limits & FAQ
 
-- **Personal accounts are stdio-only.** OBO and custom API scopes are not reliably supported for
-  consumer Microsoft accounts, so http mode is work/school-only. Use stdio for Outlook.com / Live.
+- **Personal accounts work in http mode, one audience per server.** Set
+  `MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad` and register the app for personal accounts.
+  A server pinned to that tenant accepts only personal accounts, and one pinned to your directory
+  accepts only its work/school users; run two instances to serve both.
 - **Multi-tenant is not supported (http).** The server targets one concrete tenant GUID; the issuer
   is pinned to a literal URL built from it. Multi-tenant deployments are future work (they need
   issuer-validation skipping plus per-tenant OBO authority).
 - **Metrics reset on restart.** In-memory only, single worker, no persistence.
-- **Single worker only (http).** The OAuth-proxy client store and per-user OBO cache are in-process.
-  Do not run multiple workers/replicas without wiring FastMCP's external `client_storage` (not
-  implemented here). `MCP_HTTP_STATELESS` does not change this.
+- **Single worker by default (http).** `MCP_AUTH_REDIS_URL` shares the OAuth-proxy state and
+  `MCP_REQUEST_STATE_KEYS` shares confirmation sealing, but the per-user rate limiter, upload
+  store, metrics, and OBO credential cache remain in-process. `MCP_HTTP_STATELESS` does not change
+  this.
 - **MCPB updates.** The stdio MCPB bundle is updated by installing a newer `.mcpb`; settings
   (`user_config`) are preserved by Claude Desktop. Restart Claude Desktop fully after updating.
 - **Teams throttling.** Teams Graph endpoints throttle around ~4 req/s and may return 429; some
@@ -822,9 +951,20 @@ mode. The observability `/stats` and `/dashboard` routes surface live in-process
 | `MCP_HTTP_HOST` | http | `127.0.0.1` | Bind host inside the process/container. |
 | `MCP_HTTP_PORT` | http | `8000` | Bind port (1–65535). |
 | `MCP_HTTP_STATELESS` | http | `false` | Stateless Streamable HTTP. |
-| `MCP_BASE_URL` | http | — | Public HTTPS URL (required). |
+| `MCP_BASE_URL` | http | — | Public HTTPS URL (required; `http://` only for loopback). |
 | `MCP_AUTH_CLIENT_ID` | http | — | Confidential client ID (required). |
-| `MCP_AUTH_CLIENT_SECRET` | http | — | Client secret (required, secret). |
+| `MCP_AUTH_CREDENTIAL_TYPE` | http | `secret` | `secret` / `certificate` / `managed_identity` / `workload_identity`. |
+| `MCP_AUTH_CLIENT_SECRET` | http | — | Client secret (`secret` type only; secret). |
+| `MCP_AUTH_CLIENT_CERTIFICATE_PATH` | http | — | PEM with RSA key + certificate (`certificate` type). |
+| `MCP_AUTH_CLIENT_CERTIFICATE_PASSWORD` | http | — | Password for an encrypted PEM key (secret). |
+| `MCP_AUTH_MANAGED_IDENTITY_CLIENT_ID` | http | — | User-assigned managed identity (`managed_identity` type). |
+| `MCP_AUTH_FEDERATED_TOKEN_FILE` | http | `$AZURE_FEDERATED_TOKEN_FILE` | Federated token file (`workload_identity` type). |
+| `MCP_AUTH_JWT_SIGNING_KEY` | http | derived from secret | Signing key for issued MCP tokens (secret; ≥ 32 bytes). |
+| `MCP_AUTH_ALLOWED_REDIRECT_URIS` | http | *(any)* | MCP client redirect URI allow-list (comma-separated, fnmatch). |
+| `MCP_AUTH_REDIS_URL` | http | *(local files)* | Encrypted shared OAuth state in Redis (`[redis]` extra). |
+| `MCP_AUTH_STORAGE_ENCRYPTION_KEY` | http | — | Fernet key for Redis OAuth state (secret). |
+| `MCP_AUTH_AUTHORITY_HOST` | http | `login.microsoftonline.com` | Entra authority host (sovereign clouds). |
+| `MCP_REQUEST_STATE_KEYS` | http | *(per process)* | Shared 2026-07-28 request-state sealing keys (secret; ≥ 32 bytes each). |
 | `MCP_AUTH_TENANT_ID` | http | — | Tenant GUID (required; pseudo-tenants/domains rejected). |
 | `MCP_AUTH_REQUIRED_SCOPE` | http | `mcp-access` | Custom API scope name. |
 | `MCP_RATE_LIMIT_RPS` | http | `10` | Per-user requests/second (burst 2×); `0`/negative disables. |

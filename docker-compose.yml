@@ -5,9 +5,11 @@
 #      (ghcr.io/guinacio/mcp-microsoft). To build locally instead,
 #      uncomment `build: .` below.
 #   2. cp .env.template .env, then fill in the "Remote server (http) mode"
-#      section: MCP_BASE_URL, MCP_AUTH_CLIENT_ID, MCP_AUTH_CLIENT_SECRET,
-#      MCP_AUTH_TENANT_ID (see docs/azure-setup.md for the App Registration
-#      walkthrough). .env is gitignored — never commit it.
+#      section: MCP_BASE_URL, MCP_AUTH_CLIENT_ID, MCP_AUTH_TENANT_ID, the
+#      app credential (MCP_AUTH_CLIENT_SECRET, or a secretless
+#      MCP_AUTH_CREDENTIAL_TYPE), and MCP_AUTH_JWT_SIGNING_KEY (see
+#      docs/azure-setup.md and docs/DEVOPS_GUIDE.md §4.3). .env is
+#      gitignored — never commit it.
 #   3. docker compose up -d
 #   4. curl http://localhost:8000/health
 #

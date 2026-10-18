@@ -182,14 +182,14 @@ After this, the server refreshes tokens silently in the background. You only nee
 
 1. [portal.azure.com](https://portal.azure.com) → **App registrations** → **+ New registration**.
 2. **Name**: anything identifiable, e.g. `mcp-microsoft-remote`.
-3. **Supported account types**: work/school only — either *this organizational directory only* or *any organizational directory*, depending on who should be able to sign in. Do **not** choose a personal-account option: On-Behalf-Of and custom API scopes are not reliably supported for consumer Microsoft accounts, so the remote server doesn't support them either (personal accounts stay on stdio).
+3. **Supported account types**: pick the audience this server will serve. For work/school users, *this organizational directory only* or *any organizational directory*. For personal Microsoft accounts (Outlook.com/Live), *Personal Microsoft accounts only* (or *any organizational directory and personal Microsoft accounts*). One server instance serves one audience, because `MCP_AUTH_TENANT_ID` pins the token issuer: your tenant GUID for work/school, `9188040d-6c67-4c5b-b112-36a304b66dad` for personal accounts (see step 7).
 4. **Redirect URI**: platform **Web** (not "Mobile and desktop applications" — that's the stdio registration's platform), URI:
 
    ```
    {MCP_BASE_URL}/auth/callback
    ```
 
-   where `{MCP_BASE_URL}` is the exact public HTTPS URL from your `.env` (e.g. `https://mcp.example.com/auth/callback`). `/auth/callback` is FastMCP's `AzureProvider` default redirect path.
+   where `{MCP_BASE_URL}` is the exact public HTTPS URL from your `.env` (e.g. `https://mcp.example.com/auth/callback`). `/auth/callback` is FastMCP's `AzureProvider` default redirect path. For a local test on your own machine, `http://localhost:8000/auth/callback` works too: Entra accepts `http://localhost` redirects and the server accepts a loopback `http://` `MCP_BASE_URL`.
 5. Click **Register**.
 
 ### 2. Expose an API
@@ -209,7 +209,7 @@ After this, the server refreshes tokens silently in the background. You only nee
    ```json
    "requestedAccessTokenVersion": 2
    ```
-3. **Save**. This is required for Azure to issue v2.0 tokens with the claim shapes (`scp`, `oid`, `preferred_username`, etc.) `AzureProvider` and the server's audit logging expect.
+3. **Save**. This is required for Azure to issue v2.0 tokens with the claim shapes (`scp`, `oid`, `preferred_username`, etc.) `AzureProvider` and the server's audit logging expect. Registrations that accept personal accounts already require version 2, so it may be set.
 
 ### 4. Create a client secret
 
@@ -218,6 +218,8 @@ After this, the server refreshes tokens silently in the background. You only nee
 3. Copy the secret **value** immediately — it's shown once. This becomes `MCP_AUTH_CLIENT_SECRET`.
 
 > **Rotation note:** the secret has a hard expiry — plan to rotate it before then. Create a new secret alongside the old one (both are valid simultaneously), roll `MCP_AUTH_CLIENT_SECRET` to the new value and restart the server, then delete the old secret from the App Registration once you've confirmed the new one is live. The server holds no long-lived cache of the secret itself beyond process memory, so a restart is sufficient — no data migration needed.
+
+> **Prefer a secretless credential in production.** Instead of a client secret you can upload a certificate (**Certificates & secrets → Certificates**) or add a federated identity credential for the managed identity or Kubernetes service account the server runs as (**Certificates & secrets → Federated credentials**), then set `MCP_AUTH_CREDENTIAL_TYPE` to `certificate`, `managed_identity`, or `workload_identity` and leave `MCP_AUTH_CLIENT_SECRET` unset. See [DevOps guide §4.3](DEVOPS_GUIDE.md#43-enterprise-authentication-hardening).
 
 ### 5. Add delegated Graph permissions
 
@@ -246,9 +248,9 @@ Same permission set as the stdio server (Step 5 above), added to **this** regist
 
 Only request permissions for services you're actually enabling — the server builds its OBO scope request (`https://graph.microsoft.com/.default`) from whatever's granted on this registration, gated by these same env flags, which in http mode must be set explicitly (no auto-detection).
 
-### 6. Grant admin consent
+### 6. Grant admin consent (work/school only)
 
-Because this is a confidential-client, work/school-only registration, plan on **tenant-wide admin consent** rather than per-user consent:
+Personal Microsoft accounts have no admin: each user consents to the permissions on first sign-in, so skip this step for a personal-account server. For a work/school registration, plan on **tenant-wide admin consent** rather than per-user consent:
 
 - If you're the tenant admin: **API permissions** → **Grant admin consent for [tenant]**.
 - Otherwise: send your IT administrator the **Application (client) ID** and ask them to grant it from the App Registration's API permissions page.
@@ -261,7 +263,7 @@ Because this is a confidential-client, work/school-only registration, plan on **
 |---|---|
 | Application (client) ID | `MCP_AUTH_CLIENT_ID` |
 | Client secret value (Step 4) | `MCP_AUTH_CLIENT_SECRET` |
-| Directory (tenant) ID (the **tenant GUID** — required; pseudo-tenants like `organizations`/`common`/`consumers` and domain values are rejected at startup, since fastmcp pins the token issuer to a literal URL built from this value) | `MCP_AUTH_TENANT_ID` |
+| Directory (tenant) ID for work/school, or `9188040d-6c67-4c5b-b112-36a304b66dad` for personal accounts (a **tenant GUID** is required; pseudo-tenants like `organizations`/`common`/`consumers` and domain values are rejected at startup, since fastmcp pins the token issuer to a literal URL built from this value) | `MCP_AUTH_TENANT_ID` |
 | Your reverse proxy's public HTTPS URL | `MCP_BASE_URL` |
 | The scope name from Step 2 (only if not `mcp-access`) | `MCP_AUTH_REQUIRED_SCOPE` |
 

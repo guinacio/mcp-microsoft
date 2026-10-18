@@ -7,38 +7,33 @@ from mcp_microsoft.tools import contacts, drafts, mail, onedrive, profiles, serv
 
 
 def _inner_params_schema(tool) -> dict:
-    schema = tool.parameters
-    params_schema = schema["properties"]["params"]
-    ref = params_schema["$ref"].split("/")[-1]
-    return schema["$defs"][ref]
+    """Tool arguments are top-level; there is no nested params object."""
+    assert "params" not in tool.parameters["properties"]
+    return tool.parameters
 
 
 @pytest.mark.asyncio
-async def test_create_contact_tool_uses_standardized_params_object() -> None:
+async def test_create_contact_tool_takes_flat_arguments() -> None:
     mcp = FastMCP("test-server")
     contacts.register(mcp)
 
     tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
     tool = tools["create_contact"]
 
-    assert set(tool.parameters["properties"]) == {"params"}
-    assert tool.parameters["required"] == ["params"]
-
     params_schema = _inner_params_schema(tool)
     assert "display_name" in params_schema["properties"]
     assert "display_name" in params_schema["required"]
-    assert "display_name" not in tool.parameters["properties"]
+    assert params_schema["additionalProperties"] is False
 
 
 @pytest.mark.asyncio
-async def test_send_email_tool_hides_ctx_and_uses_params_object() -> None:
+async def test_send_email_tool_hides_ctx_and_takes_flat_arguments() -> None:
     mcp = FastMCP("test-server")
     mail.register(mcp)
 
     tools = {tool.name: tool for tool in await mcp.list_tools(run_middleware=False)}
     tool = tools["send_email"]
 
-    assert set(tool.parameters["properties"]) == {"params"}
     assert "ctx" not in tool.parameters["properties"]
 
     params_schema = _inner_params_schema(tool)
@@ -139,8 +134,8 @@ async def test_create_reply_draft_schema_and_annotations() -> None:
     assert set(tool.output_schema["required"]) == {"success", "action"}
     assert "Mail.ReadWrite" in tool.description
     assert "not sent" in tool.description
-    assert tool.annotations.destructiveHint is False
-    assert tool.annotations.readOnlyHint is not True
+    assert tool.annotations.destructive_hint is False
+    assert tool.annotations.read_only_hint is not True
 
     get_draft_tool = tools["get_draft"]
     assert set(get_draft_tool.output_schema["properties"]) == {
@@ -174,8 +169,8 @@ async def test_update_draft_schema_documents_history_preservation() -> None:
     preserve_schema = params_schema["properties"]["preserve_history"]
     assert preserve_schema["default"] is False
     assert "quoted reply history is retained" in preserve_schema["description"]
-    assert tool.annotations.destructiveHint is False
-    assert tool.annotations.openWorldHint is True
+    assert tool.annotations.destructive_hint is False
+    assert tool.annotations.open_world_hint is True
     assert "does not send" in tool.description
     assert "Mail.ReadWrite" in tool.description
 

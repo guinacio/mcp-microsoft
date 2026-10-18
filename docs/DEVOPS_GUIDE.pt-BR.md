@@ -45,12 +45,12 @@ escolhido na inicialização pela variável de ambiente `MCP_TRANSPORT`:
 | | **stdio** (padrão) | **http** (remoto, multiusuário) |
 |---|---|---|
 | `MCP_TRANSPORT` | `stdio` | `http` |
-| Transporte | stdio (subprocesso local) | Streamable HTTP (spec MCP 2025-11-25), servido em `/mcp` |
+| Transporte | stdio (subprocesso local) | Streamable HTTP (MCP 2026-07-28 e as versões com handshake desde 2024-11-05), servido em `/mcp` |
 | Quem executa | Iniciado pelo seu cliente MCP na sua máquina | Um servidor compartilhado que você hospeda atrás de um proxy reverso |
-| Identidade | **Perfis** locais nomeados; OAuth interativo/device-code; cache de tokens criptografado em disco | Cada usuário faz login com **sua própria** conta Entra; token de portador (bearer) por requisição |
+| Identidade | **Perfis** locais nomeados; OAuth interativo/device-code; cache de tokens criptografado em disco | Cada usuário faz login com **sua própria** conta Microsoft; token de portador (bearer) por requisição |
 | Como as chamadas ao Graph são autorizadas | Token MSAL de client público para o perfil ativo | Troca de token **On-Behalf-Of (OBO)** por usuário a partir do bearer token do chamador |
 | Tipo de app no Azure | Client **público** (plataforma Mobile & desktop) | Client **confidencial** (plataforma Web + segredo) |
-| Contas | Pessoais **e** corporativas/educacionais | **Somente** corporativas/educacionais, um único tenant concreto |
+| Contas | Pessoais **e** corporativas/educacionais | Um público por servidor: um único tenant corporativo/educacional, **ou** contas pessoais |
 | Quantidade de ferramentas (com todos os serviços opcionais ativos) | **95** | **87** (ferramentas de gerenciamento de perfil e de disco local omitidas) |
 
 **Arquitetura em cinco linhas:**
@@ -75,8 +75,9 @@ escolhido na inicialização pela variável de ambiente `MCP_TRANSPORT`:
   operar. É o padrão e a experiência do MCPB / Claude Desktop.
 - **http** — você quer oferecer ferramentas do Microsoft 365 para muitos usuários a partir de um
   serviço hospedado único, cada um com sua própria identidade delegada e sem instalação local.
-  Requer um tenant corporativo/educacional, um endpoint HTTPS público e um Registro de Aplicativo
-  confidencial no Azure.
+  Requer um Registro de Aplicativo confidencial no Azure e um endpoint HTTPS público (uma URL
+  `http://localhost` de loopback serve para um teste local). Um servidor atende um único tenant
+  corporativo/educacional ou contas Microsoft pessoais.
 
 ---
 
@@ -153,7 +154,9 @@ independentemente de sua familiaridade com o Azure.
 **Directory (tenant) ID** (ID do diretório/locatário). Copie o GUID (formato `8-4-4-4-12`
 hexadecimal, ex.: `9a8b7c6d-1234-5678-90ab-cdef01234567`).
 
-> **O modo http exige o GUID concreto do tenant (locatário).** Pseudo-tenants (`organizations`,
+> **O modo http exige um GUID concreto de tenant (locatário).** Para contas Microsoft pessoais
+> (Outlook.com / Live), esse GUID é `9188040d-6c67-4c5b-b112-36a304b66dad`, o tenant fixo pelo qual toda
+> conta pessoal faz login. Pseudo-tenants (`organizations`,
 > `common`, `consumers`) e domínios verificados (`contoso.onmicrosoft.com`) são **rejeitados na
 > inicialização**. O motivo: o `AzureProvider` do FastMCP fixa o issuer (`iss`) aceito do token a
 > uma única URL literal construída a partir de `MCP_AUTH_TENANT_ID`, e tokens reais do Entra sempre
@@ -225,16 +228,19 @@ usuários de desktop dependem — crie um separado.
 
 1. **App registrations (Registros de aplicativo)** → **+ New registration (Novo registro)**. Nome
    ex.: `mcp-microsoft-remote`.
-2. **Supported account types (Tipos de conta com suporte):** somente corporativa/educacional (*this
-   organizational directory only* ou *any organizational directory*). **Não** escolha uma opção de
-   conta pessoal — OBO e escopos de API personalizados não têm suporte confiável para contas de
-   consumidor.
+2. **Supported account types (Tipos de conta com suporte):** o público que este servidor atende.
+   Corporativa/educacional: *this organizational directory only* ou *any organizational directory*.
+   Contas Microsoft pessoais: *Personal Microsoft accounts only* (ou *any organizational directory
+   and personal Microsoft accounts*), com `MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad`. Um
+   servidor não atende os dois, porque o issuer do token fica fixado nesse único tenant; rode uma
+   segunda instância para o outro público.
 3. **Redirect URI (URI de redirecionamento):** plataforma **Web**, URI:
    ```
    {MCP_BASE_URL}/auth/callback
    ```
    ex.: `https://mcp.example.com/auth/callback`. `/auth/callback` é o caminho de redirect padrão do
-   `AzureProvider`.
+   `AzureProvider`. Para um teste local com Docker, `http://localhost:8000/auth/callback` com
+   `MCP_BASE_URL=http://localhost:8000` funciona (veja [Teste local com uma conta pessoal](#teste-local-com-uma-conta-pessoal)).
 4. **Register (Registrar).**
 5. **Expose an API (Expor uma API):**
    - **Application ID URI** → **Add (Adicionar)** → aceite o padrão `api://{client_id}` → **Save
@@ -254,10 +260,40 @@ usuários de desktop dependem — crie um separado.
    http as flags precisam ser **explícitas**, não há auto-detecção). `offline_access` é adicionado
    automaticamente pelo `AzureProvider` — não é preciso solicitá-lo.
 9. **Grant admin consent for the tenant (Conceder consentimento do administrador para o tenant)**
-   (**API permissions** → **Grant admin consent for [tenant]**). Como este é um registro
-   confidencial, restrito a corporativo/educacional, planeje um consentimento em nível de tenant
-   para que novos usuários não sejam questionados individualmente. Em particular,
-   `Sites.ReadWrite.All` não funcionará sem isso.
+   (**API permissions** → **Grant admin consent for [tenant]**). Em um registro
+   corporativo/educacional, planeje um consentimento em nível de tenant para que novos usuários não
+   sejam questionados individualmente. Em particular, `Sites.ReadWrite.All` não funcionará sem
+   isso. Contas pessoais não têm administrador: cada usuário consente no primeiro login, e
+   Teams/SharePoint ficam desativados.
+
+#### Teste local com uma conta pessoal
+
+Para testar o modo http na sua própria máquina com uma conta Outlook.com / Live, registre o app como
+acima com *Personal Microsoft accounts only* e o redirect `http://localhost:8000/auth/callback`, e
+rode a imagem com:
+
+```env
+MCP_BASE_URL=http://localhost:8000
+MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad
+MCP_AUTH_CLIENT_ID=<Application (client) ID>
+MCP_AUTH_CLIENT_SECRET=<valor do client secret>
+MCP_AUTH_JWT_SIGNING_KEY=<python -c "import secrets; print(secrets.token_hex(32))">
+MCP_ENABLE_TEAMS=false
+MCP_ENABLE_SHAREPOINT=false
+MCP_DEFAULT_TIMEZONE=America/Sao_Paulo
+```
+
+`MCP_DEFAULT_TIMEZONE` é opcional; use o seu fuso IANA. O `--env-file` do Docker não remove
+comentários no fim da linha, então deixe comentários em linhas próprias.
+
+```bash
+docker run -d --name mcp-microsoft -p 8000:8000 --env-file .env ghcr.io/guinacio/mcp-microsoft:latest
+```
+
+Conecte um cliente que rode na mesma máquina (Claude Code: `claude mcp add --transport http
+mcp-microsoft http://localhost:8000/mcp`, depois `/mcp` → Authenticate). Clientes hospedados, como
+os conectores do Claude Desktop, chamam o servidor a partir da infraestrutura da Anthropic, que não
+alcança `localhost`; eles precisam da implantação HTTPS pública.
 
 **Rotação do client secret:** o segredo tem uma expiração fixa — rotacione antes disso. Crie um novo
 segredo em paralelo com o antigo (ambos válidos simultaneamente), atualize `MCP_AUTH_CLIENT_SECRET`
@@ -271,6 +307,39 @@ você mesmo não possa consentir):
 ```
 https://login.microsoftonline.com/{tenant}/adminconsent?client_id={client_id}
 ```
+
+### 4.3 Endurecimento da autenticação corporativa
+
+O segredo do cliente continua funcionando e segue como padrão, mas a Microsoft recomenda
+credenciais de certificado ou credenciais de identidade federada em produção: não há segredo
+compartilhado para vazar nem prazo de 24 meses para expirar. `MCP_AUTH_CREDENTIAL_TYPE` escolhe o
+modo. Nos modos sem segredo, o servidor se autentica no Entra com uma *client assertion* RFC 7523,
+tanto no login (resgate de código e de refresh token) quanto na troca On-Behalf-Of, e
+`MCP_AUTH_CLIENT_SECRET` deve ficar **vazio**.
+
+| `MCP_AUTH_CREDENTIAL_TYPE` | Configuração no registro do app | Variáveis do servidor |
+|---|---|---|
+| `secret` *(padrão)* | §4.2, passo do segredo do cliente. | `MCP_AUTH_CLIENT_SECRET` |
+| `certificate` | **Certificados e segredos** → **Certificados** → envie o certificado público. | `MCP_AUTH_CLIENT_CERTIFICATE_PATH`: um PEM com a chave privada RSA **e** o certificado. `MCP_AUTH_CLIENT_CERTIFICATE_PASSWORD` se a chave for criptografada. |
+| `managed_identity` | **Credenciais federadas** → **Adicionar** → cenário *Identidade gerenciada*, escolhendo a identidade do servidor. | Opcional: `MCP_AUTH_MANAGED_IDENTITY_CLIENT_ID` para identidade atribuída pelo usuário. |
+| `workload_identity` | **Credenciais federadas** → **Adicionar** → *Kubernetes acessando recursos do Azure* (ou outro emissor OIDC). | `MCP_AUTH_FEDERATED_TOKEN_FILE`, ou o `AZURE_FEDERATED_TOKEN_FILE` injetado pelo AKS. |
+
+Configurações válidas para qualquer tipo:
+
+- **`MCP_AUTH_JWT_SIGNING_KEY`** (obrigatória sem segredo, recomendada sempre): assina os tokens
+  MCP emitidos aos clientes. Sem ela, a chave deriva do segredo do cliente e rotacionar o segredo
+  desconecta todos os usuários. Gere com `python -c "import secrets; print(secrets.token_hex(32))"`.
+- **`MCP_AUTH_ALLOWED_REDIRECT_URIS`**: lista (separada por vírgulas, curingas fnmatch) das URLs de
+  callback de clientes MCP permitidas, por exemplo
+  `https://claude.ai/api/mcp/auth_callback,http://localhost:*`. Sem ela, qualquer cliente pode
+  registrar qualquer redirect URI e a tela de consentimento é a única proteção.
+- **`MCP_AUTH_REDIS_URL`** + **`MCP_AUTH_STORAGE_ENCRYPTION_KEY`**: guarda o estado do proxy OAuth
+  no Redis, criptografado com Fernet, para que os logins sobrevivam a reinícios (extra `[redis]`).
+- **`MCP_AUTH_AUTHORITY_HOST`**: autoridade do Entra em nuvens soberanas (`login.microsoftonline.us`).
+- **`MCP_REQUEST_STATE_KEYS`**: veja a [§6.9](#69-versões-do-protocolo-mcp-e-confirmações).
+- **HTTPS obrigatório:** `MCP_BASE_URL` precisa ser `https://`, exceto em loopback.
+
+O servidor registra um aviso na inicialização para cada um desses itens deixado no padrão mais fraco.
 
 ---
 
@@ -409,7 +478,9 @@ Toda variável `MCP_*` lida no modo http. O modo stdio ignora todos os valores `
 | `MCP_TRANSPORT` | Seleciona o modo. Deve ser `stdio` ou `http`. | `stdio` | Defina como `http`. |
 | `MCP_HTTP_HOST` | Host de bind **dentro** do processo/container. Use `0.0.0.0` atrás de um proxy/Docker. | `127.0.0.1` | Não. |
 | `MCP_HTTP_PORT` | Porta de bind. Deve ser 1–65535. | `8000` | Não. |
-| `MCP_BASE_URL` | A **URL HTTPS pública** que os clientes acessam (a URL do seu proxy, não o endereço de bind). Deve começar com `http://` ou `https://`. | — | **Sim.** |
+| `MCP_BASE_URL` | A **URL HTTPS pública** que os clientes acessam (a URL do seu proxy, não o endereço de bind). Deve ser `https://`, exceto em loopback. | — | **Sim.** |
+| `MCP_AUTH_CREDENTIAL_TYPE` | `secret`, `certificate`, `managed_identity` ou `workload_identity` ([§4.3](#43-endurecimento-da-autenticação-corporativa)). Demais variáveis `MCP_AUTH_*` novas na §4.3. | `secret` | Não. |
+| `MCP_REQUEST_STATE_KEYS` | Chaves compartilhadas que selam as confirmações do protocolo 2026-07-28 entre réplicas (≥ 32 bytes cada). | por processo | Não. |
 | `MCP_AUTH_CLIENT_ID` | Application (client) ID do app confidencial (§4.2). | — | **Sim.** |
 | `MCP_AUTH_CLIENT_SECRET` | O valor do client secret (§4.2). | — | **Sim.** |
 | `MCP_AUTH_TENANT_ID` | O **GUID do tenant** do seu diretório. Pseudo-tenants/domínios são rejeitados na inicialização. | — | **Sim.** |
@@ -646,6 +717,24 @@ ferramenta — incluindo a ferramenta de backend `store_files`, que é acessíve
 | `MCP_UPLOAD_MAX_MB` | Tamanho máx. (MB) de cada arquivo enviado. Inteiro positivo. | `10` |
 | `MCP_UPLOAD_GLOBAL_BUDGET_MB` | Limite global (MB) da pegada base64 de todos os uploads entre todos os usuários. Inteiro positivo. | `1024` |
 
+### 6.9 Versões do protocolo MCP e confirmações
+
+O servidor roda sobre FastMCP 4 / MCP Python SDK v2 e atende as duas eras do protocolo no mesmo
+endpoint `/mcp`: o protocolo **2026-07-28**, sem sessão, que os clientes atuais negociam, e as
+versões com handshake (2024-11-05 a 2025-11-25) dos clientes mais antigos. O SDK escolhe a era por
+cliente, sem configuração.
+
+A diferença visível está nas ferramentas com `confirm=True` (`send_email`, `reply_email`,
+`forward_email`, `delete_email`, `bulk_trash_emails`, `bulk_delete_emails`). Na era com handshake,
+o servidor envia um pedido de elicitação no meio da chamada, como antes. No 2026-07-28, a ferramenta
+retorna um `InputRequiredResult` e o cliente chama de novo com a resposta. O `requestState` é selado
+(AES-GCM) e vinculado à ferramenta, aos argumentos, ao usuário e a um TTL de 10 minutos; uma
+exclusão em massa de pasta pede confirmação de novo se o conteúdo da pasta mudou. Em ambos os casos,
+um cliente que não declarou elicitação recebe um erro estruturado e nada é enviado ou excluído.
+
+A chave de selagem é por processo, o que basta para um único worker. Com réplicas atrás de um
+balanceador, configure o mesmo `MCP_REQUEST_STATE_KEYS` em todas.
+
 ---
 
 ## 7. Observabilidade
@@ -724,7 +813,7 @@ por usuário vive em `/stats` e `/dashboard`):
 | Item | O que fazer | Por quê |
 |---|---|---|
 | **Somente TLS** | Termine o TLS em um proxy reverso; defina `MCP_BASE_URL` como a URL HTTPS pública. | Os fluxos OAuth e toda chamada ao Graph carregam bearer tokens — nunca os envie por HTTP puro. |
-| **GUID do tenant** | `MCP_AUTH_TENANT_ID` precisa ser o GUID concreto do tenant. | Pseudo-tenants/domínios são rejeitados na inicialização; o pinning do issuer significa que somente o GUID valida tokens reais. |
+| **GUID do tenant** | `MCP_AUTH_TENANT_ID` precisa ser o GUID concreto do tenant (`9188040d-6c67-4c5b-b112-36a304b66dad` para contas pessoais). | Pseudo-tenants/domínios são rejeitados na inicialização; o pinning do issuer significa que somente o GUID valida tokens reais. |
 | **Armazenamento de segredos** | Mantenha `MCP_AUTH_CLIENT_SECRET` / `MCP_STATS_TOKEN` em um gerenciador de segredos ou injeção via variáveis de ambiente, não em arquivos versionados. | São senhas. `.env` está no `.gitignore`. |
 | **Rotação de segredos** | Rotacione o client secret antes de sua expiração (≤24 meses): adicione um novo segredo, atualize a variável de ambiente, reinicie, exclua o antigo. | Ambos os segredos são válidos simultaneamente, então não há downtime. |
 | **Rate limiting** | Mantenha `MCP_RATE_LIMIT_RPS` ativo (padrão `10`/s por usuário, burst `2×`). A chave por usuário é `tid:oid`; o armazenamento de buckets é limitado por LRU a 10.000 chaves e podado por ociosidade após 900s. | Evita que um usuário monopolize os demais; memória limitada. Exceder o limite gera JSON-RPC `-32000`. |
@@ -758,18 +847,19 @@ Mensagens de erro reais:
 - `MCP_AUTH_TENANT_ID is required in http mode`
 - `MCP_HTTP_PORT must be between 1 and 65535 (got ...)`
 - A rejeição do GUID do tenant (na íntegra, em inglês):
-  > `MCP_AUTH_TENANT_ID must be your directory's tenant GUID (8-4-4-4-12 hexadecimal), not '...'. Copy the Directory (tenant) ID from Azure Portal -> Microsoft Entra ID -> Overview. Pseudo-tenants ('organizations', 'common', 'consumers') and verified domains ('contoso.onmicrosoft.com') are rejected because fastmcp's AzureProvider validates the token 'iss' claim against a single literal issuer URL built from this value, and real Entra tokens always carry the concrete tenant GUID -- so a pseudo-tenant or domain never matches and every request fails authentication.`
+  > `MCP_AUTH_TENANT_ID must be your directory's tenant GUID (8-4-4-4-12 hexadecimal), not '...'. Copy the Directory (tenant) ID from Azure Portal -> Microsoft Entra ID -> Overview, or use 9188040d-6c67-4c5b-b112-36a304b66dad for personal Microsoft accounts (Outlook.com / Live). Pseudo-tenants ('organizations', 'common', 'consumers') and verified domains ('contoso.onmicrosoft.com') are rejected because fastmcp's AzureProvider validates the token 'iss' claim against a single literal issuer URL built from this value, and real Entra tokens always carry the concrete tenant GUID -- so a pseudo-tenant or domain never matches and every request fails authentication.`
   >
   > (Tradução livre: `MCP_AUTH_TENANT_ID` precisa ser o GUID do tenant do seu diretório
   > (hexadecimal `8-4-4-4-12`), não '...'. Copie o Directory (tenant) ID em Azure Portal ->
-  > Microsoft Entra ID -> Overview. Pseudo-tenants ('organizations', 'common', 'consumers') e
+  > Microsoft Entra ID -> Overview, ou use 9188040d-6c67-4c5b-b112-36a304b66dad para contas Microsoft
+  > pessoais (Outlook.com / Live). Pseudo-tenants ('organizations', 'common', 'consumers') e
   > domínios verificados ('contoso.onmicrosoft.com') são rejeitados porque o `AzureProvider` do
   > fastmcp valida a claim 'iss' do token contra uma única URL de issuer literal construída a
   > partir desse valor, e tokens reais do Entra sempre carregam o GUID concreto do tenant — logo,
   > um pseudo-tenant ou domínio nunca corresponde e toda requisição falha na autenticação.)
 
 **Correção:** forneça o(s) valor(es) ausente(s); para o último caso, coloque o GUID concreto do
-tenant em `MCP_AUTH_TENANT_ID`.
+tenant em `MCP_AUTH_TENANT_ID` (`9188040d-6c67-4c5b-b112-36a304b66dad` em vez de `consumers` para contas pessoais).
 
 ### 9.2 Erro de digitação em `MCP_TRANSPORT`
 
@@ -841,9 +931,10 @@ auditoria e de rate-limit aparecem ali no modo http. As rotas de observabilidade
 
 ## 10. Limites e FAQ
 
-- **Contas pessoais são somente stdio.** OBO e escopos de API personalizados não têm suporte
-  confiável para contas Microsoft de consumidor, então o modo http é exclusivo para
-  corporativa/educacional. Use stdio para Outlook.com / Live.
+- **Contas pessoais funcionam no modo http, um público por servidor.** Defina
+  `MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad` e registre o app para contas pessoais. Um
+  servidor fixado nesse tenant aceita só contas pessoais, e um fixado no seu diretório aceita só os
+  usuários corporativos/educacionais dele; rode duas instâncias para atender os dois.
 - **Multi-tenant não tem suporte (http).** O servidor tem como alvo um único GUID de tenant
   concreto; o issuer é fixado (pinned) a uma URL literal construída a partir dele. Implantações
   multi-tenant são trabalho futuro (precisariam pular a validação de issuer, além de uma authority

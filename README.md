@@ -18,7 +18,7 @@ The server works with both personal Microsoft accounts (Outlook.com, Live) and e
 
 Multi-account support is a first-class feature. Named profiles let you configure separate client IDs for each account and switch between them on any tool call by passing `profile="work"`. Profiles and MSAL token caches are stored in `~/.microsoft-mcp/` and survive server restarts without re-authentication.
 
-The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction installation through the Claude Desktop Extension installer. It can also be run from source or wired directly into `claude_desktop_config.json`. Built with [FastMCP](https://github.com/jlowin/fastmcp), MSAL, and async httpx.
+The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction installation through the Claude Desktop Extension installer. It can also be run from source or wired directly into `claude_desktop_config.json`. Built with [FastMCP](https://github.com/PrefectHQ/fastmcp) 4, MSAL, and async httpx.
 
 ## Features
 
@@ -178,7 +178,7 @@ uv run mcp-microsoft
 
 Everything above runs `mcp-microsoft` as a single-user **stdio** server: one process, one local profile, launched directly by your MCP client. As of 0.8.0 the server also supports a second, mutually exclusive mode — a shared **remote server** that any number of people can connect to over the network, where each person signs in with their own Microsoft account and every Graph call runs under their own delegated identity. No profile configuration, no shared credentials: identity comes from a per-user **On-Behalf-Of (OBO)** token exchange derived from the OAuth token each client presents.
 
-Under the hood: Streamable HTTP per the MCP **2025-11-25** spec, served at `/mcp`; authentication via FastMCP's `AzureProvider`, which implements the OAuth-proxy pattern Microsoft Entra ID needs since Entra doesn't support Dynamic Client Registration.
+Under the hood: Streamable HTTP served at `/mcp`, speaking the sessionless MCP **2026-07-28** protocol to modern clients and every handshake-era version (2024-11-05 through 2025-11-25) to older ones, negotiated per client by FastMCP 4 / MCP Python SDK v2; authentication via FastMCP's `AzureProvider` (extended here for secretless credentials), which implements the OAuth-proxy pattern Microsoft Entra ID needs since Entra doesn't support Dynamic Client Registration.
 
 ### Quickstart
 
@@ -222,7 +222,7 @@ See [`docs/azure-setup.md`](docs/azure-setup.md#app-registration-for-the-remote-
 
 ### How MCP clients connect
 
-Point an MCP client with OAuth support at `https://your-host/mcp`. The client discovers and drives the OAuth flow itself (the server advertises `/.well-known/oauth-protected-resource` per RFC 9728, as MCP 2025-11-25 authorization requires); when the user completes Microsoft sign-in, the client starts sending an Entra-derived bearer token with every request, and the server exchanges it On-Behalf-Of for a Graph token scoped to that user on each call. Clients without OAuth support (or without Streamable HTTP support) cannot use this mode — use stdio instead.
+Point an MCP client with OAuth support at `https://your-host/mcp`. The client discovers and drives the OAuth flow itself (the server advertises `/.well-known/oauth-protected-resource` per RFC 9728, as MCP authorization requires, and accepts both Dynamic Client Registration and Client ID Metadata Documents); when the user completes Microsoft sign-in, the client starts sending an Entra-derived bearer token with every request, and the server exchanges it On-Behalf-Of for a Graph token scoped to that user on each call. Clients without OAuth support (or without Streamable HTTP support) cannot use this mode — use stdio instead.
 
 ### http mode vs. stdio — what's different
 
@@ -232,7 +232,7 @@ Point an MCP client with OAuth support at `https://your-host/mcp`. The client di
 - **Drag-and-drop file uploads are on by default.** A file-upload app (see [Uploading files](#uploading-files)) lets users drop files straight into the server — bypassing the model's context window — and `upload_file` / `upload_to_site` consume them by name via `uploaded_file`. Off in stdio (local users have `local_path`); toggle with `MCP_ENABLE_FILE_UPLOAD`.
 - **Feature flags must be explicit.** `MCP_ENABLE_TEAMS`, `MCP_ENABLE_SHAREPOINT`, `MCP_ENABLE_TEAMS_MEETING_ARTIFACTS`, and `MCP_ENABLE_TEAMS_AI_INSIGHTS` need to be set directly — the corporate-account auto-detect fallback that manual stdio installs get doesn't apply, since there's no single configured profile to inspect.
 - **The deletion kill-switch still works.** `MCP_DISABLE_DELETION_TOOLS=true` suppresses the same permanent-delete tools as in stdio mode.
-- **Work/school accounts only, single concrete tenant.** `MCP_AUTH_TENANT_ID` must be your directory's **tenant GUID** (Entra → Overview → Directory (tenant) ID). Pseudo-tenants (`organizations`, `common`, `consumers`) and verified domains (`contoso.onmicrosoft.com`) are rejected at startup — fastmcp's `AzureProvider` pins the accepted token issuer to a literal URL built from this value, and real Entra tokens carry the concrete GUID, so a pseudo-tenant/domain never validates. Personal Microsoft accounts (Outlook.com/Live) remain stdio-only — OBO and custom API scopes aren't reliably supported for consumer accounts. Multi-tenant deployments are future work (they need issuer-validation skipping plus per-tenant OBO authority).
+- **One account audience per server, set by a concrete tenant GUID.** `MCP_AUTH_TENANT_ID` must be a **tenant GUID**: your directory's Directory (tenant) ID (Entra → Overview) for work/school accounts, or `9188040d-6c67-4c5b-b112-36a304b66dad`, the fixed tenant every personal Microsoft account (Outlook.com/Live) signs in through. Pseudo-tenants (`organizations`, `common`, `consumers`) and verified domains (`contoso.onmicrosoft.com`) are rejected at startup — fastmcp's `AzureProvider` pins the accepted token issuer to a literal URL built from this value, and real tokens carry the concrete GUID, so a pseudo-tenant/domain never validates. Because of that pin, one server serves either one work/school tenant or personal accounts, not both; run a second instance for the other audience. Teams and SharePoint stay off for personal accounts. Multi-tenant deployments are future work (they need issuer-validation skipping plus per-tenant OBO authority).
 - **Unauthenticated `GET /health`** is available for load balancers and container healthchecks; every other route requires a valid bearer token.
 - **Rate limiting is on by default.** `MCP_RATE_LIMIT_RPS` (default `10`) caps requests per user (per second) via a bounded per-user (tenant + object id) token bucket; set it to `0` or a negative number to disable.
 - **Every tool call is audit-logged**: tool name, caller `oid` and `preferred_username` (from the token's claims), duration, and outcome — never the arguments, results, or the token itself.
@@ -242,11 +242,24 @@ Point an MCP client with OAuth support at `https://your-host/mcp`. The client di
 
 - **TLS is not terminated by this server.** It speaks plain HTTP; put a reverse proxy (Traefik, Caddy, nginx, your cloud load balancer, etc.) in front of it for TLS, and set `MCP_BASE_URL` to the proxy's public HTTPS URL — not this process's bind address. See the commented example in `docker-compose.yml`.
 - **`MCP_BASE_URL` must match exactly** (scheme, host, port, path) what MCP clients connect to and what's registered as the Azure redirect URI base. A mismatch breaks the OAuth redirect and the JWT audience/issuer checks.
-- **Single concrete work/school tenant only** — see above. `MCP_AUTH_TENANT_ID` must be a tenant GUID; `consumers`, `common`, `organizations`, and domain values are rejected at startup because fastmcp validates the token `iss` against a literal issuer URL built from this value.
-- **Single worker only.** The OAuth-proxy client store and the per-user OBO credential cache both live in this process's memory. Running more than one worker/replica splits that state and breaks sessions unpredictably. Horizontal scaling requires wiring fastmcp's external `client_storage` backend (a pluggable key-value store) in place of the in-memory default — not implemented here; treat it as a prerequisite before scaling beyond one process.
+- **Single concrete tenant only** — see above. `MCP_AUTH_TENANT_ID` must be a tenant GUID (your directory's, or `9188040d-6c67-4c5b-b112-36a304b66dad` for personal accounts); `consumers`, `common`, `organizations`, and domain values are rejected at startup because fastmcp validates the token `iss` against a literal issuer URL built from this value.
+- **Single worker by default.** The OBO credential cache, rate limiter, upload store, and metrics live in this process's memory, and by default so does the OAuth-proxy state (an encrypted local file store). `MCP_AUTH_REDIS_URL` moves the OAuth state to encrypted Redis and `MCP_REQUEST_STATE_KEYS` lets replicas verify each other's confirmation rounds, but rate limits, uploads, and metrics stay per process, so run one worker unless those trade-offs are acceptable.
 - **Rate limiting and audit logging are on by default** in http mode (see above) — there is no equivalent in stdio mode, since stdio has exactly one caller.
 - **The built-in rate limit covers MCP tool traffic only.** `MCP_RATE_LIMIT_RPS` throttles authenticated calls to the `/mcp` endpoint via a bounded per-user (`tid`+`oid`) token bucket — bounded memory (LRU-capped, idle buckets pruned) so per-user state can't grow without limit. It does not protect the unauthenticated OAuth endpoints (`/authorize`, `/token`, `/register`, `/auth/callback`). Throttle those at your reverse proxy.
-- **Secrets belong in the environment, not in files you commit.** `MCP_AUTH_CLIENT_SECRET` in particular; consider a secrets manager (Azure Key Vault, etc.) that injects it as an env var at deploy time rather than storing it in `.env` on disk long-term.
+- **Secrets belong in the environment, not in files you commit.** `MCP_AUTH_CLIENT_SECRET`, `MCP_AUTH_JWT_SIGNING_KEY`, and `MCP_AUTH_STORAGE_ENCRYPTION_KEY` in particular; use a secrets manager (Azure Key Vault, etc.) that injects them at deploy time. Better still, drop the client secret entirely (see below).
+
+### Enterprise authentication
+
+The defaults keep 0.10 deployments working unchanged, and the server logs a warning at startup for each setting below that is left at its weaker default.
+
+- **Secretless app credentials.** `MCP_AUTH_CREDENTIAL_TYPE` selects how the server proves its own identity to Entra for sign-in and the On-Behalf-Of exchange: `secret` (default), `certificate` (an RSA key and certificate in one PEM file; the server signs RFC 7523 client assertions with `PS256` and `x5t#S256`), `managed_identity` (an Azure managed identity registered as a federated identity credential on the app), or `workload_identity` (a projected federated token file, such as AKS workload identity). Microsoft recommends certificates or federated credentials over client secrets for production.
+- **A stable token-signing key.** Set `MCP_AUTH_JWT_SIGNING_KEY` (required for secretless types). Without it the key that signs the MCP tokens this server issues is derived from the client secret, so rotating the secret signs every client out.
+- **Restricted client redirect URIs.** `MCP_AUTH_ALLOWED_REDIRECT_URIS` limits which MCP clients can complete the OAuth flow (for example `https://claude.ai/api/mcp/auth_callback,http://localhost:*`).
+- **HTTPS only.** `MCP_BASE_URL` must be `https://` unless it points at localhost.
+- **Sovereign clouds.** `MCP_AUTH_AUTHORITY_HOST` sets the Entra authority (for example `login.microsoftonline.us`). Graph calls still target the global `graph.microsoft.com` endpoint.
+- **Confirmations on the 2026-07-28 protocol.** `confirm=True` uses form elicitation on older connections and an `InputRequiredResult` round trip on 2026-07-28 ones. The round-trip state is sealed and bound to the tool, its arguments, and the signed-in user, and a folder-wide delete is re-confirmed if the folder changed in between. Clients that don't declare elicitation get a structured error, and nothing is sent or deleted.
+
+Every variable is documented in [`.env.template`](.env.template) and [`docs/DEVOPS_GUIDE.md`](docs/DEVOPS_GUIDE.md#43-enterprise-authentication-hardening).
 
 ### Observability
 
