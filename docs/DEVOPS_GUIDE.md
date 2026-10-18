@@ -1,6 +1,6 @@
 # mcp-microsoft — DevOps & Operations Guide
 
-A complete setup and operations reference for `mcp-microsoft` **v0.8.0**, covering both
+A complete setup and operations reference for `mcp-microsoft` **v0.11.0**, covering both
 deployment modes: the single-user **stdio** server (Claude Desktop / MCPB / from source) and the
 multi-user **remote HTTP** server (`MCP_TRANSPORT=http`). It is written to be self-contained — you
 should not need to read the source to stand up either mode.
@@ -100,7 +100,7 @@ As of 0.8.0 the server runs in one of **two mutually exclusive modes**, chosen a
   - **MCPB bundle** — double-click the `.mcpb` file to install through Claude Desktop's Extension
     installer, **or** install from a shell:
     ```bash
-    npx @anthropic-ai/mcpb install mcp-microsoft-0.8.0.mcpb
+    npx @anthropic-ai/mcpb install mcp-microsoft.mcpb
     ```
     **Node.js is only needed for the `npx` route** — the double-click path needs nothing extra.
   - **From source** — clone the repo and run via `uv` (see [§5.2](#52-from-source)). Works with any
@@ -330,7 +330,7 @@ The server logs one warning at startup for each of these that is left at its wea
 
 ### 5.1 MCPB (Claude Desktop) — recommended
 
-Install the `.mcpb` bundle (double-click, or `npx @anthropic-ai/mcpb install mcp-microsoft-0.8.0.mcpb`).
+Install the `.mcpb` bundle (double-click, or `npx @anthropic-ai/mcpb install mcp-microsoft.mcpb`).
 The installer prompts for the App Registration values, which map to `user_config` fields in
 `manifest.json`:
 
@@ -516,7 +516,7 @@ image to GitHub Container Registry, so Kubernetes and remote deployments don't n
 anything:
 
 ```bash
-docker pull ghcr.io/guinacio/mcp-microsoft:latest    # or a pinned :0.10.0 / :0.10 tag
+docker pull ghcr.io/guinacio/mcp-microsoft:latest    # or a pinned :0.11.0 / :0.11 tag
 ```
 
 ```bash
@@ -997,5 +997,5 @@ omits `save_path` in http mode (content returned inline); `get_contact_photo` re
 
 ---
 
-*Guide for mcp-microsoft v0.8.0. For the Azure walkthrough with screenshots see
+*Guide for mcp-microsoft v0.11.0. For the Azure walkthrough with screenshots see
 [`docs/azure-setup.md`](azure-setup.md); for the condensed quickstarts see the [README](../README.md).*

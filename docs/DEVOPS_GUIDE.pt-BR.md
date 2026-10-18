@@ -1,6 +1,6 @@
 # mcp-microsoft — Guia de DevOps & Operações
 
-Uma referência completa de configuração e operação para o `mcp-microsoft` **v0.8.0**, cobrindo os
+Uma referência completa de configuração e operação para o `mcp-microsoft` **v0.11.0**, cobrindo os
 dois modos de implantação: o servidor de usuário único em **stdio** (Claude Desktop / MCPB / a
 partir do código-fonte) e o servidor **HTTP remoto** multiusuário (`MCP_TRANSPORT=http`). Ele foi
 escrito para ser autocontido — você não deveria precisar ler o código-fonte para colocar nenhum dos
@@ -105,7 +105,7 @@ escolhido na inicialização pela variável de ambiente `MCP_TRANSPORT`:
   - **Pacote MCPB** — dê duplo clique no arquivo `.mcpb` para instalar pelo instalador de extensões
     do Claude Desktop, **ou** instale via shell:
     ```bash
-    npx @anthropic-ai/mcpb install mcp-microsoft-0.8.0.mcpb
+    npx @anthropic-ai/mcpb install mcp-microsoft.mcpb
     ```
     **Node.js só é necessário para o caminho via `npx`** — o caminho de duplo clique não precisa de
     nada extra.
@@ -348,7 +348,7 @@ O servidor registra um aviso na inicialização para cada um desses itens deixad
 ### 5.1 MCPB (Claude Desktop) — recomendado
 
 Instale o pacote `.mcpb` (duplo clique, ou
-`npx @anthropic-ai/mcpb install mcp-microsoft-0.8.0.mcpb`). O instalador solicita os valores do
+`npx @anthropic-ai/mcpb install mcp-microsoft.mcpb`). O instalador solicita os valores do
 Registro de Aplicativo, que são mapeados para os campos `user_config` em `manifest.json`:
 
 | Prompt (`user_config`) | Variável de ambiente que define | Observações |
@@ -531,7 +531,7 @@ de autenticação intencionalmente **não** são embutidos na imagem — forneç
 remotos não precisam construir nada:
 
 ```bash
-docker pull ghcr.io/guinacio/mcp-microsoft:latest    # ou uma tag fixa :0.10.0 / :0.10
+docker pull ghcr.io/guinacio/mcp-microsoft:latest    # ou uma tag fixa :0.11.0 / :0.11
 ```
 
 ```bash
@@ -1006,6 +1006,6 @@ local).
 
 ---
 
-*Guia do mcp-microsoft v0.8.0. Para o passo a passo do Azure com capturas de tela, veja
+*Guia do mcp-microsoft v0.11.0. Para o passo a passo do Azure com capturas de tela, veja
 [`docs/azure-setup.md`](azure-setup.md); para os quickstarts condensados, veja o
 [README](../README.md).*
