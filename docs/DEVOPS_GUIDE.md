@@ -46,10 +46,10 @@ As of 0.8.0 the server runs in one of **two mutually exclusive modes**, chosen a
 | `MCP_TRANSPORT` | `stdio` | `http` |
 | Transport | stdio (local subprocess) | Streamable HTTP (MCP 2026-07-28 plus handshake-era versions back to 2024-11-05), served at `/mcp` |
 | Who runs it | Launched by your MCP client on your machine | A shared server you host behind a reverse proxy |
-| Identity | Named local **profiles**; interactive/device-code OAuth; encrypted disk token cache | Each user signs in with **their own** Entra account; per-request bearer token |
+| Identity | Named local **profiles**; interactive/device-code OAuth; encrypted disk token cache | Each user signs in with **their own** Microsoft account; per-request bearer token |
 | How Graph calls are authorized | MSAL public-client token for the active profile | Per-user **On-Behalf-Of (OBO)** token exchange from the caller's bearer token |
 | Azure app type | **Public** client (Mobile & desktop platform) | **Confidential** client (Web platform + secret) |
-| Accounts | Personal **and** work/school | Work/school **only**, single concrete tenant |
+| Accounts | Personal **and** work/school | One audience per server: a single work/school tenant, **or** personal accounts |
 | Tool count (all optional services on) | **95** | **87** (profile-management + local-disk tools omitted) |
 
 **Architecture in five lines:**
@@ -71,8 +71,9 @@ As of 0.8.0 the server runs in one of **two mutually exclusive modes**, chosen a
 - **stdio** — a single person on their own laptop, personal or work account, no server to operate.
   This is the default and the MCPB / Claude Desktop experience.
 - **http** — you want to offer Microsoft 365 tools to many users from one hosted service, each with
-  their own delegated identity and no local install. Requires a work/school tenant, a public HTTPS
-  endpoint, and a confidential Azure App Registration.
+  their own delegated identity and no local install. Requires a confidential Azure App Registration
+  and a public HTTPS endpoint (a loopback `http://localhost` URL is fine for a local test). One
+  server serves either one work/school tenant or personal Microsoft accounts.
 
 ---
 
@@ -144,7 +145,9 @@ familiarity.
 **Directory (tenant) ID**. Copy the GUID (format `8-4-4-4-12` hex, e.g.
 `9a8b7c6d-1234-5678-90ab-cdef01234567`).
 
-> **http mode requires the concrete tenant GUID.** Pseudo-tenants (`organizations`, `common`,
+> **http mode requires a concrete tenant GUID.** For personal Microsoft accounts (Outlook.com /
+> Live) that GUID is `9188040d-6c67-4c5b-b112-36a304b66dad`, the fixed tenant every personal account signs
+> in through. Pseudo-tenants (`organizations`, `common`,
 > `consumers`) and verified domains (`contoso.onmicrosoft.com`) are **rejected at startup**. The
 > reason: FastMCP's `AzureProvider` pins the accepted token issuer (`iss` claim) to a single literal
 > URL built from `MCP_AUTH_TENANT_ID`, and real Entra tokens always carry the *concrete* tenant GUID
@@ -206,15 +209,18 @@ depend on — create a separate one.
 > user.
 
 1. **App registrations** → **+ New registration**. Name e.g. `mcp-microsoft-remote`.
-2. **Supported account types:** work/school only (*this organizational directory only* or *any
-   organizational directory*). **Do not** pick a personal-account option — OBO and custom API scopes
-   are not reliably supported for consumer accounts.
+2. **Supported account types:** the audience this server serves. Work/school: *this organizational
+   directory only* or *any organizational directory*. Personal Microsoft accounts: *Personal
+   Microsoft accounts only* (or *any organizational directory and personal Microsoft accounts*),
+   with `MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad`. One server cannot serve both, because
+   the token issuer is pinned to that one tenant; run a second instance for the other audience.
 3. **Redirect URI:** platform **Web**, URI:
    ```
    {MCP_BASE_URL}/auth/callback
    ```
    e.g. `https://mcp.example.com/auth/callback`. `/auth/callback` is `AzureProvider`'s default
-   redirect path.
+   redirect path. For a local Docker test, `http://localhost:8000/auth/callback` with
+   `MCP_BASE_URL=http://localhost:8000` works (see [Local test with a personal account](#local-test-with-a-personal-account)).
 4. **Register.**
 5. **Expose an API:**
    - **Application ID URI** → **Add** → accept the default `api://{client_id}` → **Save**.
@@ -230,9 +236,38 @@ depend on — create a separate one.
    sets only for the feature flags you set — in http mode flags must be **explicit**, there is no
    auto-detect). `offline_access` is added automatically by `AzureProvider` — no need to request it.
 9. **Grant admin consent** for the tenant (**API permissions** → **Grant admin consent for
-   [tenant]**). Because this is a confidential, work/school-only registration, plan on tenant-wide
-   consent so new users do not each hit an individual prompt. `Sites.ReadWrite.All` in particular
-   will not work without it.
+   [tenant]**). For a work/school registration, plan on tenant-wide consent so new users do not each
+   hit an individual prompt. `Sites.ReadWrite.All` in particular will not work without it. Personal
+   accounts have no admin: each user consents on first sign-in, and Teams/SharePoint stay off.
+
+#### Local test with a personal account
+
+To try http mode on your own machine with an Outlook.com / Live account, register the app as above
+with *Personal Microsoft accounts only* and the redirect `http://localhost:8000/auth/callback`, then
+run the image with:
+
+```env
+MCP_BASE_URL=http://localhost:8000
+MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad
+MCP_AUTH_CLIENT_ID=<Application (client) ID>
+MCP_AUTH_CLIENT_SECRET=<client secret value>
+MCP_AUTH_JWT_SIGNING_KEY=<python -c "import secrets; print(secrets.token_hex(32))">
+MCP_ENABLE_TEAMS=false
+MCP_ENABLE_SHAREPOINT=false
+MCP_DEFAULT_TIMEZONE=America/Sao_Paulo
+```
+
+`MCP_DEFAULT_TIMEZONE` is optional; set it to your IANA timezone. Docker's `--env-file` does not
+strip trailing comments, so keep comments on their own lines.
+
+```bash
+docker run -d --name mcp-microsoft -p 8000:8000 --env-file .env ghcr.io/guinacio/mcp-microsoft:latest
+```
+
+Connect a client that runs on the same machine (Claude Code: `claude mcp add --transport http
+mcp-microsoft http://localhost:8000/mcp`, then `/mcp` → Authenticate). Hosted clients such as
+Claude Desktop's connectors call the server from Anthropic's infrastructure, which cannot reach
+`localhost`; they need the public HTTPS deployment.
 
 **Client-secret rotation:** the secret has a hard expiry — rotate before then. Create a new secret
 alongside the old one (both valid simultaneously), roll `MCP_AUTH_CLIENT_SECRET` to the new value
@@ -766,7 +801,7 @@ per-identity cardinality is unbounded and a known Prometheus anti-pattern; per-u
 | Item | What to do | Why |
 |---|---|---|
 | **TLS only** | Terminate TLS at a reverse proxy; set `MCP_BASE_URL` to the public HTTPS URL. | OAuth flows and every Graph call carry bearer tokens — never send them over plain HTTP. |
-| **Tenant GUID** | `MCP_AUTH_TENANT_ID` must be the concrete tenant GUID. | Pseudo-tenants/domains are rejected at startup; issuer pinning means only the GUID validates real tokens. |
+| **Tenant GUID** | `MCP_AUTH_TENANT_ID` must be the concrete tenant GUID (`9188040d-6c67-4c5b-b112-36a304b66dad` for personal accounts). | Pseudo-tenants/domains are rejected at startup; issuer pinning means only the GUID validates real tokens. |
 | **Secretless app credential** | Prefer `MCP_AUTH_CREDENTIAL_TYPE=certificate`, `managed_identity`, or `workload_identity` ([§4.3](#43-enterprise-authentication-hardening)). | No shared secret to leak or expire. |
 | **Stable signing key** | Set `MCP_AUTH_JWT_SIGNING_KEY`. | Otherwise rotating the client secret signs every user out. |
 | **Redirect allow-list** | Set `MCP_AUTH_ALLOWED_REDIRECT_URIS` to the MCP clients you support. | Stops unknown clients from completing the OAuth flow. |
@@ -808,10 +843,10 @@ Actual problem messages:
 - `MCP_AUTH_TENANT_ID is required in http mode`
 - `MCP_HTTP_PORT must be between 1 and 65535 (got ...)`
 - The tenant-GUID rejection (verbatim):
-  > `MCP_AUTH_TENANT_ID must be your directory's tenant GUID (8-4-4-4-12 hexadecimal), not '...'. Copy the Directory (tenant) ID from Azure Portal -> Microsoft Entra ID -> Overview. Pseudo-tenants ('organizations', 'common', 'consumers') and verified domains ('contoso.onmicrosoft.com') are rejected because fastmcp's AzureProvider validates the token 'iss' claim against a single literal issuer URL built from this value, and real Entra tokens always carry the concrete tenant GUID -- so a pseudo-tenant or domain never matches and every request fails authentication.`
+  > `MCP_AUTH_TENANT_ID must be your directory's tenant GUID (8-4-4-4-12 hexadecimal), not '...'. Copy the Directory (tenant) ID from Azure Portal -> Microsoft Entra ID -> Overview, or use 9188040d-6c67-4c5b-b112-36a304b66dad for personal Microsoft accounts (Outlook.com / Live). Pseudo-tenants ('organizations', 'common', 'consumers') and verified domains ('contoso.onmicrosoft.com') are rejected because fastmcp's AzureProvider validates the token 'iss' claim against a single literal issuer URL built from this value, and real Entra tokens always carry the concrete tenant GUID -- so a pseudo-tenant or domain never matches and every request fails authentication.`
 
 **Fix:** supply the missing value(s); for the last one, put the concrete tenant GUID in
-`MCP_AUTH_TENANT_ID`.
+`MCP_AUTH_TENANT_ID` (`9188040d-6c67-4c5b-b112-36a304b66dad` instead of `consumers` for personal accounts).
 
 ### 9.2 `MCP_TRANSPORT` typo
 
@@ -879,8 +914,10 @@ mode. The observability `/stats` and `/dashboard` routes surface live in-process
 
 ## 10. Limits & FAQ
 
-- **Personal accounts are stdio-only.** OBO and custom API scopes are not reliably supported for
-  consumer Microsoft accounts, so http mode is work/school-only. Use stdio for Outlook.com / Live.
+- **Personal accounts work in http mode, one audience per server.** Set
+  `MCP_AUTH_TENANT_ID=9188040d-6c67-4c5b-b112-36a304b66dad` and register the app for personal accounts.
+  A server pinned to that tenant accepts only personal accounts, and one pinned to your directory
+  accepts only its work/school users; run two instances to serve both.
 - **Multi-tenant is not supported (http).** The server targets one concrete tenant GUID; the issuer
   is pinned to a literal URL built from it. Multi-tenant deployments are future work (they need
   issuer-validation skipping plus per-tenant OBO authority).

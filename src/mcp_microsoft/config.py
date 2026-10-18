@@ -20,6 +20,11 @@ _TENANT_GUID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The fixed tenant every personal Microsoft account (Outlook.com / Live) signs
+# in through. Tokens for those accounts carry it as tid and in iss, so it is
+# the concrete GUID http mode needs for personal accounts.
+CONSUMER_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad"
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -239,7 +244,9 @@ def validate_http_config(config: AppConfig) -> list[str]:
             "MCP_AUTH_TENANT_ID must be your directory's tenant GUID "
             "(8-4-4-4-12 hexadecimal), not "
             f"{config.auth_tenant_id!r}. Copy the Directory (tenant) ID from "
-            "Azure Portal -> Microsoft Entra ID -> Overview. Pseudo-tenants "
+            "Azure Portal -> Microsoft Entra ID -> Overview, or use "
+            f"{CONSUMER_TENANT_ID} for personal Microsoft accounts "
+            "(Outlook.com / Live). Pseudo-tenants "
             "('organizations', 'common', 'consumers') and verified domains "
             "('contoso.onmicrosoft.com') are rejected because fastmcp's "
             "AzureProvider validates the token 'iss' claim against a single "

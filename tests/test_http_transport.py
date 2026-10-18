@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 from fastmcp.exceptions import ToolError
 
-from mcp_microsoft.config import AppConfig, reset_app_config, validate_http_config
+from mcp_microsoft.config import (
+    CONSUMER_TENANT_ID,
+    AppConfig,
+    reset_app_config,
+    validate_http_config,
+)
 from mcp_microsoft.runtime import reset_runtime_state
 from mcp_microsoft.server import build_graph_authorize_scopes
 
@@ -252,6 +257,7 @@ def test_validate_http_config_rejects_non_guid_tenant(bad: str) -> None:
     msg = tenant_problems[0]
     assert "tenant GUID" in msg
     assert "Directory (tenant) ID" in msg
+    assert CONSUMER_TENANT_ID in msg
     assert "Microsoft Entra ID" in msg
     # Explains WHY (fastmcp's literal issuer pinning).
     assert "iss" in msg and "issuer" in msg
