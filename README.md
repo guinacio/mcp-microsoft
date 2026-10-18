@@ -124,7 +124,7 @@ The server ships as an MCPB bundle (`mcp-microsoft.mcpb`) for zero-friction inst
 ### Option A: Claude Desktop Extension (MCPB) — Recommended
 
 ```bash
-npx @anthropic-ai/mcpb install mcp-microsoft-0.8.0.mcpb
+npx @anthropic-ai/mcpb install mcp-microsoft.mcpb
 ```
 
 The installer prompts for your Azure App Registration details (see [Azure Setup](#azure-setup)):
@@ -210,7 +210,7 @@ Or run the image directly (e.g. for Kubernetes manifests, point your Deployment 
 docker run --rm -p 8000:8000 --env-file .env ghcr.io/guinacio/mcp-microsoft:latest
 ```
 
-Pin a version tag (`:0.10.0`) for production; `latest` tracks the newest release. To build locally instead, uncomment `build: .` in `docker-compose.yml` or `docker build -t mcp-microsoft .`.
+Pin a version tag (`:0.11.0`) for production; `latest` tracks the newest release. To build locally instead, uncomment `build: .` in `docker-compose.yml` or `docker build -t mcp-microsoft .`.
 
 Release images (after v0.10.0) carry a signed SLSA build-provenance attestation, verifiable with the GitHub CLI:
 

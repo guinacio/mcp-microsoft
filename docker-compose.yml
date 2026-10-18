@@ -20,7 +20,7 @@
 services:
   mcp-microsoft:
     # build: .   # uncomment to build from source instead of pulling from GHCR
-    image: ghcr.io/guinacio/mcp-microsoft:0.10.0
+    image: ghcr.io/guinacio/mcp-microsoft:0.11.0
     container_name: mcp-microsoft
     env_file:
       # All secrets and deployment-specific values (MCP_BASE_URL,
@@ -64,7 +64,7 @@ services:
   # it its own MCP_STATS_TOKEN if observability is wanted. Uncomment to use.
   #
   # mcp-microsoft-nodelete:
-  #   image: ghcr.io/guinacio/mcp-microsoft:0.10.0
+  #   image: ghcr.io/guinacio/mcp-microsoft:0.11.0
   #   container_name: mcp-microsoft-nodelete
   #   env_file:
   #     - .env
