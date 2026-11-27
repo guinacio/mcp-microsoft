@@ -54,7 +54,7 @@ As of 0.8.0 the server runs in one of **two mutually exclusive modes**, chosen a
 
 **Architecture in five lines:**
 
-1. Built on **FastMCP** (`fastmcp[azure]>=3.4.4`), MSAL, and async `httpx`.
+1. Built on **FastMCP** (`fastmcp[azure,apps]>=4.1.8,<5`), MSAL, and async `httpx`.
 2. In **stdio** mode a `ProfileManager` holds named profiles; each acquires a Graph token via MSAL
    (interactive browser, falling back to device code) and caches it, OS-encrypted, on local disk.
 3. In **http** mode FastMCP's **`AzureProvider`** implements the OAuth-proxy pattern Entra requires
