@@ -55,7 +55,7 @@ escolhido na inicialização pela variável de ambiente `MCP_TRANSPORT`:
 
 **Arquitetura em cinco linhas:**
 
-1. Construído sobre **FastMCP** (`fastmcp[azure]>=3.4.4`), MSAL e `httpx` assíncrono.
+1. Construído sobre **FastMCP** (`fastmcp[azure,apps]>=4.1.8,<5`), MSAL e `httpx` assíncrono.
 2. No modo **stdio**, um `ProfileManager` mantém perfis nomeados; cada um obtém um token do Graph via
    MSAL (navegador interativo, com fallback para device code) e o armazena em cache, criptografado
    pelo sistema operacional, em disco local.
